@@ -1,0 +1,17 @@
+[package]
+name = "zylith_protocol"
+version = "0.1.0"
+edition = "2024_07"
+
+[dependencies]
+starknet = ">=2.11.4"
+
+[dev-dependencies]
+snforge_std = "0.59.0"
+
+[lib]
+sierra = true
+
+[[target.starknet-contract]]
+sierra = true
+casm = true
