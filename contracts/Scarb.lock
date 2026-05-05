@@ -21,4 +21,9 @@ name = "zylith_protocol"
 version = "0.1.0"
 dependencies = [
  "snforge_std",
+ "zylith_settlement_statement",
 ]
+
+[[package]]
+name = "zylith_settlement_statement"
+version = "0.1.0"

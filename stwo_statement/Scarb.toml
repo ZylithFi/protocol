@@ -3,6 +3,9 @@ name = "zylith_settlement_statement"
 version = "0.1.0"
 edition = "2024_07"
 
+[lib]
+sierra = true
+
 [[target.executable]]
 
 [cairo]

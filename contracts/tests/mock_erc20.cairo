@@ -12,8 +12,8 @@ pub mod MockERC20 {
     use core::integer::u256;
     use core::num::traits::Zero;
     use core::poseidon::hades_permutation;
-    use starknet::{ContractAddress, get_caller_address};
     use starknet::storage::{Map, StorageMapReadAccess, StorageMapWriteAccess};
+    use starknet::{ContractAddress, get_caller_address};
     use zylith_protocol::erc20::IERC20;
 
     #[storage]
@@ -48,7 +48,9 @@ pub mod MockERC20 {
             self.allowances.write(allowance_key(owner, spender), value);
         }
 
-        fn allowance(self: @ContractState, owner: ContractAddress, spender: ContractAddress) -> u256 {
+        fn allowance(
+            self: @ContractState, owner: ContractAddress, spender: ContractAddress,
+        ) -> u256 {
             as_u256(self.allowances.read(allowance_key(owner, spender)))
         }
 
@@ -77,10 +79,7 @@ pub mod MockERC20 {
     }
 
     fn move_balance(
-        ref self: ContractState,
-        sender: ContractAddress,
-        recipient: ContractAddress,
-        amount: u256,
+        ref self: ContractState, sender: ContractAddress, recipient: ContractAddress, amount: u256,
     ) {
         let value = amount.low;
         assert(amount.high == 0, 'AMOUNT_TOO_LARGE');

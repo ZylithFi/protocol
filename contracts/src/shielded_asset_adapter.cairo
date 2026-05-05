@@ -2,6 +2,9 @@ use zylith_protocol::types::{DepositRecord, WithdrawalRecord};
 
 #[starknet::interface]
 pub trait IShieldedAssetAdapter<TContractState> {
+    fn set_privacy_deposit_bridge(ref self: TContractState, bridge: starknet::ContractAddress);
+    fn set_auction_verifier(ref self: TContractState, verifier: starknet::ContractAddress);
+    fn set_fee_ledger(ref self: TContractState, fee_ledger: starknet::ContractAddress);
     fn register_supported_asset(
         ref self: TContractState, asset_id: felt252, token_address: starknet::ContractAddress,
     );
@@ -12,7 +15,7 @@ pub trait IShieldedAssetAdapter<TContractState> {
         amount: u128,
         deposit_nonce: u64,
         note_commitment: felt252,
-        withdraw_authority: starknet::ContractAddress,
+        withdraw_authority: felt252,
     );
     fn settle_notes(
         ref self: TContractState,
@@ -20,23 +23,29 @@ pub trait IShieldedAssetAdapter<TContractState> {
         output_note_commitments: Span<felt252>,
         output_note_asset_ids: Span<felt252>,
         output_note_amounts: Span<u128>,
-        output_note_withdraw_authorities: Span<starknet::ContractAddress>,
+        output_note_withdraw_authorities: Span<felt252>,
+        fee_asset_ids: Span<felt252>,
+        fee_amounts: Span<u128>,
     );
     fn withdraw_to_l2(
         ref self: TContractState,
         note_commitment: felt252,
+        withdraw_authorization_r: felt252,
+        withdraw_authorization_s: felt252,
         recipient: starknet::ContractAddress,
     ) -> (felt252, u128);
+    fn withdraw_fee(
+        ref self: TContractState,
+        asset_id: felt252,
+        amount: u128,
+        recipient: starknet::ContractAddress,
+    );
     fn note_is_live(self: @TContractState, note_commitment: felt252) -> bool;
     fn note_asset(self: @TContractState, note_commitment: felt252) -> felt252;
     fn note_amount(self: @TContractState, note_commitment: felt252) -> u128;
-    fn note_withdraw_authority(
-        self: @TContractState, note_commitment: felt252,
-    ) -> starknet::ContractAddress;
+    fn note_withdraw_authority(self: @TContractState, note_commitment: felt252) -> felt252;
     fn escrowed_balance(self: @TContractState, asset_id: felt252) -> u128;
-    fn asset_token(
-        self: @TContractState, asset_id: felt252,
-    ) -> starknet::ContractAddress;
+    fn asset_token(self: @TContractState, asset_id: felt252) -> starknet::ContractAddress;
     fn is_asset_supported(self: @TContractState, asset_id: felt252) -> bool;
     fn withdrawal_recipient(
         self: @TContractState, note_commitment: felt252,
@@ -45,29 +54,37 @@ pub trait IShieldedAssetAdapter<TContractState> {
     fn deposit_record(self: @TContractState, deposit_id: u64) -> DepositRecord;
     fn withdrawal_count(self: @TContractState) -> u64;
     fn withdrawal_record(self: @TContractState, withdrawal_id: u64) -> WithdrawalRecord;
+    fn privacy_deposit_bridge_address(self: @TContractState) -> starknet::ContractAddress;
+    fn auction_verifier_address(self: @TContractState) -> starknet::ContractAddress;
+    fn fee_ledger_address(self: @TContractState) -> starknet::ContractAddress;
 }
 
 #[starknet::contract]
 pub mod ShieldedAssetAdapter {
+    use core::ecdsa::check_ecdsa_signature;
     use core::integer::u256;
     use core::num::traits::Zero;
-    use starknet::{ContractAddress, get_caller_address, get_contract_address};
+    use core::poseidon::hades_permutation;
     use starknet::storage::{
         Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
         StoragePointerWriteAccess,
     };
+    use starknet::{ContractAddress, get_caller_address, get_contract_address};
     use zylith_protocol::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
     use zylith_protocol::types::{DepositRecord, WithdrawalRecord};
 
     #[storage]
     struct Storage {
         admin: ContractAddress,
+        privacy_deposit_bridge: ContractAddress,
+        auction_verifier: ContractAddress,
+        fee_ledger: ContractAddress,
         asset_tokens: Map<felt252, ContractAddress>,
         note_live: Map<felt252, bool>,
         note_spent: Map<felt252, bool>,
         note_asset_ids: Map<felt252, felt252>,
         note_amounts: Map<felt252, u128>,
-        note_withdraw_authorities: Map<felt252, ContractAddress>,
+        note_withdraw_authorities: Map<felt252, felt252>,
         escrowed_balances: Map<felt252, u128>,
         withdrawal_recipients: Map<felt252, ContractAddress>,
         deposit_count: u64,
@@ -84,19 +101,43 @@ pub mod ShieldedAssetAdapter {
 
     #[constructor]
     fn constructor(ref self: ContractState, admin: ContractAddress) {
+        assert(!admin.is_zero(), 'BAD_ADMIN');
         self.admin.write(admin);
     }
 
     #[abi(embed_v0)]
     impl ShieldedAssetAdapterImpl of super::IShieldedAssetAdapter<ContractState> {
+        fn set_privacy_deposit_bridge(ref self: ContractState, bridge: ContractAddress) {
+            assert_admin(@self);
+            assert(!bridge.is_zero(), 'BAD_PRIVACY_BRIDGE');
+            self.privacy_deposit_bridge.write(bridge);
+        }
+
+        fn set_auction_verifier(ref self: ContractState, verifier: ContractAddress) {
+            assert_admin(@self);
+            assert(!verifier.is_zero(), 'BAD_AUCTION_VERIFIER');
+            self.auction_verifier.write(verifier);
+        }
+
+        fn set_fee_ledger(ref self: ContractState, fee_ledger: ContractAddress) {
+            assert_admin(@self);
+            assert(!fee_ledger.is_zero(), 'BAD_FEE_LEDGER');
+            self.fee_ledger.write(fee_ledger);
+        }
+
         fn register_supported_asset(
             ref self: ContractState, asset_id: felt252, token_address: ContractAddress,
         ) {
-            let caller = get_caller_address();
-            assert(caller == self.admin.read(), 'UNAUTHORIZED');
+            assert_admin(@self);
+            assert(asset_id != 0, 'BAD_ASSET');
             assert(!token_address.is_zero(), 'BAD_TOKEN');
 
-            self.asset_tokens.write(asset_id, token_address);
+            let existing = self.asset_tokens.read(asset_id);
+            if existing.is_zero() {
+                self.asset_tokens.write(asset_id, token_address);
+            } else {
+                assert(existing == token_address, 'ASSET_IMMUTABLE');
+            }
         }
 
         fn register_erc20_deposit(
@@ -106,11 +147,14 @@ pub mod ShieldedAssetAdapter {
             amount: u128,
             deposit_nonce: u64,
             note_commitment: felt252,
-            withdraw_authority: ContractAddress,
+            withdraw_authority: felt252,
         ) {
+            assert_deposit_registrar(@self);
+            assert(amount > 0, 'BAD_AMOUNT');
+            assert(note_commitment != 0, 'BAD_COMMITMENT');
             let token_address = self.asset_tokens.read(asset_id);
             assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
-            assert(!withdraw_authority.is_zero(), 'BAD_AUTHORITY');
+            assert(withdraw_authority != 0, 'BAD_AUTHORITY');
 
             let exists = self.note_live.read(note_commitment);
             assert(exists == false, 'NOTE_EXISTS');
@@ -139,12 +183,16 @@ pub mod ShieldedAssetAdapter {
             output_note_commitments: Span<felt252>,
             output_note_asset_ids: Span<felt252>,
             output_note_amounts: Span<u128>,
-            output_note_withdraw_authorities: Span<ContractAddress>,
+            output_note_withdraw_authorities: Span<felt252>,
+            fee_asset_ids: Span<felt252>,
+            fee_amounts: Span<u128>,
         ) {
+            assert_auction_verifier(@self);
             let output_len = output_note_commitments.len();
             assert(output_note_asset_ids.len() == output_len, 'BAD_OUTPUT_LENGTH');
             assert(output_note_amounts.len() == output_len, 'BAD_OUTPUT_LENGTH');
             assert(output_note_withdraw_authorities.len() == output_len, 'BAD_OUTPUT_LENGTH');
+            assert(fee_asset_ids.len() == fee_amounts.len(), 'BAD_FEE_LENGTH');
 
             let mut input_index = 0;
             let input_len = consumed_note_commitments.len();
@@ -160,7 +208,26 @@ pub mod ShieldedAssetAdapter {
                 assert(spent == false, 'UNKNOWN_INPUT_NOTE');
                 self.note_spent.write(note_commitment, true);
                 input_index += 1;
-            };
+            }
+
+            input_index = 0;
+            loop {
+                if input_index == input_len {
+                    break;
+                }
+                let note_commitment = *consumed_note_commitments.at(input_index);
+                let asset_id = self.note_asset_ids.read(note_commitment);
+                assert_asset_conserved(
+                    @self,
+                    asset_id,
+                    consumed_note_commitments,
+                    output_note_asset_ids,
+                    output_note_amounts,
+                    fee_asset_ids,
+                    fee_amounts,
+                );
+                input_index += 1;
+            }
 
             let mut output_index = 0;
             loop {
@@ -177,28 +244,78 @@ pub mod ShieldedAssetAdapter {
                 assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
 
                 let amount = *output_note_amounts.at(output_index);
+                assert(amount > 0, 'BAD_OUTPUT_AMOUNT');
                 let withdraw_authority = *output_note_withdraw_authorities.at(output_index);
-                assert(!withdraw_authority.is_zero(), 'BAD_AUTHORITY');
+                assert(withdraw_authority != 0, 'BAD_AUTHORITY');
                 self.note_live.write(output_note_commitment, true);
                 self.note_asset_ids.write(output_note_commitment, asset_id);
                 self.note_amounts.write(output_note_commitment, amount);
                 self.note_withdraw_authorities.write(output_note_commitment, withdraw_authority);
                 output_index += 1;
+            }
+
+            output_index = 0;
+            loop {
+                if output_index == output_len {
+                    break;
+                }
+                let asset_id = *output_note_asset_ids.at(output_index);
+                assert_asset_conserved(
+                    @self,
+                    asset_id,
+                    consumed_note_commitments,
+                    output_note_asset_ids,
+                    output_note_amounts,
+                    fee_asset_ids,
+                    fee_amounts,
+                );
+                output_index += 1;
+            }
+
+            let mut fee_index = 0;
+            loop {
+                if fee_index == fee_asset_ids.len() {
+                    break;
+                }
+                let asset_id = *fee_asset_ids.at(fee_index);
+                assert_asset_conserved(
+                    @self,
+                    asset_id,
+                    consumed_note_commitments,
+                    output_note_asset_ids,
+                    output_note_amounts,
+                    fee_asset_ids,
+                    fee_amounts,
+                );
+                fee_index += 1;
             };
         }
 
         fn withdraw_to_l2(
-            ref self: ContractState, note_commitment: felt252, recipient: ContractAddress,
+            ref self: ContractState,
+            note_commitment: felt252,
+            withdraw_authorization_r: felt252,
+            withdraw_authorization_s: felt252,
+            recipient: ContractAddress,
         ) -> (felt252, u128) {
-            let caller = get_caller_address();
             let registered = self.note_live.read(note_commitment);
             let spent = self.note_spent.read(note_commitment);
             assert(registered == true, 'UNKNOWN_WITHDRAW_NOTE');
             assert(spent == false, 'UNKNOWN_WITHDRAW_NOTE');
             assert(!recipient.is_zero(), 'BAD_RECIPIENT');
             let withdraw_authority = self.note_withdraw_authorities.read(note_commitment);
-            assert(!withdraw_authority.is_zero(), 'UNKNOWN_AUTHORITY');
-            assert(caller == withdraw_authority, 'UNAUTHORIZED_WITHDRAW');
+            assert(withdraw_authority != 0, 'UNKNOWN_AUTHORITY');
+            assert(withdraw_authorization_r != 0, 'BAD_WITHDRAW_SIG');
+            assert(withdraw_authorization_s != 0, 'BAD_WITHDRAW_SIG');
+            assert(
+                check_ecdsa_signature(
+                    withdrawal_message_hash(note_commitment, recipient),
+                    withdraw_authority,
+                    withdraw_authorization_r,
+                    withdraw_authorization_s,
+                ),
+                'UNAUTHORIZED_WITHDRAW',
+            );
 
             let asset_id = self.note_asset_ids.read(note_commitment);
             let token_address = self.asset_tokens.read(asset_id);
@@ -207,9 +324,6 @@ pub mod ShieldedAssetAdapter {
             let amount = self.note_amounts.read(note_commitment);
             let current_balance = self.escrowed_balances.read(asset_id);
             assert(current_balance >= amount, 'INSUFFICIENT_ESCROW');
-
-            let token = IERC20Dispatcher { contract_address: token_address };
-            token.transfer(recipient, as_u256(amount));
 
             self.note_spent.write(note_commitment, true);
             self.withdrawal_recipients.write(note_commitment, recipient);
@@ -222,7 +336,27 @@ pub mod ShieldedAssetAdapter {
             self.withdrawal_recipients_by_id.write(withdrawal_id, recipient);
             self.withdrawal_count.write(withdrawal_id + 1);
 
+            let token = IERC20Dispatcher { contract_address: token_address };
+            token.transfer(recipient, as_u256(amount));
+
             (asset_id, amount)
+        }
+
+        fn withdraw_fee(
+            ref self: ContractState, asset_id: felt252, amount: u128, recipient: ContractAddress,
+        ) {
+            assert_fee_ledger(@self);
+            assert(asset_id != 0, 'BAD_ASSET');
+            assert(amount > 0, 'BAD_AMOUNT');
+            assert(!recipient.is_zero(), 'BAD_RECIPIENT');
+            let token_address = self.asset_tokens.read(asset_id);
+            assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
+            let current_balance = self.escrowed_balances.read(asset_id);
+            assert(current_balance >= amount, 'INSUFFICIENT_ESCROW');
+            self.escrowed_balances.write(asset_id, current_balance - amount);
+
+            let token = IERC20Dispatcher { contract_address: token_address };
+            token.transfer(recipient, as_u256(amount));
         }
 
         fn note_is_live(self: @ContractState, note_commitment: felt252) -> bool {
@@ -237,9 +371,7 @@ pub mod ShieldedAssetAdapter {
             self.note_amounts.read(note_commitment)
         }
 
-        fn note_withdraw_authority(
-            self: @ContractState, note_commitment: felt252,
-        ) -> ContractAddress {
+        fn note_withdraw_authority(self: @ContractState, note_commitment: felt252) -> felt252 {
             self.note_withdraw_authorities.read(note_commitment)
         }
 
@@ -292,9 +424,130 @@ pub mod ShieldedAssetAdapter {
                 note_commitment: self.withdrawal_note_commitments.read(withdrawal_id),
             }
         }
+
+        fn privacy_deposit_bridge_address(self: @ContractState) -> ContractAddress {
+            self.privacy_deposit_bridge.read()
+        }
+
+        fn auction_verifier_address(self: @ContractState) -> ContractAddress {
+            self.auction_verifier.read()
+        }
+
+        fn fee_ledger_address(self: @ContractState) -> ContractAddress {
+            self.fee_ledger.read()
+        }
     }
 
     fn as_u256(amount: u128) -> u256 {
         u256 { low: amount, high: 0 }
+    }
+
+    fn poseidon_hash2(x: felt252, y: felt252) -> felt252 {
+        let (result, _, _) = hades_permutation(x, y, 2);
+        result
+    }
+
+    fn withdrawal_message_hash(note_commitment: felt252, recipient: ContractAddress) -> felt252 {
+        let tx_info = starknet::get_tx_info().unbox();
+        poseidon_hash2(
+            poseidon_hash2(
+                poseidon_hash2(
+                    poseidon_hash2(
+                        0x008c9bee4df79ca43188c02c21699eee1b86520e8bbe0291c437af32d37ff0e4,
+                        tx_info.chain_id,
+                    ),
+                    get_contract_address().into(),
+                ),
+                note_commitment,
+            ),
+            recipient.into(),
+        )
+    }
+
+    fn assert_asset_conserved(
+        self: @ContractState,
+        asset_id: felt252,
+        consumed_note_commitments: Span<felt252>,
+        output_note_asset_ids: Span<felt252>,
+        output_note_amounts: Span<u128>,
+        fee_asset_ids: Span<felt252>,
+        fee_amounts: Span<u128>,
+    ) {
+        let consumed_amount = sum_consumed_note_amounts_for_asset(
+            self, consumed_note_commitments, asset_id,
+        );
+        let output_amount = sum_output_amounts_for_asset(
+            output_note_asset_ids, output_note_amounts, asset_id,
+        );
+        let fee_amount = sum_fee_amounts_for_asset(fee_asset_ids, fee_amounts, asset_id);
+        assert(consumed_amount == output_amount + fee_amount, 'ASSET_IMBALANCE');
+    }
+
+    fn sum_consumed_note_amounts_for_asset(
+        self: @ContractState, consumed_note_commitments: Span<felt252>, asset_id: felt252,
+    ) -> u128 {
+        let mut total = 0;
+        let mut index = 0;
+        loop {
+            if index == consumed_note_commitments.len() {
+                break;
+            }
+            let note_commitment = *consumed_note_commitments.at(index);
+            if self.note_asset_ids.read(note_commitment) == asset_id {
+                total += self.note_amounts.read(note_commitment);
+            }
+            index += 1;
+        }
+        total
+    }
+
+    fn sum_output_amounts_for_asset(
+        output_note_asset_ids: Span<felt252>, output_note_amounts: Span<u128>, asset_id: felt252,
+    ) -> u128 {
+        let mut total = 0;
+        let mut index = 0;
+        loop {
+            if index == output_note_asset_ids.len() {
+                break;
+            }
+            if *output_note_asset_ids.at(index) == asset_id {
+                total += *output_note_amounts.at(index);
+            }
+            index += 1;
+        }
+        total
+    }
+
+    fn sum_fee_amounts_for_asset(
+        fee_asset_ids: Span<felt252>, fee_amounts: Span<u128>, asset_id: felt252,
+    ) -> u128 {
+        let mut total = 0;
+        let mut index = 0;
+        loop {
+            if index == fee_asset_ids.len() {
+                break;
+            }
+            if *fee_asset_ids.at(index) == asset_id {
+                total += *fee_amounts.at(index);
+            }
+            index += 1;
+        }
+        total
+    }
+
+    fn assert_admin(self: @ContractState) {
+        assert(get_caller_address() == self.admin.read(), 'UNAUTHORIZED');
+    }
+
+    fn assert_deposit_registrar(self: @ContractState) {
+        assert(get_caller_address() == self.privacy_deposit_bridge.read(), 'UNAUTHORIZED');
+    }
+
+    fn assert_auction_verifier(self: @ContractState) {
+        assert(get_caller_address() == self.auction_verifier.read(), 'UNAUTHORIZED');
+    }
+
+    fn assert_fee_ledger(self: @ContractState) {
+        assert(get_caller_address() == self.fee_ledger.read(), 'UNAUTHORIZED');
     }
 }

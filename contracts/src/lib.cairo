@@ -1,10 +1,8 @@
+pub mod auction_verifier;
 pub mod batch_registry;
 pub mod commitment_registry;
-pub mod deposit_router;
 pub mod erc20;
 pub mod fee_ledger;
-pub mod mock_erc20;
-pub mod proof_friendly_account;
-pub mod settlement_verifier;
+pub mod privacy_deposit_bridge;
 pub mod shielded_asset_adapter;
 pub mod types;

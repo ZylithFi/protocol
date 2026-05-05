@@ -15,6 +15,8 @@ pub struct BatchView {
     pub close_time_unix_ms: u64,
     pub status: BatchStatus,
     pub order_count: u64,
+    pub order_commitment_root: felt252,
+    pub encrypted_order_set_commitment: felt252,
     pub output_bundle_ref: felt252,
     pub transcript_commitment: felt252,
     pub clearing_price: u128,
