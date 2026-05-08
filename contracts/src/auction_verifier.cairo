@@ -1,5 +1,4 @@
 use starknet::ContractAddress;
-use zylith_protocol::types::SettlementRecord;
 
 #[derive(Drop, Serde, Debug, Copy)]
 pub struct ProofFacts {
@@ -16,10 +15,39 @@ pub struct ProofFacts {
 #[starknet::interface]
 pub trait IAuctionVerifier<TContractState> {
     fn set_authorized_settlement_account(ref self: TContractState, account: ContractAddress);
+    fn set_proof_program(
+        ref self: TContractState, proof_program: ContractAddress, virtual_program_hash: felt252,
+    );
     fn set_proof_validity_blocks(ref self: TContractState, proof_validity_blocks: u64);
-    fn compile_auction_proof(
-        ref self: TContractState, serialized_private_auction_witness: Span<felt252>,
-    ) -> felt252;
+    fn set_shielded_asset_adapter(ref self: TContractState, adapter: ContractAddress);
+    fn set_deposit_note_root_registrar(ref self: TContractState, registrar: ContractAddress);
+    fn set_output_claim_delay_seconds(ref self: TContractState, delay_seconds: u64);
+    fn set_split_auction_proof_required(ref self: TContractState, required: bool);
+    fn cancel_renewal_parent_marker(
+        ref self: TContractState,
+        cancel_marker: felt252,
+        cancel_authority: felt252,
+        sparse_key_low: u128,
+        sparse_key_high: u128,
+        merkle_path: Span<felt252>,
+        merkle_directions: Span<felt252>,
+        signature_r: felt252,
+        signature_s: felt252,
+    );
+    fn activate_deposit_note_root(ref self: TContractState, note_commitment: felt252);
+    fn record_admission_root_with_proof_facts(
+        ref self: TContractState,
+        batch_id: felt252,
+        order_commitment_root: felt252,
+        admission_root: felt252,
+    );
+    fn record_auction_result_with_proof_facts(
+        ref self: TContractState,
+        batch_id: felt252,
+        order_commitment_root: felt252,
+        admission_root: felt252,
+        transcript_commitment: felt252,
+    );
     fn submit_settlement_with_proof_facts(
         ref self: TContractState,
         batch_id: felt252,
@@ -28,107 +56,137 @@ pub trait IAuctionVerifier<TContractState> {
         transcript_commitment: felt252,
         proof_artifact_commitment: felt252,
         clearing_price: u128,
-        matched_order_count: u64,
         output_bundle_ref: felt252,
-        consumed_note_commitments: Span<felt252>,
-        consumed_nullifiers: Span<felt252>,
-        renewal_parent_order_commitments: Span<felt252>,
-        renewal_child_nullifiers: Span<felt252>,
-        output_note_commitments: Span<felt252>,
-        output_note_asset_ids: Span<felt252>,
-        output_note_amounts: Span<u128>,
-        output_note_withdraw_authorities: Span<felt252>,
-        fee_asset_ids: Span<felt252>,
-        fee_recipients: Span<felt252>,
-        fee_amounts: Span<u128>,
+        prior_note_root: felt252,
+        prior_nullifier_root: felt252,
+        prior_renewal_root: felt252,
+        prior_fee_root: felt252,
+        consumed_note_root: felt252,
+        consumed_nullifier_root: felt252,
+        renewal_child_root: felt252,
+        output_note_root: felt252,
+        fee_root: felt252,
+        new_note_root: felt252,
+        new_nullifier_root: felt252,
+        new_renewal_root: felt252,
+        new_fee_root: felt252,
     );
+    fn submit_aggregate_settlements_with_proof_facts(
+        ref self: TContractState, settlement_inputs: Span<felt252>,
+    );
+    fn withdraw_settlement_output_to_l2(
+        ref self: TContractState,
+        batch_id: felt252,
+        note_commitment: felt252,
+        asset_id: felt252,
+        amount: u128,
+        withdraw_authority: felt252,
+        merkle_path: Span<felt252>,
+        merkle_directions: Span<felt252>,
+        withdraw_authorization_r: felt252,
+        withdraw_authorization_s: felt252,
+        recipient: ContractAddress,
+    ) -> (felt252, u128);
     fn is_batch_settled(self: @TContractState, batch_id: felt252) -> bool;
-    fn settlement_record(self: @TContractState, batch_id: felt252) -> SettlementRecord;
+    fn verified_admission_root(self: @TContractState, batch_id: felt252) -> felt252;
+    fn verified_auction_transcript(self: @TContractState, batch_id: felt252) -> felt252;
+    fn current_settlement_roots(self: @TContractState) -> (felt252, felt252, felt252, felt252);
+    fn note_root_transition_count(self: @TContractState) -> u64;
+    fn note_root_transition(
+        self: @TContractState, transition_id: u64,
+    ) -> (felt252, felt252, felt252, felt252);
     fn settlement_proof_message_hash(
         self: @TContractState, transcript_commitment: felt252,
     ) -> felt252;
-    fn commitment_registry_address(self: @TContractState) -> ContractAddress;
-    fn batch_registry_address(self: @TContractState) -> ContractAddress;
-    fn fee_ledger_address(self: @TContractState) -> ContractAddress;
-    fn shielded_asset_adapter_address(self: @TContractState) -> ContractAddress;
-    fn authorized_settlement_account_address(self: @TContractState) -> ContractAddress;
-    fn proof_validity_blocks(self: @TContractState) -> u64;
 }
 
-#[starknet::contract(account)]
+#[starknet::contract]
 pub mod AuctionVerifier {
     use core::array::{Array, ArrayTrait, SpanTrait};
+    use core::ecdsa::check_ecdsa_signature;
     use core::num::traits::Zero;
     use core::poseidon::{hades_permutation, poseidon_hash_span};
-    use starknet::account::Call;
+    use core::traits::TryInto;
     use starknet::storage::{
         Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
         StoragePointerWriteAccess,
     };
-    use starknet::syscalls::{
-        call_contract_syscall, get_execution_info_v3_syscall, send_message_to_l1_syscall,
-    };
+    use starknet::syscalls::get_execution_info_v3_syscall;
     use starknet::{
-        ContractAddress, SyscallResultTrait, VALIDATED, get_caller_address, get_contract_address,
+        ContractAddress, SyscallResultTrait, get_caller_address, get_contract_address, get_tx_info,
     };
     use zylith_protocol::batch_registry::{IBatchRegistryDispatcher, IBatchRegistryDispatcherTrait};
-    use zylith_protocol::commitment_registry::{
-        ICommitmentRegistryDispatcher, ICommitmentRegistryDispatcherTrait,
-    };
-    use zylith_protocol::fee_ledger::{IFeeLedgerDispatcher, IFeeLedgerDispatcherTrait};
     use zylith_protocol::shielded_asset_adapter::{
         IShieldedAssetAdapterDispatcher, IShieldedAssetAdapterDispatcherTrait,
     };
-    use zylith_protocol::types::{BatchStatus, SettlementRecord};
-    use zylith_settlement_statement::verify_auction_statement;
+    use zylith_protocol::types::BatchStatus;
 
     const DEFAULT_PROOF_VALIDITY_BLOCKS: u64 = 450;
     const VIRTUAL_SNOS: felt252 = 'VIRTUAL_SNOS';
     const VIRTUAL_SNOS0: felt252 = 'VIRTUAL_SNOS0';
     const SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_settle_v1';
+    const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
+    const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
     const SETTLEMENT_PROOF_MESSAGE_TO: felt252 = 0;
-    const ACCOUNT_EXECUTION_VERSION: felt252 = 3;
-
+    const ROOT_ONLY_STATE_TRANSITION_DOMAIN: felt252 =
+        0x01f14f0555b0b80fd6af9553623a021c472d8c930dfcb5b204b35b26f0d2b1b2;
+    const RENEWAL_PARENT_CANCEL_DOMAIN: felt252 =
+        0x26f84b60309c08d4030876815edb467f89f78e5a5f62823af4521f1be502ca3;
+    const RENEWAL_SPARSE_LEAF_DOMAIN: felt252 =
+        0x03fd7c748b95292c230aa528dc391912cd4557ad3e157e94ab06b22af433f967;
+    const RENEWAL_SPARSE_NODE_DOMAIN: felt252 =
+        0x02de7e98b8f1ba580329d7cfcf51a36f6eb4f8611cae6f82b34e116bb9c2588c;
+    const RENEWAL_SPARSE_TREE_DEPTH: usize = 128;
+    const RENEWAL_KEY_HIGH_BOUND: u128 = 0x10000000000000000000000000000000;
+    const TWO_POW_128: felt252 = 0x100000000000000000000000000000000;
+    const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
+        0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
+    const OUTPUT_NOTE_NODE_DOMAIN: felt252 =
+        0x03c6998f476a618431be1c1764a6724f13c0739be395bab4c1217bc0a65b2ee7;
+    const OUTPUT_WITHDRAWAL_DOMAIN: felt252 =
+        0x031ff5b95d48149e26b5a946562ff5ea925eb8b3ea09d3b389b209b672a37b6e;
+    const DEPOSIT_NOTE_ROOT_DOMAIN: felt252 =
+        0x7a796c6974685f6465706f7369745f6e6f74655f726f6f745f7631;
+    const NOTE_ROOT_TRANSITION_DEPOSIT: felt252 = 0;
+    const NOTE_ROOT_TRANSITION_SETTLEMENT: felt252 = 1;
     #[storage]
     struct Storage {
         admin: ContractAddress,
         authorized_settlement_account: ContractAddress,
+        proof_program: ContractAddress,
+        proof_program_hash: felt252,
         proof_validity_blocks: u64,
-        commitment_registry: ContractAddress,
+        output_claim_delay_seconds: u64,
+        split_auction_proof_required: bool,
         batch_registry: ContractAddress,
-        fee_ledger: ContractAddress,
         shielded_asset_adapter: ContractAddress,
+        deposit_note_root_registrar: ContractAddress,
         settled_batches: Map<felt252, bool>,
-        transcript_commitments: Map<felt252, felt252>,
-        proof_artifact_commitments: Map<felt252, felt252>,
-        clearing_prices: Map<felt252, u128>,
-        matched_order_counts: Map<felt252, u64>,
-        output_bundle_refs: Map<felt252, felt252>,
-        consumed_note_counts: Map<felt252, u64>,
-        consumed_nullifier_counts: Map<felt252, u64>,
-        created_output_counts: Map<felt252, u64>,
-        fee_entry_counts: Map<felt252, u64>,
+        settled_at_unix_seconds: Map<felt252, u64>,
+        withdrawn_output_notes: Map<felt252, bool>,
+        activated_deposit_notes: Map<felt252, bool>,
+        current_note_root: felt252,
+        current_nullifier_root: felt252,
+        current_renewal_root: felt252,
+        current_fee_root: felt252,
+        note_root_transition_count: u64,
+        note_root_transition_kinds: Map<u64, felt252>,
+        note_root_transition_keys: Map<u64, felt252>,
+        note_root_transition_batch_roots: Map<u64, felt252>,
+        note_root_transition_new_roots: Map<u64, felt252>,
+        output_note_roots: Map<felt252, felt252>,
+        verified_admission_roots: Map<felt252, felt252>,
+        verified_auction_transcripts: Map<felt252, felt252>,
     }
 
     #[constructor]
     fn constructor(
-        ref self: ContractState,
-        admin: ContractAddress,
-        commitment_registry: ContractAddress,
-        batch_registry: ContractAddress,
-        fee_ledger: ContractAddress,
-        shielded_asset_adapter: ContractAddress,
+        ref self: ContractState, admin: ContractAddress, batch_registry: ContractAddress,
     ) {
         assert(!admin.is_zero(), 'BAD_ADMIN');
-        assert(!commitment_registry.is_zero(), 'BAD_REGISTRY');
         assert(!batch_registry.is_zero(), 'BAD_BATCH_REGISTRY');
-        assert(!fee_ledger.is_zero(), 'BAD_FEE_LEDGER');
-        assert(!shielded_asset_adapter.is_zero(), 'BAD_ADAPTER');
         self.admin.write(admin);
-        self.commitment_registry.write(commitment_registry);
         self.batch_registry.write(batch_registry);
-        self.fee_ledger.write(fee_ledger);
-        self.shielded_asset_adapter.write(shielded_asset_adapter);
         self.proof_validity_blocks.write(DEFAULT_PROOF_VALIDITY_BLOCKS);
     }
 
@@ -140,19 +198,169 @@ pub mod AuctionVerifier {
             self.authorized_settlement_account.write(account);
         }
 
+        fn set_proof_program(
+            ref self: ContractState, proof_program: ContractAddress, virtual_program_hash: felt252,
+        ) {
+            assert_admin(@self);
+            assert(!proof_program.is_zero(), 'BAD_PROOF_PROGRAM');
+            assert(virtual_program_hash != 0, 'BAD_PROOF_HASH');
+            self.proof_program.write(proof_program);
+            self.proof_program_hash.write(virtual_program_hash);
+        }
+
         fn set_proof_validity_blocks(ref self: ContractState, proof_validity_blocks: u64) {
             assert_admin(@self);
             assert(proof_validity_blocks > 0, 'BAD_PROOF_TTL');
             self.proof_validity_blocks.write(proof_validity_blocks);
         }
 
-        fn compile_auction_proof(
-            ref self: ContractState, serialized_private_auction_witness: Span<felt252>,
-        ) -> felt252 {
-            let transcript_commitment = verify_auction_statement(
-                serialized_private_auction_witness,
+        fn set_shielded_asset_adapter(ref self: ContractState, adapter: ContractAddress) {
+            assert_admin(@self);
+            assert(!adapter.is_zero(), 'BAD_ADAPTER');
+            self.shielded_asset_adapter.write(adapter);
+        }
+
+        fn set_deposit_note_root_registrar(ref self: ContractState, registrar: ContractAddress) {
+            assert_admin(@self);
+            assert(!registrar.is_zero(), 'BAD_DEPOSIT_REGISTRAR');
+            self.deposit_note_root_registrar.write(registrar);
+        }
+
+        fn set_output_claim_delay_seconds(ref self: ContractState, delay_seconds: u64) {
+            assert_admin(@self);
+            self.output_claim_delay_seconds.write(delay_seconds);
+        }
+
+        fn set_split_auction_proof_required(ref self: ContractState, required: bool) {
+            assert_admin(@self);
+            self.split_auction_proof_required.write(required);
+        }
+
+        fn cancel_renewal_parent_marker(
+            ref self: ContractState,
+            cancel_marker: felt252,
+            cancel_authority: felt252,
+            sparse_key_low: u128,
+            sparse_key_high: u128,
+            merkle_path: Span<felt252>,
+            merkle_directions: Span<felt252>,
+            signature_r: felt252,
+            signature_s: felt252,
+        ) {
+            assert(cancel_marker != 0, 'BAD_CANCEL_MARKER');
+            assert(cancel_authority != 0, 'BAD_CANCEL_AUTHORITY');
+            assert(signature_r != 0, 'BAD_CANCEL_SIG');
+            assert(signature_s != 0, 'BAD_CANCEL_SIG');
+            assert(
+                cancel_marker == sparse_key_low.into() + sparse_key_high.into() * TWO_POW_128,
+                'RENEWAL_KEY_BIND',
             );
-            emit_settlement_proof_message(transcript_commitment)
+            assert(sparse_key_high < RENEWAL_KEY_HIGH_BOUND, 'RENEWAL_KEY_HIGH');
+            assert(
+                check_ecdsa_signature(
+                    renewal_parent_cancel_marker_message_hash(cancel_marker),
+                    cancel_authority,
+                    signature_r,
+                    signature_s,
+                ),
+                'BAD_CANCEL_SIG',
+            );
+            let prior_root = self.current_renewal_root.read();
+            let new_root = sparse_insert_renewal_entry(
+                prior_root,
+                cancel_marker,
+                sparse_key_low,
+                sparse_key_high,
+                merkle_path,
+                merkle_directions,
+            );
+            self.current_renewal_root.write(new_root);
+        }
+
+        fn activate_deposit_note_root(ref self: ContractState, note_commitment: felt252) {
+            assert_deposit_note_root_registrar(@self);
+            assert(note_commitment != 0, 'BAD_DEPOSIT_NOTE');
+            let already_activated = self.activated_deposit_notes.read(note_commitment);
+            assert(already_activated == false, 'DEPOSIT_NOTE_ACTIVE');
+            let prior_note_root = self.current_note_root.read();
+            let new_note_root = state_transition_root(
+                prior_note_root, deposit_note_root(note_commitment),
+            );
+            self.activated_deposit_notes.write(note_commitment, true);
+            self.current_note_root.write(new_note_root);
+            record_note_root_transition(
+                ref self,
+                NOTE_ROOT_TRANSITION_DEPOSIT,
+                note_commitment,
+                deposit_note_root(note_commitment),
+                new_note_root,
+            );
+        }
+
+        fn record_admission_root_with_proof_facts(
+            ref self: ContractState,
+            batch_id: felt252,
+            order_commitment_root: felt252,
+            admission_root: felt252,
+        ) {
+            assert_authorized_settlement_account(@self);
+            assert(batch_id != 0, 'BAD_BATCH');
+            assert(order_commitment_root != 0, 'BAD_ORDER_ROOT');
+            assert(admission_root != 0, 'BAD_ADMISSION_ROOT');
+            let batch_registry = IBatchRegistryDispatcher {
+                contract_address: self.batch_registry.read(),
+            };
+            let batch = batch_registry.get_batch(batch_id);
+            assert(batch.order_commitment_root == order_commitment_root, 'ORDER_ROOT_BINDING');
+            let expected_statement_message = native_admission_message_hash(
+                get_contract_address(), batch_id, order_commitment_root, admission_root,
+            );
+            let expected_messages = array![
+                admission_proof_message_hash_from_statement(
+                    self.proof_program.read(), expected_statement_message,
+                ),
+            ];
+            assert_valid_proof_facts_messages(@self, expected_messages.span());
+            self.verified_admission_roots.write(batch_id, admission_root);
+        }
+
+        fn record_auction_result_with_proof_facts(
+            ref self: ContractState,
+            batch_id: felt252,
+            order_commitment_root: felt252,
+            admission_root: felt252,
+            transcript_commitment: felt252,
+        ) {
+            assert_authorized_settlement_account(@self);
+            assert(batch_id != 0, 'BAD_BATCH');
+            assert(order_commitment_root != 0, 'BAD_ORDER_ROOT');
+            assert(admission_root != 0, 'BAD_ADMISSION_ROOT');
+            assert(transcript_commitment != 0, 'BAD_TRANSCRIPT');
+            let batch_registry = IBatchRegistryDispatcher {
+                contract_address: self.batch_registry.read(),
+            };
+            let batch = batch_registry.get_batch(batch_id);
+            assert(batch.order_commitment_root == order_commitment_root, 'ORDER_ROOT_BINDING');
+            let verified_admission = self.verified_admission_roots.read(batch_id);
+            if verified_admission == 0 {
+                assert(admission_root == order_commitment_root, 'ADMISSION_REQUIRED');
+            } else {
+                assert(verified_admission == admission_root, 'ADMISSION_REQUIRED');
+            }
+            let expected_statement_message = native_auction_result_message_hash(
+                get_contract_address(),
+                batch_id,
+                order_commitment_root,
+                admission_root,
+                transcript_commitment,
+            );
+            let expected_messages = array![
+                auction_result_proof_message_hash_from_statement(
+                    self.proof_program.read(), expected_statement_message,
+                ),
+            ];
+            assert_valid_proof_facts_messages(@self, expected_messages.span());
+            self.verified_auction_transcripts.write(batch_id, transcript_commitment);
         }
 
         fn submit_settlement_with_proof_facts(
@@ -163,26 +371,32 @@ pub mod AuctionVerifier {
             transcript_commitment: felt252,
             proof_artifact_commitment: felt252,
             clearing_price: u128,
-            matched_order_count: u64,
             output_bundle_ref: felt252,
-            consumed_note_commitments: Span<felt252>,
-            consumed_nullifiers: Span<felt252>,
-            renewal_parent_order_commitments: Span<felt252>,
-            renewal_child_nullifiers: Span<felt252>,
-            output_note_commitments: Span<felt252>,
-            output_note_asset_ids: Span<felt252>,
-            output_note_amounts: Span<u128>,
-            output_note_withdraw_authorities: Span<felt252>,
-            fee_asset_ids: Span<felt252>,
-            fee_recipients: Span<felt252>,
-            fee_amounts: Span<u128>,
+            prior_note_root: felt252,
+            prior_nullifier_root: felt252,
+            prior_renewal_root: felt252,
+            prior_fee_root: felt252,
+            consumed_note_root: felt252,
+            consumed_nullifier_root: felt252,
+            renewal_child_root: felt252,
+            output_note_root: felt252,
+            fee_root: felt252,
+            new_note_root: felt252,
+            new_nullifier_root: felt252,
+            new_renewal_root: felt252,
+            new_fee_root: felt252,
         ) {
             assert_authorized_settlement_account(@self);
             let expected_statement_message = native_settlement_message_hash(
                 get_contract_address(), transcript_commitment,
             );
             assert(proof_artifact_commitment == expected_statement_message, 'PROOF_COMMITMENT');
-            assert_valid_proof_facts(@self, expected_statement_message);
+            let expected_messages = array![
+                settlement_proof_message_hash_from_statement(
+                    self.proof_program.read(), expected_statement_message,
+                ),
+            ];
+            assert_valid_proof_facts_messages(@self, expected_messages.span());
 
             settle_verified_batch(
                 ref self,
@@ -190,156 +404,141 @@ pub mod AuctionVerifier {
                 order_commitment_root,
                 encrypted_order_set_commitment,
                 transcript_commitment,
-                proof_artifact_commitment,
                 clearing_price,
-                matched_order_count,
                 output_bundle_ref,
-                consumed_note_commitments,
-                consumed_nullifiers,
-                renewal_parent_order_commitments,
-                renewal_child_nullifiers,
-                output_note_commitments,
-                output_note_asset_ids,
-                output_note_amounts,
-                output_note_withdraw_authorities,
-                fee_asset_ids,
-                fee_recipients,
-                fee_amounts,
+                prior_note_root,
+                prior_nullifier_root,
+                prior_renewal_root,
+                prior_fee_root,
+                consumed_note_root,
+                consumed_nullifier_root,
+                renewal_child_root,
+                output_note_root,
+                fee_root,
+                new_note_root,
+                new_nullifier_root,
+                new_renewal_root,
+                new_fee_root,
             );
+        }
+
+        fn submit_aggregate_settlements_with_proof_facts(
+            ref self: ContractState, settlement_inputs: Span<felt252>,
+        ) {
+            assert_authorized_settlement_account(@self);
+            let settlement_count = aggregate_settlement_count(settlement_inputs);
+            assert(settlement_count != 0, 'EMPTY_AGGREGATE');
+            let expected_messages = aggregate_expected_messages(
+                @self, settlement_inputs, settlement_count,
+            );
+            assert_valid_proof_facts_messages(@self, expected_messages.span());
+            settle_aggregate_verified_batches(ref self, settlement_inputs, settlement_count);
+        }
+
+        fn withdraw_settlement_output_to_l2(
+            ref self: ContractState,
+            batch_id: felt252,
+            note_commitment: felt252,
+            asset_id: felt252,
+            amount: u128,
+            withdraw_authority: felt252,
+            merkle_path: Span<felt252>,
+            merkle_directions: Span<felt252>,
+            withdraw_authorization_r: felt252,
+            withdraw_authorization_s: felt252,
+            recipient: ContractAddress,
+        ) -> (felt252, u128) {
+            assert(note_commitment != 0, 'BAD_COMMITMENT');
+            assert(asset_id != 0, 'BAD_ASSET');
+            assert(amount > 0, 'BAD_AMOUNT');
+            assert(withdraw_authority != 0, 'BAD_AUTHORITY');
+            assert(withdraw_authorization_r != 0, 'BAD_WITHDRAW_SIG');
+            assert(withdraw_authorization_s != 0, 'BAD_WITHDRAW_SIG');
+            assert(!recipient.is_zero(), 'BAD_RECIPIENT');
+            let settled = self.settled_batches.read(batch_id);
+            assert(settled == true, 'UNKNOWN_SETTLEMENT');
+            assert_output_claim_window_open(@self, batch_id);
+            let already_withdrawn = self.withdrawn_output_notes.read(note_commitment);
+            assert(already_withdrawn == false, 'OUTPUT_WITHDRAWN');
+            let output_note_root = self.output_note_roots.read(batch_id);
+            let recomputed_root = verify_output_note_path(
+                note_commitment,
+                asset_id,
+                amount,
+                withdraw_authority,
+                merkle_path,
+                merkle_directions,
+            );
+            assert(recomputed_root == output_note_root, 'OUTPUT_NOTE_PROOF');
+
+            let adapter_address = self.shielded_asset_adapter.read();
+            assert(!adapter_address.is_zero(), 'BAD_ADAPTER');
+            assert(
+                check_ecdsa_signature(
+                    output_withdrawal_message_hash(
+                        adapter_address, batch_id, note_commitment, asset_id, amount, recipient,
+                    ),
+                    withdraw_authority,
+                    withdraw_authorization_r,
+                    withdraw_authorization_s,
+                ),
+                'UNAUTHORIZED_WITHDRAW',
+            );
+
+            self.withdrawn_output_notes.write(note_commitment, true);
+            let adapter = IShieldedAssetAdapterDispatcher { contract_address: adapter_address };
+            adapter.withdraw_verified_note(asset_id, amount, note_commitment, recipient);
+            (asset_id, amount)
         }
 
         fn is_batch_settled(self: @ContractState, batch_id: felt252) -> bool {
             self.settled_batches.read(batch_id)
         }
 
-        fn settlement_record(self: @ContractState, batch_id: felt252) -> SettlementRecord {
-            let settled = self.settled_batches.read(batch_id);
-            assert(settled == true, 'UNKNOWN_SETTLEMENT');
+        fn verified_admission_root(self: @ContractState, batch_id: felt252) -> felt252 {
+            self.verified_admission_roots.read(batch_id)
+        }
 
-            SettlementRecord {
-                batch_id,
-                transcript_commitment: self.transcript_commitments.read(batch_id),
-                proof_artifact_commitment: self.proof_artifact_commitments.read(batch_id),
-                clearing_price: self.clearing_prices.read(batch_id),
-                matched_order_count: self.matched_order_counts.read(batch_id),
-                output_bundle_ref: self.output_bundle_refs.read(batch_id),
-                consumed_note_count: self.consumed_note_counts.read(batch_id),
-                consumed_nullifier_count: self.consumed_nullifier_counts.read(batch_id),
-                created_output_count: self.created_output_counts.read(batch_id),
-                fee_entry_count: self.fee_entry_counts.read(batch_id),
-            }
+        fn verified_auction_transcript(self: @ContractState, batch_id: felt252) -> felt252 {
+            self.verified_auction_transcripts.read(batch_id)
+        }
+
+        fn current_settlement_roots(self: @ContractState) -> (felt252, felt252, felt252, felt252) {
+            (
+                self.current_note_root.read(),
+                self.current_nullifier_root.read(),
+                self.current_renewal_root.read(),
+                self.current_fee_root.read(),
+            )
+        }
+
+        fn note_root_transition_count(self: @ContractState) -> u64 {
+            self.note_root_transition_count.read()
+        }
+
+        fn note_root_transition(
+            self: @ContractState, transition_id: u64,
+        ) -> (felt252, felt252, felt252, felt252) {
+            assert(
+                transition_id < self.note_root_transition_count.read(), 'UNKNOWN_ROOT_TRANSITION',
+            );
+            (
+                self.note_root_transition_kinds.read(transition_id),
+                self.note_root_transition_keys.read(transition_id),
+                self.note_root_transition_batch_roots.read(transition_id),
+                self.note_root_transition_new_roots.read(transition_id),
+            )
         }
 
         fn settlement_proof_message_hash(
             self: @ContractState, transcript_commitment: felt252,
         ) -> felt252 {
+            let proof_program = self.proof_program.read();
+            assert(!proof_program.is_zero(), 'PROOF_PROGRAM_UNSET');
             let statement_message_hash = native_settlement_message_hash(
                 get_contract_address(), transcript_commitment,
             );
-            settlement_proof_message_hash_from_statement(
-                get_contract_address(), statement_message_hash,
-            )
-        }
-
-        fn commitment_registry_address(self: @ContractState) -> ContractAddress {
-            self.commitment_registry.read()
-        }
-
-        fn batch_registry_address(self: @ContractState) -> ContractAddress {
-            self.batch_registry.read()
-        }
-
-        fn fee_ledger_address(self: @ContractState) -> ContractAddress {
-            self.fee_ledger.read()
-        }
-
-        fn shielded_asset_adapter_address(self: @ContractState) -> ContractAddress {
-            self.shielded_asset_adapter.read()
-        }
-
-        fn authorized_settlement_account_address(self: @ContractState) -> ContractAddress {
-            self.authorized_settlement_account.read()
-        }
-
-        fn proof_validity_blocks(self: @ContractState) -> u64 {
-            self.proof_validity_blocks.read()
-        }
-    }
-
-    fn emit_settlement_proof_message(transcript_commitment: felt252) -> felt252 {
-        let statement_message_hash = native_settlement_message_hash(
-            get_contract_address(), transcript_commitment,
-        );
-        let payload = settlement_proof_payload(statement_message_hash);
-        send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
-            .unwrap_syscall();
-        settlement_proof_message_hash_from_statement(get_contract_address(), statement_message_hash)
-    }
-
-    #[abi(embed_v0)]
-    impl SettlementProofAccountImpl of starknet::account::AccountContract<ContractState> {
-        fn __validate_declare__(self: @ContractState, class_hash: felt252) -> felt252 {
-            let _ = class_hash;
-            let tx_info = starknet::get_tx_info().unbox();
-            validate_virtual_proof_account_context(
-                tx_info.version,
-                tx_info.max_fee,
-                tx_info.tip,
-                tx_info.paymaster_data,
-                tx_info.account_deployment_data,
-                tx_info.nonce_data_availability_mode,
-                tx_info.fee_data_availability_mode,
-                tx_info.resource_bounds,
-            );
-            assert(false, 'DECLARE_UNSUPPORTED');
-            VALIDATED
-        }
-
-        fn __validate__(ref self: ContractState, calls: Array<Call>) -> felt252 {
-            let tx_info = starknet::get_tx_info().unbox();
-            validate_virtual_proof_account_context(
-                tx_info.version,
-                tx_info.max_fee,
-                tx_info.tip,
-                tx_info.paymaster_data,
-                tx_info.account_deployment_data,
-                tx_info.nonce_data_availability_mode,
-                tx_info.fee_data_availability_mode,
-                tx_info.resource_bounds,
-            );
-            validate_single_self_proof_call(calls.span());
-            VALIDATED
-        }
-
-        fn __execute__(ref self: ContractState, mut calls: Array<Call>) -> Array<Span<felt252>> {
-            assert(get_caller_address().is_zero(), 'INVALID_CALLER');
-            let tx_info = starknet::get_tx_info().unbox();
-            validate_virtual_proof_account_context(
-                tx_info.version,
-                tx_info.max_fee,
-                tx_info.tip,
-                tx_info.paymaster_data,
-                tx_info.account_deployment_data,
-                tx_info.nonce_data_availability_mode,
-                tx_info.fee_data_availability_mode,
-                tx_info.resource_bounds,
-            );
-            validate_single_self_proof_call(calls.span());
-
-            let mut results = array![];
-            loop {
-                match calls.pop_front() {
-                    Option::Some(call) => {
-                        let return_data = call_contract_syscall(
-                            call.to, call.selector, call.calldata,
-                        )
-                            .unwrap_syscall();
-                        results.append(return_data);
-                    },
-                    Option::None => { break; },
-                }
-            }
-            results
+            settlement_proof_message_hash_from_statement(proof_program, statement_message_hash)
         }
     }
 
@@ -351,37 +550,11 @@ pub mod AuctionVerifier {
         assert(get_caller_address() == self.authorized_settlement_account.read(), 'UNAUTHORIZED');
     }
 
-    fn validate_virtual_proof_account_context(
-        version: felt252,
-        max_fee: u128,
-        tip: u128,
-        paymaster_data: Span<felt252>,
-        account_deployment_data: Span<felt252>,
-        nonce_data_availability_mode: u32,
-        fee_data_availability_mode: u32,
-        resource_bounds: Span<starknet::ResourcesBounds>,
-    ) {
-        assert(version == ACCOUNT_EXECUTION_VERSION, 'INVALID_TX_VERSION');
-        assert(max_fee == 0, 'INVALID_MAX_FEE');
-        assert(tip == 0, 'INVALID_TIP');
-        assert(paymaster_data.len() == 0, 'PAYMASTER_UNSUPPORTED');
-        assert(account_deployment_data.len() == 0, 'ACCOUNT_DEPLOY_UNSUPPORTED');
-        assert(nonce_data_availability_mode == 0_u32, 'INVALID_NONCE_DA');
-        assert(fee_data_availability_mode == 0_u32, 'INVALID_FEE_DA');
-        assert(resource_bounds.len() == 3, 'INVALID_RESOURCE_BOUNDS');
-        for resource_bound in resource_bounds {
-            assert(resource_bound.max_price_per_unit.is_zero(), 'NON_ZERO_RESOURCE_PRICE');
-        };
+    fn assert_deposit_note_root_registrar(self: @ContractState) {
+        assert(get_caller_address() == self.deposit_note_root_registrar.read(), 'UNAUTHORIZED');
     }
 
-    fn validate_single_self_proof_call(calls: Span<Call>) {
-        assert(calls.len() == 1, 'MULTI_CALL_NOT_SUPPORTED');
-        let call = *calls.at(0);
-        assert(call.to == get_contract_address(), 'INVALID_PROOF_TARGET');
-        assert(call.selector == selector!("compile_auction_proof"), 'INVALID_PROOF_SELECTOR');
-    }
-
-    fn assert_valid_proof_facts(self: @ContractState, statement_message_hash: felt252) {
+    fn assert_valid_proof_facts_messages(self: @ContractState, expected_messages: Span<felt252>) {
         let execution_info = get_execution_info_v3_syscall().unwrap_syscall();
         let current_block_number = execution_info.block_info.block_number;
         let mut proof_facts_serialized = execution_info.tx_info.proof_facts;
@@ -391,6 +564,11 @@ pub mod AuctionVerifier {
         assert(proof_facts_serialized.is_empty(), 'BAD_PROOF_FACTS_LEN');
         assert(proof_facts.program_variant == VIRTUAL_SNOS, 'BAD_PROOF_PROGRAM');
         assert(proof_facts.starknet_os_output_version == VIRTUAL_SNOS0, 'BAD_PROOF_OUTPUT');
+        let proof_program = self.proof_program.read();
+        let proof_program_hash = self.proof_program_hash.read();
+        assert(!proof_program.is_zero(), 'PROOF_PROGRAM_UNSET');
+        assert(proof_program_hash != 0, 'PROOF_HASH_UNSET');
+        assert(proof_facts.virtual_program_hash == proof_program_hash, 'BAD_PROOF_HASH');
         assert(proof_facts.base_block_number < current_block_number, 'STALE_PROOF_BASE');
         assert(
             current_block_number <= proof_facts.base_block_number
@@ -398,24 +576,208 @@ pub mod AuctionVerifier {
             'EXPIRED_PROOF',
         );
 
-        let expected_message_hash = settlement_proof_message_hash_from_statement(
-            get_contract_address(), statement_message_hash,
-        );
-        let expected_messages = array![expected_message_hash];
-        assert(proof_facts.message_to_l1_hashes == expected_messages.span(), 'BAD_PROOF_MSG');
+        assert(proof_facts.message_to_l1_hashes == expected_messages, 'BAD_PROOF_MSG');
+    }
+
+    fn assert_output_claim_window_open(self: @ContractState, batch_id: felt252) {
+        let delay_seconds = self.output_claim_delay_seconds.read();
+        if delay_seconds == 0 {
+            return;
+        }
+        let settled_at = self.settled_at_unix_seconds.read(batch_id);
+        assert(settled_at != 0, 'UNKNOWN_SETTLE_TIME');
+        let now = current_block_timestamp();
+        assert(now >= settled_at + delay_seconds, 'CLAIM_WINDOW_CLOSED');
+    }
+
+    fn current_block_timestamp() -> u64 {
+        starknet::get_block_timestamp()
+    }
+
+    fn read_next(data: Span<felt252>, ref index: usize) -> felt252 {
+        assert(index < data.len(), 'INPUT_TOO_SHORT');
+        let value = *data.at(index);
+        index += 1;
+        value
+    }
+
+    fn read_next_u128(data: Span<felt252>, ref index: usize) -> u128 {
+        read_next(data, ref index).try_into().expect('BAD_U128')
+    }
+
+    fn aggregate_settlement_count(data: Span<felt252>) -> usize {
+        let mut index: usize = 0;
+        let count_felt = read_next(data, ref index);
+        count_felt.try_into().expect('BAD_AGG_COUNT')
+    }
+
+    fn aggregate_expected_messages(
+        self: @ContractState, data: Span<felt252>, settlement_count: usize,
+    ) -> Array<felt252> {
+        let mut index: usize = 0;
+        let parsed_count: usize = read_next(data, ref index).try_into().expect('BAD_AGG_COUNT');
+        assert(parsed_count == settlement_count, 'BAD_AGG_COUNT');
+        let mut expected_messages = array![];
+        let mut cursor: usize = 0;
+        loop {
+            if cursor == settlement_count {
+                break;
+            }
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            let transcript_commitment = read_next(data, ref index);
+            let proof_artifact_commitment = read_next(data, ref index);
+            read_next_u128(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+
+            let statement_message = native_settlement_message_hash(
+                get_contract_address(), transcript_commitment,
+            );
+            assert(proof_artifact_commitment == statement_message, 'PROOF_COMMITMENT');
+            expected_messages
+                .append(
+                    settlement_proof_message_hash_from_statement(
+                        self.proof_program.read(), statement_message,
+                    ),
+                );
+            cursor += 1;
+        }
+        assert(index == data.len(), 'TRAILING_AGG_INPUT');
+        expected_messages
+    }
+
+    fn settle_aggregate_verified_batches(
+        ref self: ContractState, data: Span<felt252>, settlement_count: usize,
+    ) {
+        let mut index: usize = 0;
+        let parsed_count: usize = read_next(data, ref index).try_into().expect('BAD_AGG_COUNT');
+        assert(parsed_count == settlement_count, 'BAD_AGG_COUNT');
+        let mut cursor: usize = 0;
+        loop {
+            if cursor == settlement_count {
+                break;
+            }
+            let batch_id = read_next(data, ref index);
+            let order_commitment_root = read_next(data, ref index);
+            let encrypted_order_set_commitment = read_next(data, ref index);
+            let transcript_commitment = read_next(data, ref index);
+            let proof_artifact_commitment = read_next(data, ref index);
+            let clearing_price = read_next_u128(data, ref index);
+            let output_bundle_ref = read_next(data, ref index);
+            let prior_note_root = read_next(data, ref index);
+            let prior_nullifier_root = read_next(data, ref index);
+            let prior_renewal_root = read_next(data, ref index);
+            let prior_fee_root = read_next(data, ref index);
+            let consumed_note_root = read_next(data, ref index);
+            let consumed_nullifier_root = read_next(data, ref index);
+            let renewal_child_root = read_next(data, ref index);
+            let output_note_root = read_next(data, ref index);
+            let fee_root = read_next(data, ref index);
+            let new_note_root = read_next(data, ref index);
+            let new_nullifier_root = read_next(data, ref index);
+            let new_renewal_root = read_next(data, ref index);
+            let new_fee_root = read_next(data, ref index);
+
+            let statement_message = native_settlement_message_hash(
+                get_contract_address(), transcript_commitment,
+            );
+            assert(proof_artifact_commitment == statement_message, 'PROOF_COMMITMENT');
+            settle_verified_batch(
+                ref self,
+                batch_id,
+                order_commitment_root,
+                encrypted_order_set_commitment,
+                transcript_commitment,
+                clearing_price,
+                output_bundle_ref,
+                prior_note_root,
+                prior_nullifier_root,
+                prior_renewal_root,
+                prior_fee_root,
+                consumed_note_root,
+                consumed_nullifier_root,
+                renewal_child_root,
+                output_note_root,
+                fee_root,
+                new_note_root,
+                new_nullifier_root,
+                new_renewal_root,
+                new_fee_root,
+            );
+            cursor += 1;
+        }
+        assert(index == data.len(), 'TRAILING_AGG_INPUT');
+    }
+
+    fn record_note_root_transition(
+        ref self: ContractState,
+        kind: felt252,
+        key: felt252,
+        batch_root: felt252,
+        new_root: felt252,
+    ) {
+        let transition_id = self.note_root_transition_count.read();
+        self.note_root_transition_kinds.write(transition_id, kind);
+        self.note_root_transition_keys.write(transition_id, key);
+        self.note_root_transition_batch_roots.write(transition_id, batch_root);
+        self.note_root_transition_new_roots.write(transition_id, new_root);
+        self.note_root_transition_count.write(transition_id + 1);
+    }
+
+    fn deposit_note_root(note_commitment: felt252) -> felt252 {
+        let state = poseidon_hash2(DEPOSIT_NOTE_ROOT_DOMAIN, note_commitment);
+        poseidon_hash2(state, 1)
     }
 
     fn settlement_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![SETTLEMENT_MESSAGE_DOMAIN, statement_message_hash]
     }
 
+    fn admission_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![ADMISSION_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
+    fn auction_result_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![AUCTION_RESULT_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
     fn settlement_proof_message_hash_from_statement(
-        auction_verifier_address: ContractAddress, statement_message_hash: felt252,
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
     ) -> felt252 {
-        let mut l1_message_data = array![
-            auction_verifier_address.into(), SETTLEMENT_PROOF_MESSAGE_TO,
-        ];
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
         let payload = settlement_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn admission_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = admission_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn auction_result_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = auction_result_proof_payload(statement_message_hash);
         payload.serialize(ref l1_message_data);
         poseidon_hash_span(l1_message_data.span())
     }
@@ -436,42 +798,69 @@ pub mod AuctionVerifier {
         state
     }
 
+    fn native_admission_message_hash(
+        auction_verifier_address: ContractAddress,
+        batch_id: felt252,
+        order_commitment_root: felt252,
+        admission_root: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(ADMISSION_MESSAGE_DOMAIN, auction_verifier_address.into());
+        state = poseidon_hash2(state, batch_id);
+        state = poseidon_hash2(state, order_commitment_root);
+        state = poseidon_hash2(state, admission_root);
+        state
+    }
+
+    fn native_auction_result_message_hash(
+        auction_verifier_address: ContractAddress,
+        batch_id: felt252,
+        order_commitment_root: felt252,
+        admission_root: felt252,
+        transcript_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(AUCTION_RESULT_MESSAGE_DOMAIN, auction_verifier_address.into());
+        state = poseidon_hash2(state, batch_id);
+        state = poseidon_hash2(state, order_commitment_root);
+        state = poseidon_hash2(state, admission_root);
+        state = poseidon_hash2(state, transcript_commitment);
+        state
+    }
+
     fn settle_verified_batch(
         ref self: ContractState,
         batch_id: felt252,
         order_commitment_root: felt252,
         encrypted_order_set_commitment: felt252,
         transcript_commitment: felt252,
-        proof_artifact_commitment: felt252,
         clearing_price: u128,
-        matched_order_count: u64,
         output_bundle_ref: felt252,
-        consumed_note_commitments: Span<felt252>,
-        consumed_nullifiers: Span<felt252>,
-        renewal_parent_order_commitments: Span<felt252>,
-        renewal_child_nullifiers: Span<felt252>,
-        output_note_commitments: Span<felt252>,
-        output_note_asset_ids: Span<felt252>,
-        output_note_amounts: Span<u128>,
-        output_note_withdraw_authorities: Span<felt252>,
-        fee_asset_ids: Span<felt252>,
-        fee_recipients: Span<felt252>,
-        fee_amounts: Span<u128>,
+        prior_note_root: felt252,
+        prior_nullifier_root: felt252,
+        prior_renewal_root: felt252,
+        prior_fee_root: felt252,
+        consumed_note_root: felt252,
+        consumed_nullifier_root: felt252,
+        renewal_child_root: felt252,
+        output_note_root: felt252,
+        fee_root: felt252,
+        new_note_root: felt252,
+        new_nullifier_root: felt252,
+        new_renewal_root: felt252,
+        new_fee_root: felt252,
     ) {
         let already_settled = self.settled_batches.read(batch_id);
         assert(already_settled == false, 'BATCH_SETTLED');
-        assert(consumed_nullifiers.len() == consumed_note_commitments.len(), 'BAD_INPUT_LENGTH');
+        assert(prior_note_root == self.current_note_root.read(), 'NOTE_ROOT_STALE');
+        assert(prior_nullifier_root == self.current_nullifier_root.read(), 'NULLIFIER_ROOT_STALE');
+        assert(prior_renewal_root == self.current_renewal_root.read(), 'RENEWAL_ROOT_STALE');
+        assert(prior_fee_root == self.current_fee_root.read(), 'FEE_ROOT_STALE');
         assert(
-            renewal_parent_order_commitments.len() == renewal_child_nullifiers.len(),
-            'BAD_RENEWAL_LENGTH',
+            new_note_root == state_transition_root(prior_note_root, output_note_root),
+            'NEW_NOTE_ROOT',
         );
-        let output_count = output_note_commitments.len();
-        assert(output_note_asset_ids.len() == output_count, 'BAD_OUTPUT_LENGTH');
-        assert(output_note_amounts.len() == output_count, 'BAD_OUTPUT_LENGTH');
-        assert(output_note_withdraw_authorities.len() == output_count, 'BAD_OUTPUT_LENGTH');
-        let fee_count = fee_asset_ids.len();
-        assert(fee_recipients.len() == fee_count, 'BAD_FEE_LENGTH');
-        assert(fee_amounts.len() == fee_count, 'BAD_FEE_LENGTH');
+        assert(new_nullifier_root != 0 || prior_nullifier_root == 0, 'NEW_NULLIFIER_ROOT');
+        assert(new_renewal_root != 0 || prior_renewal_root == 0, 'NEW_RENEWAL_ROOT');
+        assert(new_fee_root == state_transition_root(prior_fee_root, fee_root), 'NEW_FEE_ROOT');
 
         let batch_registry = IBatchRegistryDispatcher {
             contract_address: self.batch_registry.read(),
@@ -483,7 +872,6 @@ pub mod AuctionVerifier {
             batch.encrypted_order_set_commitment == encrypted_order_set_commitment,
             'ENC_SET_BINDING',
         );
-        assert(matched_order_count <= batch.order_count, 'MATCH_GT_BATCH');
 
         let recomputed_commitment = public_settlement_commitment(
             batch_id,
@@ -493,60 +881,43 @@ pub mod AuctionVerifier {
             encrypted_order_set_commitment,
             clearing_price,
             output_bundle_ref,
-            consumed_note_commitments,
-            consumed_nullifiers,
-            renewal_parent_order_commitments,
-            renewal_child_nullifiers,
-            output_note_commitments,
-            output_note_asset_ids,
-            output_note_amounts,
-            output_note_withdraw_authorities,
-            fee_asset_ids,
-            fee_recipients,
-            fee_amounts,
+            prior_note_root,
+            prior_nullifier_root,
+            prior_renewal_root,
+            prior_fee_root,
+            consumed_note_root,
+            consumed_nullifier_root,
+            renewal_child_root,
+            output_note_root,
+            fee_root,
+            new_note_root,
+            new_nullifier_root,
+            new_renewal_root,
+            new_fee_root,
         );
         assert(recomputed_commitment == transcript_commitment, 'SETTLEMENT_BINDING');
-
-        let commitment_registry = ICommitmentRegistryDispatcher {
-            contract_address: self.commitment_registry.read(),
-        };
-        commitment_registry.consume_nullifiers(consumed_nullifiers);
-        commitment_registry
-            .consume_renewal_children(renewal_parent_order_commitments, renewal_child_nullifiers);
-        commitment_registry.register_note_commitments(batch_id, output_note_commitments);
+        if self.split_auction_proof_required.read() {
+            assert(
+                self.verified_auction_transcripts.read(batch_id) == transcript_commitment,
+                'AUCTION_PROOF_REQUIRED',
+            );
+        }
 
         batch_registry
             .record_settlement_metadata(
                 batch_id, transcript_commitment, clearing_price, output_bundle_ref,
             );
 
-        let fee_ledger = IFeeLedgerDispatcher { contract_address: self.fee_ledger.read() };
-        fee_ledger.accrue_fees(fee_asset_ids, fee_recipients, fee_amounts);
-
-        let shielded_asset_adapter = IShieldedAssetAdapterDispatcher {
-            contract_address: self.shielded_asset_adapter.read(),
-        };
-        shielded_asset_adapter
-            .settle_notes(
-                consumed_note_commitments,
-                output_note_commitments,
-                output_note_asset_ids,
-                output_note_amounts,
-                output_note_withdraw_authorities,
-                fee_asset_ids,
-                fee_amounts,
-            );
-
         self.settled_batches.write(batch_id, true);
-        self.transcript_commitments.write(batch_id, transcript_commitment);
-        self.proof_artifact_commitments.write(batch_id, proof_artifact_commitment);
-        self.clearing_prices.write(batch_id, clearing_price);
-        self.matched_order_counts.write(batch_id, matched_order_count);
-        self.output_bundle_refs.write(batch_id, output_bundle_ref);
-        self.consumed_note_counts.write(batch_id, consumed_note_commitments.len().into());
-        self.consumed_nullifier_counts.write(batch_id, consumed_nullifiers.len().into());
-        self.created_output_counts.write(batch_id, output_count.into());
-        self.fee_entry_counts.write(batch_id, fee_count.into());
+        self.settled_at_unix_seconds.write(batch_id, current_block_timestamp());
+        self.output_note_roots.write(batch_id, output_note_root);
+        self.current_note_root.write(new_note_root);
+        self.current_nullifier_root.write(new_nullifier_root);
+        self.current_renewal_root.write(new_renewal_root);
+        self.current_fee_root.write(new_fee_root);
+        record_note_root_transition(
+            ref self, NOTE_ROOT_TRANSITION_SETTLEMENT, batch_id, output_note_root, new_note_root,
+        );
     }
 
     fn public_settlement_commitment(
@@ -557,17 +928,19 @@ pub mod AuctionVerifier {
         encrypted_order_set_commitment: felt252,
         clearing_price: u128,
         output_bundle_ref: felt252,
-        consumed_note_commitments: Span<felt252>,
-        consumed_nullifiers: Span<felt252>,
-        renewal_parent_order_commitments: Span<felt252>,
-        renewal_child_nullifiers: Span<felt252>,
-        output_note_commitments: Span<felt252>,
-        output_note_asset_ids: Span<felt252>,
-        output_note_amounts: Span<u128>,
-        output_note_withdraw_authorities: Span<felt252>,
-        fee_asset_ids: Span<felt252>,
-        fee_recipients: Span<felt252>,
-        fee_amounts: Span<u128>,
+        prior_note_root: felt252,
+        prior_nullifier_root: felt252,
+        prior_renewal_root: felt252,
+        prior_fee_root: felt252,
+        consumed_note_root: felt252,
+        consumed_nullifier_root: felt252,
+        renewal_child_root: felt252,
+        output_note_root: felt252,
+        fee_root: felt252,
+        new_note_root: felt252,
+        new_nullifier_root: felt252,
+        new_renewal_root: felt252,
+        new_fee_root: felt252,
     ) -> felt252 {
         let mut state = poseidon_hash2(
             0x283f626418aa97a073f64500f7e35dd8bf7c01ff8611917c3c38e5be92eb205, batch_id,
@@ -578,42 +951,160 @@ pub mod AuctionVerifier {
         state = poseidon_hash2(state, encrypted_order_set_commitment);
         state = poseidon_hash2(state, clearing_price.into());
         state = poseidon_hash2(state, output_bundle_ref);
-
-        state = poseidon_hash2(state, consumed_note_commitments.len().into());
-        let mut index = 0;
-        while index < consumed_note_commitments.len() {
-            state = poseidon_hash2(state, *consumed_note_commitments.at(index));
-            state = poseidon_hash2(state, *consumed_nullifiers.at(index));
-            index += 1;
-        }
-
-        state = poseidon_hash2(state, renewal_child_nullifiers.len().into());
-        index = 0;
-        while index < renewal_child_nullifiers.len() {
-            state = poseidon_hash2(state, *renewal_parent_order_commitments.at(index));
-            state = poseidon_hash2(state, *renewal_child_nullifiers.at(index));
-            index += 1;
-        }
-
-        state = poseidon_hash2(state, output_note_commitments.len().into());
-        index = 0;
-        while index < output_note_commitments.len() {
-            state = poseidon_hash2(state, *output_note_commitments.at(index));
-            state = poseidon_hash2(state, *output_note_asset_ids.at(index));
-            state = poseidon_hash2(state, (*output_note_amounts.at(index)).into());
-            state = poseidon_hash2(state, *output_note_withdraw_authorities.at(index));
-            index += 1;
-        }
-
-        state = poseidon_hash2(state, fee_asset_ids.len().into());
-        index = 0;
-        while index < fee_asset_ids.len() {
-            state = poseidon_hash2(state, *fee_asset_ids.at(index));
-            state = poseidon_hash2(state, *fee_recipients.at(index));
-            state = poseidon_hash2(state, (*fee_amounts.at(index)).into());
-            index += 1;
-        }
+        state = poseidon_hash2(state, prior_note_root);
+        state = poseidon_hash2(state, prior_nullifier_root);
+        state = poseidon_hash2(state, prior_renewal_root);
+        state = poseidon_hash2(state, prior_fee_root);
+        state = poseidon_hash2(state, consumed_note_root);
+        state = poseidon_hash2(state, consumed_nullifier_root);
+        state = poseidon_hash2(state, renewal_child_root);
+        state = poseidon_hash2(state, output_note_root);
+        state = poseidon_hash2(state, fee_root);
+        state = poseidon_hash2(state, new_note_root);
+        state = poseidon_hash2(state, new_nullifier_root);
+        state = poseidon_hash2(state, new_renewal_root);
+        state = poseidon_hash2(state, new_fee_root);
 
         state
+    }
+
+    fn state_transition_root(prior_root: felt252, batch_root: felt252) -> felt252 {
+        poseidon_hash2(poseidon_hash2(ROOT_ONLY_STATE_TRANSITION_DOMAIN, prior_root), batch_root)
+    }
+
+    fn single_field_root(domain: felt252, values: Span<felt252>) -> felt252 {
+        let mut state = domain;
+        let mut index = 0;
+        loop {
+            if index == values.len() {
+                break;
+            }
+            state = poseidon_hash2(state, *values.at(index));
+            index += 1;
+        }
+        poseidon_hash2(state, values.len().into())
+    }
+
+    fn renewal_parent_cancel_marker_message_hash(cancel_marker: felt252) -> felt252 {
+        let tx_info = get_tx_info().unbox();
+        let mut state = poseidon_hash2(RENEWAL_PARENT_CANCEL_DOMAIN, tx_info.chain_id);
+        state = poseidon_hash2(state, get_contract_address().into());
+        poseidon_hash2(state, cancel_marker)
+    }
+
+    fn sparse_insert_renewal_entry(
+        prior_root: felt252,
+        entry: felt252,
+        key_low: u128,
+        key_high: u128,
+        merkle_path: Span<felt252>,
+        merkle_directions: Span<felt252>,
+    ) -> felt252 {
+        assert(entry != 0, 'BAD_RENEWAL_ENTRY');
+        assert(entry == key_low.into() + key_high.into() * TWO_POW_128, 'RENEWAL_KEY_BIND');
+        assert(key_high < RENEWAL_KEY_HIGH_BOUND, 'RENEWAL_KEY_HIGH');
+        assert(merkle_path.len() == merkle_directions.len(), 'RENEWAL_PATH_LEN');
+        if prior_root == 0 {
+            assert(merkle_path.len() == 0, 'RENEWAL_EMPTY_PATH');
+            return poseidon_hash2(RENEWAL_SPARSE_LEAF_DOMAIN, entry);
+        }
+        assert(merkle_path.len() == RENEWAL_SPARSE_TREE_DEPTH, 'RENEWAL_PATH_COUNT');
+        let mut reconstructed_low: felt252 = 0;
+        let mut bit_weight: felt252 = 1;
+        let mut empty_root = 0;
+        let mut inserted_root = poseidon_hash2(RENEWAL_SPARSE_LEAF_DOMAIN, entry);
+        let mut level = 0;
+        loop {
+            if level == RENEWAL_SPARSE_TREE_DEPTH {
+                break;
+            }
+            let sibling = *merkle_path.at(level);
+            let bit = *merkle_directions.at(level);
+            assert(bit == 0 || bit == 1, 'RENEWAL_PATH_BIT');
+            reconstructed_low = reconstructed_low + bit * bit_weight;
+            bit_weight = bit_weight * 2;
+            if bit == 0 {
+                empty_root = renewal_sparse_node(empty_root, sibling);
+                inserted_root = renewal_sparse_node(inserted_root, sibling);
+            } else {
+                empty_root = renewal_sparse_node(sibling, empty_root);
+                inserted_root = renewal_sparse_node(sibling, inserted_root);
+            }
+            level += 1;
+        }
+        assert(reconstructed_low == key_low.into(), 'RENEWAL_KEY_LOW_BITS');
+        assert(empty_root == prior_root, 'RENEWAL_SPARSE_PRIOR');
+        inserted_root
+    }
+
+    fn renewal_sparse_node(left: felt252, right: felt252) -> felt252 {
+        if left == 0 {
+            return right;
+        }
+        if right == 0 {
+            return left;
+        }
+        let (result, _, _) = hades_permutation(RENEWAL_SPARSE_NODE_DOMAIN, left, right);
+        result
+    }
+
+    fn output_note_leaf(
+        note_commitment: felt252, asset_id: felt252, amount: u128, withdraw_authority: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(OUTPUT_NOTE_LEAF_DOMAIN, note_commitment);
+        state = poseidon_hash2(state, asset_id);
+        state = poseidon_hash2(state, amount.into());
+        poseidon_hash2(state, withdraw_authority)
+    }
+
+    fn output_note_node(left: felt252, right: felt252) -> felt252 {
+        poseidon_hash2(poseidon_hash2(OUTPUT_NOTE_NODE_DOMAIN, left), right)
+    }
+
+    fn verify_output_note_path(
+        note_commitment: felt252,
+        asset_id: felt252,
+        amount: u128,
+        withdraw_authority: felt252,
+        merkle_path: Span<felt252>,
+        merkle_directions: Span<felt252>,
+    ) -> felt252 {
+        assert(merkle_path.len() == merkle_directions.len(), 'BAD_OUTPUT_PATH_LEN');
+        let mut root = output_note_leaf(note_commitment, asset_id, amount, withdraw_authority);
+        let mut index = 0;
+        loop {
+            if index == merkle_path.len() {
+                break;
+            }
+            let sibling = *merkle_path.at(index);
+            let direction = *merkle_directions.at(index);
+            if direction == 0 {
+                root = output_note_node(root, sibling);
+            } else {
+                assert(direction == 1, 'BAD_OUTPUT_PATH_DIR');
+                root = output_note_node(sibling, root);
+            }
+            index += 1;
+        }
+        root
+    }
+
+    fn output_withdrawal_message_hash(
+        adapter_address: ContractAddress,
+        batch_id: felt252,
+        note_commitment: felt252,
+        asset_id: felt252,
+        amount: u128,
+        recipient: ContractAddress,
+    ) -> felt252 {
+        let tx_info = starknet::get_tx_info().unbox();
+        let mut state = poseidon_hash2(OUTPUT_WITHDRAWAL_DOMAIN, tx_info.chain_id);
+        state = poseidon_hash2(state, get_contract_address().into());
+        state = poseidon_hash2(state, adapter_address.into());
+        state = poseidon_hash2(state, batch_id);
+        state = poseidon_hash2(state, note_commitment);
+        state = poseidon_hash2(state, asset_id);
+        state = poseidon_hash2(state, amount.into());
+        poseidon_hash2(state, recipient.into())
     }
 }

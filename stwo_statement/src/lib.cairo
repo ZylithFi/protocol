@@ -7,6 +7,7 @@ const ORDER_SIDE_BUY: felt252 = 0;
 const ORDER_SIDE_SELL: felt252 = 1;
 const ORDER_TYPE_LIMIT_BATCH: felt252 = 0;
 const ORDER_TYPE_MAKER_CURVE: felt252 = 1;
+const ORDER_TYPE_HEARTBEAT_COVER: felt252 = 2;
 const TIF_CURRENT_BATCH_ONLY: felt252 = 0;
 const TIF_FILL_OR_KILL: felt252 = 1;
 const PROTOCOL_FEE_BPS: u128 = 30;
@@ -19,8 +20,34 @@ const RENEWAL_PARENT_SECRET_DOMAIN: felt252 =
     0x7d7cdc3705c6b67855258ca803ee7b93dd4092346289da942f337b30d857667;
 const RENEWAL_PARENT_DOMAIN: felt252 =
     0x3c16da1b34d6fcc6f6ea27674de3b6cead275b20c1dfafa4abb43515a8974b4;
+const RENEWAL_PARENT_CANCEL_DOMAIN: felt252 =
+    0x26f84b60309c08d4030876815edb467f89f78e5a5f62823af4521f1be502ca3;
+const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
+    0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
+const OUTPUT_NOTE_NODE_DOMAIN: felt252 =
+    0x03c6998f476a618431be1c1764a6724f13c0739be395bab4c1217bc0a65b2ee7;
+const EMPTY_OUTPUT_NOTE_ROOT_DOMAIN: felt252 =
+    0x0279c22958925b34e81138c0d651a82cdbfd3287fa3de370e021a7201b4ce30b;
+const OUTPUT_RECOVERY_FIELD_COUNT: usize = 21;
+const OUTPUT_RECOVERY_PROOF_SLOTS: usize = 4;
+const OUTPUT_RECOVERY_BUNDLE_DOMAIN: felt252 = 0x7a796c6974685f6f75745f62756e646c655f7631;
+const OUTPUT_RECOVERY_RECORD_DOMAIN: felt252 = 0x7a796c6974685f6f75745f7265635f7631;
+const OUTPUT_RECOVERY_STREAM_DOMAIN: felt252 = 0x7a796c6974685f6f75745f73747265616d5f7631;
+const OUTPUT_RECOVERY_AUTH_DOMAIN: felt252 = 0x7a796c6974685f6f75745f617574685f7631;
+const OUTPUT_RECOVERY_TAG_DOMAIN: felt252 = 0x7a796c6974685f6f75745f7461675f7631;
+const DEPOSIT_NOTE_ROOT_DOMAIN: felt252 = 0x7a796c6974685f6465706f7369745f6e6f74655f726f6f745f7631;
+const NULLIFIER_SPARSE_TREE_DEPTH: usize = 64;
+const NULLIFIER_KEY_HIGH_BOUND: u128 = 0x10000000000000000000000000000000;
+const NULLIFIER_KEY_LOW_MODULUS: u128 = 0x10000000000000000;
+const TWO_POW_128: felt252 = 0x100000000000000000000000000000000;
+const NOTE_MEMBERSHIP_KIND_DEPOSIT: felt252 = 0;
+const NOTE_MEMBERSHIP_KIND_SETTLEMENT_OUTPUT: felt252 = 1;
 const STATEMENT_TYPE_SETTLEMENT: felt252 = 1;
 const STATEMENT_TYPE_AUCTION: felt252 = 2;
+const STATEMENT_TYPE_ADMISSION: felt252 = 3;
+const STATEMENT_TYPE_AUCTION_RESULT: felt252 = 4;
+const ADMISSION_ROOT_DOMAIN: felt252 = 0x7a796c6974685f61646d69745f726f6f745f7631;
+const ADMISSION_LEAF_DOMAIN: felt252 = 0x7a796c6974685f61646d69745f6c6561665f7631;
 
 #[executable]
 fn main(input: Array<felt252>) -> felt252 {
@@ -29,6 +56,13 @@ fn main(input: Array<felt252>) -> felt252 {
     let statement_type = *data.at(0);
     if statement_type == STATEMENT_TYPE_AUCTION {
         verify_auction_statement(data)
+    } else if statement_type == STATEMENT_TYPE_ADMISSION {
+        let (_batch_id, _order_commitment_root, admission_root) = verify_admission_statement(data);
+        admission_root
+    } else if statement_type == STATEMENT_TYPE_AUCTION_RESULT {
+        let (_batch_id, _order_commitment_root, _admission_root, transcript_commitment) =
+            verify_auction_result_statement(data);
+        transcript_commitment
     } else {
         verify_settlement_statement(data)
     }
@@ -57,7 +91,18 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let clearing_price = read_next(data, ref index);
     let matched_order_count = read_next(data, ref index);
     let output_bundle_ref = read_next(data, ref index);
-
+    let prior_note_root = read_next(data, ref index);
+    let prior_nullifier_root = read_next(data, ref index);
+    let prior_renewal_root = read_next(data, ref index);
+    let prior_fee_root = read_next(data, ref index);
+    let consumed_note_root_domain = read_next(data, ref index);
+    let consumed_nullifier_root_domain = read_next(data, ref index);
+    let renewal_child_root_domain = read_next(data, ref index);
+    let output_note_root_domain = read_next(data, ref index);
+    let fee_root_domain = read_next(data, ref index);
+    let state_transition_root_domain = read_next(data, ref index);
+    let nullifier_sparse_leaf_domain = read_next(data, ref index);
+    let nullifier_sparse_node_domain = read_next(data, ref index);
     assert(note_commitment_domain != 0, 'BAD_NOTE_DOMAIN');
     assert(spend_authority_domain != 0, 'BAD_SPEND_DOMAIN');
     assert(nullifier_domain != 0, 'BAD_NULLIFIER_DOMAIN');
@@ -72,8 +117,18 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     assert(pair_id != 0, 'BAD_PAIR');
     assert(base_asset_id != 0, 'BAD_BASE');
     assert(quote_asset_id != 0, 'BAD_QUOTE');
-    assert(clearing_price != 0, 'BAD_PRICE');
+    if matched_order_count != 0 {
+        assert(clearing_price != 0, 'BAD_PRICE');
+    }
     assert(output_bundle_ref != 0, 'BAD_OUTPUT_REF');
+    assert(consumed_note_root_domain != 0, 'BAD_INPUT_ROOT_DOMAIN');
+    assert(consumed_nullifier_root_domain != 0, 'BAD_NULL_ROOT_DOMAIN');
+    assert(renewal_child_root_domain != 0, 'BAD_RENEWAL_ROOT_DOMAIN');
+    assert(output_note_root_domain != 0, 'BAD_OUTPUT_ROOT_DOMAIN');
+    assert(fee_root_domain != 0, 'BAD_FEE_ROOT_DOMAIN');
+    assert(state_transition_root_domain != 0, 'BAD_STATE_ROOT_DOMAIN');
+    assert(nullifier_sparse_leaf_domain != 0, 'BAD_NULL_LEAF_DOMAIN');
+    assert(nullifier_sparse_node_domain != 0, 'BAD_NULL_NODE_DOMAIN');
     assert(base_asset_id != quote_asset_id, 'PAIR_COLLISION');
 
     let matched_order_commitments = read_vector(data, ref index);
@@ -135,15 +190,44 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
 
     let consumed_note_commitments = read_vector(data, ref index);
     let consumed_nullifiers = read_vector(data, ref index);
+    let nullifier_sparse_key_lows = read_vector(data, ref index);
+    let nullifier_sparse_key_highs = read_vector(data, ref index);
+    let nullifier_sparse_path_counts = read_vector(data, ref index);
+    let nullifier_sparse_path_values = read_vector(data, ref index);
+    let nullifier_sparse_path_directions = read_vector(data, ref index);
+    let note_membership_kinds = read_vector(data, ref index);
+    let note_membership_prefix_roots = read_vector(data, ref index);
+    let note_membership_batch_roots = read_vector(data, ref index);
+    let note_membership_path_counts = read_vector(data, ref index);
+    let note_membership_path_values = read_vector(data, ref index);
+    let note_membership_path_directions = read_vector(data, ref index);
+    let note_membership_suffix_counts = read_vector(data, ref index);
+    let note_membership_suffix_roots = read_vector(data, ref index);
     let renewal_parent_order_commitments = read_vector(data, ref index);
     let renewal_child_nullifiers = read_vector(data, ref index);
+    let renewal_child_sparse_key_lows = read_vector(data, ref index);
+    let renewal_child_sparse_key_highs = read_vector(data, ref index);
+    let renewal_child_sparse_path_counts = read_vector(data, ref index);
+    let renewal_child_sparse_path_values = read_vector(data, ref index);
+    let renewal_child_sparse_path_directions = read_vector(data, ref index);
+    let renewal_cancel_sparse_key_lows = read_vector(data, ref index);
+    let renewal_cancel_sparse_key_highs = read_vector(data, ref index);
+    let renewal_cancel_sparse_path_counts = read_vector(data, ref index);
+    let renewal_cancel_sparse_path_values = read_vector(data, ref index);
+    let renewal_cancel_sparse_path_directions = read_vector(data, ref index);
     let output_note_commitments = read_vector(data, ref index);
     let output_note_asset_ids = read_vector(data, ref index);
     let output_note_amounts = read_vector(data, ref index);
     let output_note_withdraw_authorities = read_vector(data, ref index);
-    let fee_asset_ids = read_vector(data, ref index);
-    let fee_recipients = read_vector(data, ref index);
-    let fee_amounts = read_vector(data, ref index);
+    let output_note_owner_keys = read_vector(data, ref index);
+    let output_note_spend_authorities = read_vector(data, ref index);
+    let output_note_blindings = read_vector(data, ref index);
+    let output_note_nonces = read_vector(data, ref index);
+    let output_note_metadata_commitments = read_vector(data, ref index);
+    let output_recovery_key_tags = read_vector(data, ref index);
+    let output_recovery_auth_tags = read_vector(data, ref index);
+    let output_recovery_ciphertext_fields = read_vector(data, ref index);
+    let output_recovery_dummy_commitments = read_vector(data, ref index);
 
     let matched_len: felt252 = matched_order_commitments.len().into();
     assert(matched_len == matched_order_count, 'BAD_MATCH_COUNT');
@@ -156,12 +240,12 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             matched_maker_curve_commitments.len().into(),
             matched_maker_curve_point_counts.len().into(), matched_time_in_force.len().into(),
             matched_expiry_epochs.len().into(), matched_order_nonces.len().into(),
-            matched_parent_order_commitments.len().into(), matched_parent_child_indexes.len().into(),
+            matched_parent_order_commitments.len().into(),
+            matched_parent_child_indexes.len().into(),
             matched_parent_secret_commitments.len().into(),
             matched_parent_cancel_authorities.len().into(),
-            matched_parent_authorization_secrets.len().into(),
-            matched_auditor_flags.len().into(), matched_funding_note_refs.len().into(),
-            matched_funding_note_commitments.len().into(),
+            matched_parent_authorization_secrets.len().into(), matched_auditor_flags.len().into(),
+            matched_funding_note_refs.len().into(), matched_funding_note_commitments.len().into(),
             matched_funding_note_asset_ids.len().into(), matched_funding_note_amounts.len().into(),
             matched_funding_note_owner_keys.len().into(),
             matched_funding_note_spend_authorities.len().into(),
@@ -190,17 +274,66 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             matched_residual_note_blindings.len().into(), matched_residual_note_nonces.len().into(),
             matched_residual_note_metadata_commitments.len().into(),
             consumed_note_commitments.len().into(), consumed_nullifiers.len().into(),
+            note_membership_kinds.len().into(), note_membership_prefix_roots.len().into(),
+            note_membership_batch_roots.len().into(), note_membership_path_counts.len().into(),
+            note_membership_suffix_counts.len().into(),
         ]
             .span(),
         'BAD_WITNESS_LEN',
+    );
+    assert(
+        note_membership_path_values.len() == note_membership_path_directions.len(),
+        'BAD_INPUT_PATH_LEN',
     );
     assert(output_note_commitments.len() == output_note_asset_ids.len(), 'BAD_OUTPUT_LEN');
     assert(output_note_commitments.len() == output_note_amounts.len(), 'BAD_OUTPUT_LEN');
     assert(
         output_note_commitments.len() == output_note_withdraw_authorities.len(), 'BAD_OUTPUT_LEN',
     );
-    assert(fee_asset_ids.len() == fee_recipients.len(), 'BAD_FEE_LEN');
-    assert(fee_asset_ids.len() == fee_amounts.len(), 'BAD_FEE_LEN');
+    assert(output_note_commitments.len() == output_note_owner_keys.len(), 'BAD_OUTPUT_PREIMAGE');
+    assert(
+        output_note_commitments.len() == output_note_spend_authorities.len(), 'BAD_OUTPUT_PREIMAGE',
+    );
+    assert(output_note_commitments.len() == output_note_blindings.len(), 'BAD_OUTPUT_PREIMAGE');
+    assert(output_note_commitments.len() == output_note_nonces.len(), 'BAD_OUTPUT_PREIMAGE');
+    assert(
+        output_note_commitments.len() == output_note_metadata_commitments.len(),
+        'BAD_OUTPUT_PREIMAGE',
+    );
+    assert(output_note_commitments.len() == output_recovery_key_tags.len(), 'BAD_RECOVERY_LEN');
+    assert(output_note_commitments.len() == output_recovery_auth_tags.len(), 'BAD_RECOVERY_LEN');
+    assert(
+        output_recovery_ciphertext_fields.len() == output_note_commitments.len()
+            * OUTPUT_RECOVERY_FIELD_COUNT,
+        'BAD_RECOVERY_FIELDS',
+    );
+    if matched_order_commitments.len() == 0 {
+        assert(consumed_note_commitments.len() == 0, 'NOOP_INPUTS');
+        assert(consumed_nullifiers.len() == 0, 'NOOP_NULLIFIERS');
+        assert(nullifier_sparse_key_lows.len() == 0, 'NOOP_NULLIFIER_PATH');
+        assert(nullifier_sparse_key_highs.len() == 0, 'NOOP_NULLIFIER_PATH');
+        assert(nullifier_sparse_path_counts.len() == 0, 'NOOP_NULLIFIER_PATH');
+        assert(nullifier_sparse_path_values.len() == 0, 'NOOP_NULLIFIER_PATH');
+        assert(nullifier_sparse_path_directions.len() == 0, 'NOOP_NULLIFIER_PATH');
+        assert(note_membership_kinds.len() == 0, 'NOOP_INPUT_PROOFS');
+        assert(renewal_parent_order_commitments.len() == 0, 'NOOP_RENEWALS');
+        assert(renewal_child_nullifiers.len() == 0, 'NOOP_RENEWALS');
+        assert(renewal_child_sparse_key_lows.len() == 0, 'NOOP_RENEWAL_PATH');
+        assert(renewal_child_sparse_key_highs.len() == 0, 'NOOP_RENEWAL_PATH');
+        assert(renewal_child_sparse_path_counts.len() == 0, 'NOOP_RENEWAL_PATH');
+        assert(renewal_child_sparse_path_values.len() == 0, 'NOOP_RENEWAL_PATH');
+        assert(renewal_child_sparse_path_directions.len() == 0, 'NOOP_RENEWAL_PATH');
+        assert(renewal_cancel_sparse_key_lows.len() == 0, 'NOOP_RENEWAL_PATH');
+        assert(renewal_cancel_sparse_key_highs.len() == 0, 'NOOP_RENEWAL_PATH');
+        assert(renewal_cancel_sparse_path_counts.len() == 0, 'NOOP_RENEWAL_PATH');
+        assert(renewal_cancel_sparse_path_values.len() == 0, 'NOOP_RENEWAL_PATH');
+        assert(renewal_cancel_sparse_path_directions.len() == 0, 'NOOP_RENEWAL_PATH');
+        assert(output_note_commitments.len() == 0, 'NOOP_OUTPUTS');
+        assert(output_note_owner_keys.len() == 0, 'NOOP_OUTPUTS');
+        assert(output_recovery_key_tags.len() == 0, 'NOOP_RECOVERY');
+        assert(output_recovery_auth_tags.len() == 0, 'NOOP_RECOVERY');
+        assert(output_recovery_ciphertext_fields.len() == 0, 'NOOP_RECOVERY');
+    }
     let total_curve_points = sum_curve_point_counts(matched_maker_curve_point_counts.span());
     assert(matched_maker_curve_prices.len() == total_curve_points, 'BAD_CURVE_LEN');
     assert(matched_maker_curve_base_amounts.len() == total_curve_points, 'BAD_CURVE_LEN');
@@ -208,19 +341,52 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     assert_unique(matched_order_commitments.span(), 'DUP_ORDER');
     assert_unique(consumed_note_commitments.span(), 'DUP_INPUT_NOTE');
     assert_unique(consumed_nullifiers.span(), 'DUP_NULLIFIER');
-    assert(renewal_parent_order_commitments.len() == renewal_child_nullifiers.len(), 'BAD_RENEWAL_LEN');
+    assert(nullifier_sparse_key_lows.len() == consumed_nullifiers.len(), 'SPARSE_NULLIFIER_LEN');
+    assert(nullifier_sparse_key_highs.len() == consumed_nullifiers.len(), 'SPARSE_NULLIFIER_LEN');
+    assert(nullifier_sparse_path_counts.len() == consumed_nullifiers.len(), 'SPARSE_NULLIFIER_LEN');
+    assert(
+        renewal_parent_order_commitments.len() == renewal_child_nullifiers.len(), 'BAD_RENEWAL_LEN',
+    );
+    assert(
+        renewal_child_sparse_key_lows.len() == renewal_child_nullifiers.len(),
+        'RENEWAL_KEY_LOW_LEN',
+    );
+    assert(
+        renewal_child_sparse_key_highs.len() == renewal_child_nullifiers.len(),
+        'RENEWAL_KEY_HIGH_LEN',
+    );
+    assert(
+        renewal_child_sparse_path_counts.len() == renewal_child_nullifiers.len(),
+        'RENEWAL_PATH_COUNT_LEN',
+    );
+    assert(
+        renewal_cancel_sparse_key_lows.len() == renewal_child_nullifiers.len(),
+        'RENEWAL_CANCEL_LOW_LEN',
+    );
+    assert(
+        renewal_cancel_sparse_key_highs.len() == renewal_child_nullifiers.len(),
+        'RENEWAL_CANCEL_HIGH_LEN',
+    );
+    assert(
+        renewal_cancel_sparse_path_counts.len() == renewal_child_nullifiers.len(),
+        'RENEWAL_CANCEL_COUNT_LEN',
+    );
     assert_unique(renewal_child_nullifiers.span(), 'DUP_RENEWAL_CHILD');
     assert_unique(output_note_commitments.span(), 'DUP_OUTPUT');
 
     let clearing_price_u128 = felt_to_u128(clearing_price);
     let mut index_order = 0;
-    let mut public_output_index = 0;
     let mut total_buy_base: u128 = 0;
     let mut total_sell_base: u128 = 0;
     let mut expected_base_fee: u128 = 0;
     let mut expected_quote_fee: u128 = 0;
     let mut curve_cursor = 0;
     let mut renewal_cursor = 0;
+    let mut renewal_child_path_cursor = 0;
+    let mut renewal_cancel_path_cursor = 0;
+    let mut running_renewal_root = prior_renewal_root;
+    let mut note_membership_path_cursor = 0;
+    let mut note_membership_suffix_cursor = 0;
 
     while index_order < matched_order_commitments.len() {
         let order_commitment = *matched_order_commitments.at(index_order);
@@ -336,11 +502,42 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
                 'RENEWAL_PARENT_BIND',
             );
             assert(
-                *renewal_child_nullifiers.at(renewal_cursor) == renewal_child_nullifier(
-                    parent_order_commitment, parent_child_index, parent_authorization_secret,
-                ),
+                *renewal_child_nullifiers
+                    .at(
+                        renewal_cursor,
+                    ) == renewal_child_nullifier(
+                        parent_order_commitment, parent_child_index, parent_authorization_secret,
+                    ),
                 'RENEWAL_CHILD_BIND',
             );
+            let renewal_cancel_marker = renewal_parent_cancel_marker(
+                parent_secret_commitment, parent_cancel_authority,
+            );
+            running_renewal_root =
+                assert_sparse_entry_absent(
+                    running_renewal_root,
+                    renewal_cancel_marker,
+                    *renewal_cancel_sparse_key_lows.at(renewal_cursor),
+                    *renewal_cancel_sparse_key_highs.at(renewal_cursor),
+                    *renewal_cancel_sparse_path_counts.at(renewal_cursor),
+                    ref renewal_cancel_path_cursor,
+                    renewal_cancel_sparse_path_values.span(),
+                    renewal_cancel_sparse_path_directions.span(),
+                    nullifier_sparse_node_domain,
+                );
+            running_renewal_root =
+                assert_sparse_entry_insert(
+                    running_renewal_root,
+                    *renewal_child_nullifiers.at(renewal_cursor),
+                    *renewal_child_sparse_key_lows.at(renewal_cursor),
+                    *renewal_child_sparse_key_highs.at(renewal_cursor),
+                    *renewal_child_sparse_path_counts.at(renewal_cursor),
+                    ref renewal_child_path_cursor,
+                    renewal_child_sparse_path_values.span(),
+                    renewal_child_sparse_path_directions.span(),
+                    nullifier_sparse_leaf_domain,
+                    nullifier_sparse_node_domain,
+                );
             renewal_cursor += 1;
         }
         assert(
@@ -422,15 +619,11 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         assert(funding_note_commitment == recomputed_funding_note_commitment, 'INPUT_NOTE_BIND');
         assert(funding_note_ref == funding_note_commitment, 'INPUT_REF_MISMATCH');
         assert(
-            check_ecdsa_signature(
-                order_commitment,
-                funding_note_spend_authority,
-                funding_authorization_r,
-                funding_authorization_s,
+            funding_nullifier == note_nullifier(
+                nullifier_domain, funding_note_commitment, funding_note_spend_authority,
             ),
-            'ORDER_AUTH_SIG',
+            'NULLIFIER_BIND',
         );
-
         let recomputed_output_note_commitment = note_commitment(
             note_commitment_domain,
             output_note_asset_id,
@@ -448,9 +641,26 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             funding_note_commitment == *consumed_note_commitments.at(index_order), 'INPUT_MISMATCH',
         );
         assert(funding_nullifier == *consumed_nullifiers.at(index_order), 'NULLIFIER_MISMATCH');
+        assert_note_membership(
+            funding_note_commitment,
+            funding_note_asset_id,
+            funding_note_amount_felt,
+            funding_note_withdraw_authority,
+            prior_note_root,
+            *note_membership_kinds.at(index_order),
+            *note_membership_prefix_roots.at(index_order),
+            *note_membership_batch_roots.at(index_order),
+            *note_membership_path_counts.at(index_order),
+            ref note_membership_path_cursor,
+            note_membership_path_values.span(),
+            note_membership_path_directions.span(),
+            *note_membership_suffix_counts.at(index_order),
+            ref note_membership_suffix_cursor,
+            note_membership_suffix_roots.span(),
+            state_transition_root_domain,
+        );
 
-        assert_public_output(
-            public_output_index,
+        assert_public_output_present(
             output_note_commitment,
             output_note_asset_id,
             output_note_amount,
@@ -460,7 +670,6 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             output_note_amounts.span(),
             output_note_withdraw_authorities.span(),
         );
-        public_output_index += 1;
         assert(output_note_owner_key == recipient_owner_key, 'OUTPUT_RECIPIENT');
         assert(output_note_spend_authority == recipient_spend_authority, 'OUTPUT_SPEND_AUTH');
         assert(
@@ -475,8 +684,6 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             let spend_amount = filled_amount * clearing_price_u128;
             assert(funding_note_amount >= spend_amount, 'BUY_FUNDS');
             let fee_amount = filled_amount * PROTOCOL_FEE_BPS / FEE_BPS_DENOMINATOR;
-            assert(output_note_amount == filled_amount - fee_amount, 'BUY_FEE_POLICY');
-
             total_buy_base = total_buy_base + filled_amount;
             expected_base_fee = expected_base_fee + fee_amount;
             funding_note_amount - spend_amount
@@ -489,8 +696,6 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
 
             let gross_quote = filled_amount * clearing_price_u128;
             let fee_amount = gross_quote * PROTOCOL_FEE_BPS / FEE_BPS_DENOMINATOR;
-            assert(output_note_amount == gross_quote - fee_amount, 'SELL_FEE_POLICY');
-
             total_sell_base = total_sell_base + filled_amount;
             expected_quote_fee = expected_quote_fee + fee_amount;
             funding_note_amount - filled_amount
@@ -511,7 +716,6 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             );
         } else {
             assert(residual_note_flag == 1, 'RES_FLAG_MISSING');
-            assert(residual_note_amount_felt == expected_residual_amount.into(), 'BAD_RES_AMOUNT');
             let expected_residual_asset_id = if side == ORDER_SIDE_BUY {
                 quote_asset_id
             } else {
@@ -542,37 +746,115 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             assert(
                 residual_note_commitment == recomputed_residual_note_commitment, 'RES_NOTE_BIND',
             );
-            assert_public_output(
-                public_output_index,
+            assert_public_output_present(
                 residual_note_commitment,
                 residual_note_asset_id,
-                expected_residual_amount,
+                felt_to_u128(residual_note_amount_felt),
                 residual_note_withdraw_authority,
                 output_note_commitments.span(),
                 output_note_asset_ids.span(),
                 output_note_amounts.span(),
                 output_note_withdraw_authorities.span(),
             );
-            public_output_index += 1;
         }
 
         index_order += 1;
     }
     assert(renewal_cursor == renewal_child_nullifiers.len(), 'RENEWAL_CURSOR');
+    assert(
+        renewal_child_path_cursor == renewal_child_sparse_path_values.len(), 'RENEWAL_PATH_CURSOR',
+    );
+    assert(
+        renewal_child_path_cursor == renewal_child_sparse_path_directions.len(),
+        'RENEWAL_DIR_CURSOR',
+    );
+    assert(
+        renewal_cancel_path_cursor == renewal_cancel_sparse_path_values.len(),
+        'RENEWAL_CANCEL_CURSOR',
+    );
+    assert(
+        renewal_cancel_path_cursor == renewal_cancel_sparse_path_directions.len(),
+        'RENEWAL_CANCEL_DIR',
+    );
+    assert(note_membership_path_cursor == note_membership_path_values.len(), 'INPUT_PATH_CURSOR');
+    assert(
+        note_membership_path_cursor == note_membership_path_directions.len(), 'INPUT_DIR_CURSOR',
+    );
+    assert(
+        note_membership_suffix_cursor == note_membership_suffix_roots.len(), 'INPUT_SUFFIX_CURSOR',
+    );
 
-    assert(public_output_index == output_note_commitments.len(), 'OUTPUT_CURSOR');
     assert(total_buy_base == total_sell_base, 'BASE_IMBALANCE');
-
-    let (actual_base_fee, actual_quote_fee) = aggregate_fees(
+    assert_netted_public_outputs(
         base_asset_id,
         quote_asset_id,
-        PROTOCOL_FEE_RECIPIENT,
-        fee_asset_ids.span(),
-        fee_recipients.span(),
-        fee_amounts.span(),
+        clearing_price_u128,
+        matched_fill_amounts.span(),
+        matched_sides.span(),
+        matched_funding_note_amounts.span(),
+        matched_output_note_commitments.span(),
+        matched_residual_note_flags.span(),
+        matched_residual_note_commitments.span(),
+        output_note_commitments.span(),
+        output_note_amounts.span(),
     );
-    assert(actual_base_fee == expected_base_fee, 'BASE_FEE');
-    assert(actual_quote_fee == expected_quote_fee, 'QUOTE_FEE');
+
+    let consumed_note_root = single_field_root(
+        consumed_note_root_domain, consumed_note_commitments.span(),
+    );
+    let consumed_nullifier_root = single_field_root(
+        consumed_nullifier_root_domain, consumed_nullifiers.span(),
+    );
+    let renewal_child_root = single_field_root(
+        renewal_child_root_domain, renewal_child_nullifiers.span(),
+    );
+    let output_note_root = output_note_merkle_root(
+        output_bundle_ref,
+        output_note_commitments.span(),
+        output_note_asset_ids.span(),
+        output_note_amounts.span(),
+        output_note_withdraw_authorities.span(),
+    );
+    assert_output_recovery_bundle(
+        note_commitment_domain,
+        output_bundle_ref,
+        batch_id,
+        output_note_root,
+        output_note_commitments.span(),
+        output_note_asset_ids.span(),
+        output_note_amounts.span(),
+        output_note_withdraw_authorities.span(),
+        output_note_owner_keys.span(),
+        output_note_spend_authorities.span(),
+        output_note_blindings.span(),
+        output_note_nonces.span(),
+        output_note_metadata_commitments.span(),
+        output_recovery_key_tags.span(),
+        output_recovery_auth_tags.span(),
+        output_recovery_ciphertext_fields.span(),
+        output_recovery_dummy_commitments.span(),
+    );
+    let fee_root = protocol_fee_root(
+        fee_root_domain, base_asset_id, quote_asset_id, expected_base_fee, expected_quote_fee,
+    );
+    let new_note_root = state_transition_root(
+        state_transition_root_domain, prior_note_root, output_note_root,
+    );
+    let new_nullifier_root = assert_sparse_nullifier_updates(
+        prior_nullifier_root,
+        consumed_nullifiers.span(),
+        nullifier_sparse_key_lows.span(),
+        nullifier_sparse_key_highs.span(),
+        nullifier_sparse_path_counts.span(),
+        nullifier_sparse_path_values.span(),
+        nullifier_sparse_path_directions.span(),
+        nullifier_sparse_leaf_domain,
+        nullifier_sparse_node_domain,
+    );
+    let new_renewal_root = running_renewal_root;
+    let new_fee_root = state_transition_root(
+        state_transition_root_domain, prior_fee_root, fee_root,
+    );
 
     let recomputed_public_settlement = public_settlement_commitment(
         public_settlement_domain,
@@ -583,17 +865,19 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         encrypted_order_set_commitment,
         clearing_price,
         output_bundle_ref,
-        consumed_note_commitments.span(),
-        consumed_nullifiers.span(),
-        renewal_parent_order_commitments.span(),
-        renewal_child_nullifiers.span(),
-        output_note_commitments.span(),
-        output_note_asset_ids.span(),
-        output_note_amounts.span(),
-        output_note_withdraw_authorities.span(),
-        fee_asset_ids.span(),
-        fee_recipients.span(),
-        fee_amounts.span(),
+        prior_note_root,
+        prior_nullifier_root,
+        prior_renewal_root,
+        prior_fee_root,
+        consumed_note_root,
+        consumed_nullifier_root,
+        renewal_child_root,
+        output_note_root,
+        fee_root,
+        new_note_root,
+        new_nullifier_root,
+        new_renewal_root,
+        new_fee_root,
     );
     assert(recomputed_public_settlement == transcript_commitment, 'PUBLIC_SETTLEMENT_BIND');
 
@@ -611,6 +895,354 @@ pub fn verify_auction_statement(data: Span<felt252>) -> felt252 {
 
     let settlement_payload = read_vector(data, ref index);
     let transcript_commitment = verify_settlement_statement(settlement_payload.span());
+    verify_auction_statement_after_settlement(data, transcript_commitment)
+}
+
+pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, felt252) {
+    let mut index: usize = 0;
+    let statement_type = read_next(data, ref index);
+    assert(statement_type == STATEMENT_TYPE_ADMISSION, 'BAD_ADMIT_TYPE');
+
+    let settlement_payload = read_vector(data, ref index);
+    let order_commitment_root = settlement_order_commitment_root(settlement_payload.span());
+    let note_commitment_domain = settlement_note_commitment_domain(settlement_payload.span());
+    let spend_authority_domain = settlement_spend_authority_domain(settlement_payload.span());
+    let nullifier_domain = settlement_nullifier_domain(settlement_payload.span());
+    let order_commitment_domain = settlement_order_commitment_domain(settlement_payload.span());
+    let maker_curve_domain = settlement_maker_curve_domain(settlement_payload.span());
+    let batch_id = settlement_batch_id(settlement_payload.span());
+    let pair_id = settlement_pair_id(settlement_payload.span());
+    let batch_epoch = settlement_batch_epoch(settlement_payload.span());
+    let base_asset_id = settlement_base_asset_id(settlement_payload.span());
+    let quote_asset_id = settlement_quote_asset_id(settlement_payload.span());
+
+    let order_commitments = read_vector(data, ref index);
+    let sides = read_vector(data, ref index);
+    let order_types = read_vector(data, ref index);
+    let maker_curve_commitments = read_vector(data, ref index);
+    let maker_curve_point_counts = read_vector(data, ref index);
+    let maker_curve_prices = read_vector(data, ref index);
+    let maker_curve_base_amounts = read_vector(data, ref index);
+    let limit_prices = read_vector(data, ref index);
+    let order_amounts = read_vector(data, ref index);
+    let min_fills = read_vector(data, ref index);
+    let time_in_force = read_vector(data, ref index);
+    let expiry_epochs = read_vector(data, ref index);
+    let order_nonces = read_vector(data, ref index);
+    let parent_order_commitments = read_vector(data, ref index);
+    let parent_child_indexes = read_vector(data, ref index);
+    let parent_secret_commitments = read_vector(data, ref index);
+    let parent_cancel_authorities = read_vector(data, ref index);
+    let parent_authorization_secrets = read_vector(data, ref index);
+    let auditor_flags = read_vector(data, ref index);
+    let funding_note_refs = read_vector(data, ref index);
+    let funding_note_commitments = read_vector(data, ref index);
+    let funding_note_asset_ids = read_vector(data, ref index);
+    let funding_note_amounts = read_vector(data, ref index);
+    let funding_note_owner_keys = read_vector(data, ref index);
+    let funding_note_spend_authorities = read_vector(data, ref index);
+    let funding_note_withdraw_authorities = read_vector(data, ref index);
+    let funding_note_blindings = read_vector(data, ref index);
+    let funding_note_nonces = read_vector(data, ref index);
+    let funding_note_metadata_commitments = read_vector(data, ref index);
+    let funding_authorization_rs = read_vector(data, ref index);
+    let funding_authorization_ss = read_vector(data, ref index);
+    let funding_nullifiers = read_vector(data, ref index);
+    let recipient_owner_keys = read_vector(data, ref index);
+    let recipient_spend_authorities = read_vector(data, ref index);
+    let recipient_withdraw_authorities = read_vector(data, ref index);
+    let res_auths = read_vector(data, ref index);
+    let res_auths_span = res_auths.span();
+
+    assert_all_lengths_match(
+        order_commitments.len(),
+        array![
+            sides.len().into(), order_types.len().into(), maker_curve_commitments.len().into(),
+            maker_curve_point_counts.len().into(), limit_prices.len().into(),
+            order_amounts.len().into(), min_fills.len().into(), time_in_force.len().into(),
+            expiry_epochs.len().into(), order_nonces.len().into(), auditor_flags.len().into(),
+            parent_order_commitments.len().into(), parent_child_indexes.len().into(),
+            parent_secret_commitments.len().into(), parent_cancel_authorities.len().into(),
+            parent_authorization_secrets.len().into(), funding_note_refs.len().into(),
+            funding_note_commitments.len().into(), funding_note_asset_ids.len().into(),
+            funding_note_amounts.len().into(), funding_note_owner_keys.len().into(),
+            funding_note_spend_authorities.len().into(),
+            funding_note_withdraw_authorities.len().into(), funding_note_blindings.len().into(),
+            funding_note_nonces.len().into(), funding_note_metadata_commitments.len().into(),
+            funding_authorization_rs.len().into(), funding_authorization_ss.len().into(),
+            funding_nullifiers.len().into(), recipient_owner_keys.len().into(),
+            recipient_spend_authorities.len().into(), recipient_withdraw_authorities.len().into(),
+            res_auths_span.len().into(),
+        ]
+            .span(),
+        'BAD_ADMISSION_LEN',
+    );
+    let total_curve_points = sum_curve_point_counts(maker_curve_point_counts.span());
+    assert(maker_curve_prices.len() == total_curve_points, 'BAD_ADMISSION_CURVES');
+    assert(maker_curve_base_amounts.len() == total_curve_points, 'BAD_ADMISSION_CURVES');
+    assert_unique(order_commitments.span(), 'DUP_ADMISSION_ORDER');
+    assert(
+        ordered_commitment_root(order_commitments.span()) == order_commitment_root,
+        'ADMISSION_ROOT_BIND',
+    );
+    if order_commitments.len() != 0 {
+        assert_auction_order_preimages(
+            0,
+            order_commitments.span(),
+            sides.span(),
+            order_types.span(),
+            maker_curve_commitments.span(),
+            maker_curve_point_counts.span(),
+            maker_curve_prices.span(),
+            maker_curve_base_amounts.span(),
+            limit_prices.span(),
+            order_amounts.span(),
+            min_fills.span(),
+            time_in_force.span(),
+            expiry_epochs.span(),
+            order_nonces.span(),
+            parent_order_commitments.span(),
+            parent_child_indexes.span(),
+            parent_secret_commitments.span(),
+            parent_cancel_authorities.span(),
+            parent_authorization_secrets.span(),
+            auditor_flags.span(),
+            funding_note_refs.span(),
+            funding_note_commitments.span(),
+            funding_note_asset_ids.span(),
+            funding_note_amounts.span(),
+            funding_note_owner_keys.span(),
+            funding_note_spend_authorities.span(),
+            funding_note_withdraw_authorities.span(),
+            funding_note_blindings.span(),
+            funding_note_nonces.span(),
+            funding_note_metadata_commitments.span(),
+            funding_authorization_rs.span(),
+            funding_authorization_ss.span(),
+            funding_nullifiers.span(),
+            recipient_owner_keys.span(),
+            recipient_spend_authorities.span(),
+            recipient_withdraw_authorities.span(),
+            res_auths_span,
+            note_commitment_domain,
+            spend_authority_domain,
+            nullifier_domain,
+            order_commitment_domain,
+            maker_curve_domain,
+            batch_id,
+            pair_id,
+            batch_epoch,
+            base_asset_id,
+            quote_asset_id,
+        );
+    }
+    assert(index == data.len(), 'TRAILING_ADMISSION_INPUT');
+    let admission_root = admission_summary_root(
+        order_commitments.span(),
+        sides.span(),
+        order_types.span(),
+        maker_curve_commitments.span(),
+        limit_prices.span(),
+        order_amounts.span(),
+        min_fills.span(),
+        time_in_force.span(),
+        funding_note_amounts.span(),
+        funding_note_owner_keys.span(),
+    );
+    (batch_id, order_commitment_root, admission_root)
+}
+
+pub fn verify_auction_result_statement(data: Span<felt252>) -> (felt252, felt252, felt252, felt252) {
+    let mut index: usize = 0;
+    let statement_type = read_next(data, ref index);
+    assert(statement_type == STATEMENT_TYPE_AUCTION_RESULT, 'BAD_AUCRES_TYPE');
+
+    let settlement_payload = read_vector(data, ref index);
+    let transcript_commitment = settlement_transcript_commitment(settlement_payload.span());
+    let order_commitment_root = settlement_order_commitment_root(settlement_payload.span());
+    let clearing_price = settlement_clearing_price(settlement_payload.span());
+    let maker_curve_domain = settlement_maker_curve_domain(settlement_payload.span());
+    let batch_id = settlement_batch_id(settlement_payload.span());
+    let matched_order_commitments = settlement_matched_order_commitments(settlement_payload.span());
+    let matched_fill_amounts = settlement_matched_fill_amounts(settlement_payload.span());
+    let clearing_price_u128 = felt_to_u128(clearing_price);
+    let admission_root = read_next(data, ref index);
+
+    let order_commitments = read_vector(data, ref index);
+    let sides = read_vector(data, ref index);
+    let order_types = read_vector(data, ref index);
+    let maker_curve_commitments = read_vector(data, ref index);
+    let maker_curve_point_counts = read_vector(data, ref index);
+    let maker_curve_prices = read_vector(data, ref index);
+    let maker_curve_base_amounts = read_vector(data, ref index);
+    let limit_prices = read_vector(data, ref index);
+    let order_amounts = read_vector(data, ref index);
+    let min_fills = read_vector(data, ref index);
+    let time_in_force = read_vector(data, ref index);
+    let funding_note_amounts = read_vector(data, ref index);
+    let funding_note_owner_keys = read_vector(data, ref index);
+    let allocation_fill_amounts = read_vector(data, ref index);
+    let privacy_gate_enforced = read_next(data, ref index);
+    let privacy_min_batch_base_liquidity = read_next(data, ref index);
+    let privacy_min_batch_participants = read_next(data, ref index);
+    let privacy_min_eligible_orders = read_next(data, ref index);
+    let privacy_max_single_order_fill_bps = read_next(data, ref index);
+    let privacy_max_single_owner_fill_bps = read_next(data, ref index);
+    let privacy_min_maker_participants = read_next(data, ref index);
+    let privacy_max_maker_fill_bps = read_next(data, ref index);
+
+    assert_all_lengths_match(
+        order_commitments.len(),
+        array![
+            sides.len().into(), order_types.len().into(), maker_curve_commitments.len().into(),
+            maker_curve_point_counts.len().into(), limit_prices.len().into(),
+            order_amounts.len().into(), min_fills.len().into(), time_in_force.len().into(),
+            funding_note_amounts.len().into(), funding_note_owner_keys.len().into(),
+            allocation_fill_amounts.len().into(),
+        ]
+            .span(),
+        'BAD_AUCRES_LEN',
+    );
+    let total_curve_points = sum_curve_point_counts(maker_curve_point_counts.span());
+    assert(maker_curve_prices.len() == total_curve_points, 'BAD_AUCRES_CURVES');
+    assert(maker_curve_base_amounts.len() == total_curve_points, 'BAD_AUCRES_CURVES');
+    assert_unique(order_commitments.span(), 'DUP_AUCRES_ORDER');
+    assert(
+        ordered_commitment_root(order_commitments.span()) == order_commitment_root,
+        'AUCRES_ORDER_ROOT',
+    );
+    assert(
+        admission_summary_root(
+            order_commitments.span(),
+            sides.span(),
+            order_types.span(),
+            maker_curve_commitments.span(),
+            limit_prices.span(),
+            order_amounts.span(),
+            min_fills.span(),
+            time_in_force.span(),
+            funding_note_amounts.span(),
+            funding_note_owner_keys.span(),
+        ) == admission_root,
+        'AUCRES_ADMISSION_ROOT',
+    );
+    assert_curve_commitments_for_summary(
+        clearing_price_u128,
+        sides.span(),
+        order_types.span(),
+        maker_curve_domain,
+        maker_curve_commitments.span(),
+        maker_curve_point_counts.span(),
+        maker_curve_prices.span(),
+        maker_curve_base_amounts.span(),
+    );
+    if matched_order_commitments.len() == 0 {
+        assert_all_zero(allocation_fill_amounts.span(), 'NOOP_ALLOC');
+        if privacy_gate_enforced == 1 {
+            assert_privacy_gate_failure(
+                clearing_price_u128,
+                sides.span(),
+                order_types.span(),
+                maker_curve_point_counts.span(),
+                maker_curve_prices.span(),
+                maker_curve_base_amounts.span(),
+                limit_prices.span(),
+                order_amounts.span(),
+                min_fills.span(),
+                time_in_force.span(),
+                funding_note_amounts.span(),
+                funding_note_owner_keys.span(),
+                privacy_min_batch_base_liquidity,
+                privacy_min_batch_participants,
+                privacy_min_eligible_orders,
+                privacy_max_single_order_fill_bps,
+                privacy_max_single_owner_fill_bps,
+                privacy_min_maker_participants,
+                privacy_max_maker_fill_bps,
+            );
+        } else {
+            assert_no_executable_auction(
+                sides.span(),
+                order_types.span(),
+                maker_curve_point_counts.span(),
+                maker_curve_prices.span(),
+                maker_curve_base_amounts.span(),
+                limit_prices.span(),
+                order_amounts.span(),
+                min_fills.span(),
+                time_in_force.span(),
+                funding_note_amounts.span(),
+            );
+        }
+    } else {
+        assert(privacy_gate_enforced == 1, 'MATCH_PRIVACY_GATE');
+        assert_auction_allocation(
+            clearing_price_u128,
+            order_commitments.span(),
+            sides.span(),
+            order_types.span(),
+            maker_curve_point_counts.span(),
+            maker_curve_prices.span(),
+            maker_curve_base_amounts.span(),
+            limit_prices.span(),
+            order_amounts.span(),
+            min_fills.span(),
+            time_in_force.span(),
+            funding_note_amounts.span(),
+            allocation_fill_amounts.span(),
+            matched_order_commitments.span(),
+            matched_fill_amounts.span(),
+        );
+        assert_best_clearing_price(
+            clearing_price_u128,
+            sides.span(),
+            order_types.span(),
+            maker_curve_point_counts.span(),
+            maker_curve_prices.span(),
+            maker_curve_base_amounts.span(),
+            limit_prices.span(),
+            order_amounts.span(),
+            min_fills.span(),
+            time_in_force.span(),
+            funding_note_amounts.span(),
+        );
+        assert_privacy_gate_success(
+            clearing_price_u128,
+            sides.span(),
+            order_types.span(),
+            maker_curve_point_counts.span(),
+            maker_curve_prices.span(),
+            maker_curve_base_amounts.span(),
+            limit_prices.span(),
+            order_amounts.span(),
+            min_fills.span(),
+            time_in_force.span(),
+            funding_note_amounts.span(),
+            funding_note_owner_keys.span(),
+            privacy_min_batch_base_liquidity,
+            privacy_min_batch_participants,
+            privacy_min_eligible_orders,
+            privacy_max_single_order_fill_bps,
+            privacy_max_single_owner_fill_bps,
+            privacy_min_maker_participants,
+            privacy_max_maker_fill_bps,
+        );
+    }
+    assert(index == data.len(), 'TRAILING_AUCRES_INPUT');
+    (batch_id, order_commitment_root, admission_root, transcript_commitment)
+}
+
+pub fn verify_auction_statement_after_settlement(
+    data: Span<felt252>, verified_transcript_commitment: felt252,
+) -> felt252 {
+    let mut index: usize = 0;
+
+    let statement_type = read_next(data, ref index);
+    assert(statement_type == STATEMENT_TYPE_AUCTION, 'BAD_AUCTION_TYPE');
+
+    let settlement_payload = read_vector(data, ref index);
+    let transcript_commitment = settlement_transcript_commitment(settlement_payload.span());
+    assert(transcript_commitment == verified_transcript_commitment, 'AUCTION_SETTLE_BIND');
     let order_commitment_root = settlement_order_commitment_root(settlement_payload.span());
     let clearing_price = settlement_clearing_price(settlement_payload.span());
     let note_commitment_domain = settlement_note_commitment_domain(settlement_payload.span());
@@ -665,8 +1297,15 @@ pub fn verify_auction_statement(data: Span<felt252>) -> felt252 {
     let res_auths = read_vector(data, ref index);
     let res_auths_span = res_auths.span();
     let allocation_fill_amounts = read_vector(data, ref index);
+    let privacy_gate_enforced = read_next(data, ref index);
+    let privacy_min_batch_base_liquidity = read_next(data, ref index);
+    let privacy_min_batch_participants = read_next(data, ref index);
+    let privacy_min_eligible_orders = read_next(data, ref index);
+    let privacy_max_single_order_fill_bps = read_next(data, ref index);
+    let privacy_max_single_owner_fill_bps = read_next(data, ref index);
+    let privacy_min_maker_participants = read_next(data, ref index);
+    let privacy_max_maker_fill_bps = read_next(data, ref index);
 
-    assert(order_commitments.len() != 0, 'EMPTY_AUCTION');
     assert_all_lengths_match(
         order_commitments.len(),
         array![
@@ -676,10 +1315,10 @@ pub fn verify_auction_statement(data: Span<felt252>) -> felt252 {
             expiry_epochs.len().into(), order_nonces.len().into(), auditor_flags.len().into(),
             parent_order_commitments.len().into(), parent_child_indexes.len().into(),
             parent_secret_commitments.len().into(), parent_cancel_authorities.len().into(),
-            parent_authorization_secrets.len().into(),
-            funding_note_refs.len().into(), funding_note_commitments.len().into(),
-            funding_note_asset_ids.len().into(), funding_note_amounts.len().into(),
-            funding_note_owner_keys.len().into(), funding_note_spend_authorities.len().into(),
+            parent_authorization_secrets.len().into(), funding_note_refs.len().into(),
+            funding_note_commitments.len().into(), funding_note_asset_ids.len().into(),
+            funding_note_amounts.len().into(), funding_note_owner_keys.len().into(),
+            funding_note_spend_authorities.len().into(),
             funding_note_withdraw_authorities.len().into(), funding_note_blindings.len().into(),
             funding_note_nonces.len().into(), funding_note_metadata_commitments.len().into(),
             funding_authorization_rs.len().into(), funding_authorization_ss.len().into(),
@@ -698,6 +1337,13 @@ pub fn verify_auction_statement(data: Span<felt252>) -> felt252 {
         ordered_commitment_root(order_commitments.span()) == order_commitment_root,
         'AUCTION_ROOT_BIND',
     );
+    if order_commitments.len() == 0 {
+        assert(matched_order_commitments.len() == 0, 'EMPTY_AUCTION_MATCH');
+        assert(matched_fill_amounts.len() == 0, 'EMPTY_AUCTION_FILL');
+        assert(clearing_price == 0, 'EMPTY_AUCTION_PRICE');
+        assert(index == data.len(), 'TRAILING_AUCTION_INPUT');
+        return transcript_commitment;
+    }
 
     assert_auction_order_preimages(
         clearing_price_u128,
@@ -748,6 +1394,65 @@ pub fn verify_auction_statement(data: Span<felt252>) -> felt252 {
         base_asset_id,
         quote_asset_id,
     );
+    if matched_order_commitments.len() == 0 {
+        assert_all_zero(allocation_fill_amounts.span(), 'NOOP_ALLOC');
+        if privacy_gate_enforced == 1 {
+            assert_privacy_gate_failure(
+                clearing_price_u128,
+                sides.span(),
+                order_types.span(),
+                maker_curve_point_counts.span(),
+                maker_curve_prices.span(),
+                maker_curve_base_amounts.span(),
+                limit_prices.span(),
+                order_amounts.span(),
+                min_fills.span(),
+                time_in_force.span(),
+                funding_note_amounts.span(),
+                funding_note_owner_keys.span(),
+                privacy_min_batch_base_liquidity,
+                privacy_min_batch_participants,
+                privacy_min_eligible_orders,
+                privacy_max_single_order_fill_bps,
+                privacy_max_single_owner_fill_bps,
+                privacy_min_maker_participants,
+                privacy_max_maker_fill_bps,
+            );
+        } else {
+            assert_no_executable_auction(
+                sides.span(),
+                order_types.span(),
+                maker_curve_point_counts.span(),
+                maker_curve_prices.span(),
+                maker_curve_base_amounts.span(),
+                limit_prices.span(),
+                order_amounts.span(),
+                min_fills.span(),
+                time_in_force.span(),
+                funding_note_amounts.span(),
+            );
+        }
+        if has_non_cover_orders(order_types.span()) == 1 {
+            assert_best_clearing_price(
+                clearing_price_u128,
+                sides.span(),
+                order_types.span(),
+                maker_curve_point_counts.span(),
+                maker_curve_prices.span(),
+                maker_curve_base_amounts.span(),
+                limit_prices.span(),
+                order_amounts.span(),
+                min_fills.span(),
+                time_in_force.span(),
+                funding_note_amounts.span(),
+            );
+        } else {
+            assert(clearing_price != 0, 'BAD_COVER_PRICE');
+        }
+        assert(index == data.len(), 'TRAILING_AUCTION_INPUT');
+        return transcript_commitment;
+    }
+    assert(privacy_gate_enforced == 1, 'MATCH_PRIVACY_GATE');
     assert_auction_allocation(
         clearing_price_u128,
         order_commitments.span(),
@@ -765,7 +1470,7 @@ pub fn verify_auction_statement(data: Span<felt252>) -> felt252 {
         matched_order_commitments.span(),
         matched_fill_amounts.span(),
     );
-    assert_best_clearing_price(
+    assert_privacy_gate_success(
         clearing_price_u128,
         sides.span(),
         order_types.span(),
@@ -777,8 +1482,15 @@ pub fn verify_auction_statement(data: Span<felt252>) -> felt252 {
         min_fills.span(),
         time_in_force.span(),
         funding_note_amounts.span(),
+        funding_note_owner_keys.span(),
+        privacy_min_batch_base_liquidity,
+        privacy_min_batch_participants,
+        privacy_min_eligible_orders,
+        privacy_max_single_order_fill_bps,
+        privacy_max_single_owner_fill_bps,
+        privacy_min_maker_participants,
+        privacy_max_maker_fill_bps,
     );
-
     assert(index == data.len(), 'TRAILING_AUCTION_INPUT');
     transcript_commitment
 }
@@ -787,6 +1499,12 @@ fn settlement_clearing_price(settlement_payload: Span<felt252>) -> felt252 {
     assert(settlement_payload.len() > 15, 'BAD_SETTLEMENT_HEADER');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'BAD_STMT_TYPE');
     *settlement_payload.at(15)
+}
+
+fn settlement_transcript_commitment(settlement_payload: Span<felt252>) -> felt252 {
+    assert(settlement_payload.len() > 12, 'BAD_SETTLEMENT_HEADER');
+    assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'BAD_STMT_TYPE');
+    *settlement_payload.at(12)
 }
 
 fn settlement_order_commitment_root(settlement_payload: Span<felt252>) -> felt252 {
@@ -856,16 +1574,16 @@ fn settlement_quote_asset_id(settlement_payload: Span<felt252>) -> felt252 {
 }
 
 fn settlement_matched_order_commitments(settlement_payload: Span<felt252>) -> Array<felt252> {
-    assert(settlement_payload.len() > 18, 'BAD_SETTLEMENT_HEADER');
+    assert(settlement_payload.len() > 30, 'BAD_SETTLEMENT_HEADER');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'BAD_STMT_TYPE');
-    let mut index: usize = 18;
+    let mut index: usize = 30;
     read_vector(settlement_payload, ref index)
 }
 
 fn settlement_matched_fill_amounts(settlement_payload: Span<felt252>) -> Array<felt252> {
-    assert(settlement_payload.len() > 18, 'BAD_SETTLEMENT_HEADER');
+    assert(settlement_payload.len() > 30, 'BAD_SETTLEMENT_HEADER');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'BAD_STMT_TYPE');
-    let mut index: usize = 18;
+    let mut index: usize = 30;
     let _matched_order_commitments = read_vector(settlement_payload, ref index);
     read_vector(settlement_payload, ref index)
 }
@@ -961,7 +1679,9 @@ fn assert_auction_order_preimages(
         assert(order_commitment != 0, 'BAD_AUCTION_ORDER');
         assert(side == ORDER_SIDE_BUY || side == ORDER_SIDE_SELL, 'BAD_SIDE');
         assert(
-            order_type == ORDER_TYPE_LIMIT_BATCH || order_type == ORDER_TYPE_MAKER_CURVE,
+            order_type == ORDER_TYPE_LIMIT_BATCH
+                || order_type == ORDER_TYPE_MAKER_CURVE
+                || order_type == ORDER_TYPE_HEARTBEAT_COVER,
             'BAD_ORDER_TYPE',
         );
         assert(limit_price != 0, 'BAD_LIMIT');
@@ -983,21 +1703,10 @@ fn assert_auction_order_preimages(
             parent_authorization_secret,
         );
         assert(auditor_view_allowed == 0 || auditor_view_allowed == 1, 'BAD_AUDITOR');
-        assert(funding_note_ref != 0, 'BAD_FUNDING_REF');
-        assert(funding_note_commitment != 0, 'BAD_FUNDING_NOTE');
-        assert(funding_note_owner_key != 0, 'BAD_FUNDING_OWNER');
-        assert(funding_note_spend_authority != 0, 'BAD_FUNDING_SPEND');
-        assert(funding_note_withdraw_authority != 0, 'BAD_FUNDING_AUTH');
-        assert(funding_note_blinding != 0, 'BAD_FUNDING_BLIND');
-        assert(funding_note_metadata_commitment != 0, 'BAD_FUNDING_META');
-        assert(funding_authorization_r != 0, 'BAD_AUTH_R');
-        assert(funding_authorization_s != 0, 'BAD_AUTH_S');
-        assert(funding_nullifier != 0, 'BAD_NULLIFIER');
         assert(recipient_owner_key != 0, 'BAD_RECIPIENT');
         assert(recipient_spend_authority != 0, 'BAD_RECIPIENT_SPEND');
         assert(recipient_withdraw_authority != 0, 'BAD_RECIPIENT_AUTH');
         assert(recipient_residual_withdraw_authority != 0, 'BAD_RES_AUTH');
-        assert(funding_note_amount != 0, 'BAD_FUNDS');
         let (curve_total_amount, _curve_capacity_at_price, curve_quote_funding_required) =
             assert_maker_curve(
             order_type,
@@ -1021,12 +1730,34 @@ fn assert_auction_order_preimages(
                 assert(felt_to_u128(funding_note_amount) >= curve_total_amount, 'CURVE_SELL_FUNDS');
             }
         }
-        if side == ORDER_SIDE_BUY {
-            assert(funding_note_asset_id == quote_asset_id, 'BUY_INPUT_ASSET');
-        } else {
-            assert(funding_note_asset_id == base_asset_id, 'SELL_INPUT_ASSET');
-        }
 
+        if order_type != ORDER_TYPE_HEARTBEAT_COVER {
+            assert(funding_note_ref != 0, 'BAD_FUNDING_REF');
+            assert(funding_note_commitment != 0, 'BAD_FUNDING_NOTE');
+            assert(funding_note_owner_key != 0, 'BAD_FUNDING_OWNER');
+            assert(funding_note_spend_authority != 0, 'BAD_FUNDING_SPEND');
+            assert(funding_note_withdraw_authority != 0, 'BAD_FUNDING_AUTH');
+            assert(funding_note_blinding != 0, 'BAD_FUNDING_BLIND');
+            assert(funding_note_metadata_commitment != 0, 'BAD_FUNDING_META');
+            assert(funding_authorization_r != 0, 'BAD_AUTH_R');
+            assert(funding_authorization_s != 0, 'BAD_AUTH_S');
+            assert(
+                check_ecdsa_signature(
+                    order_commitment,
+                    funding_note_spend_authority,
+                    funding_authorization_r,
+                    funding_authorization_s,
+                ),
+                'BAD_AUTH_SIG',
+            );
+            assert(funding_nullifier != 0, 'BAD_NULLIFIER');
+            assert(funding_note_amount != 0, 'BAD_FUNDS');
+            if side == ORDER_SIDE_BUY {
+                assert(funding_note_asset_id == quote_asset_id, 'BUY_INPUT_ASSET');
+            } else {
+                assert(funding_note_asset_id == base_asset_id, 'SELL_INPUT_ASSET');
+            }
+        }
         let recomputed_order_commitment = order_intent_commitment(
             order_commitment_domain,
             pair_id,
@@ -1055,28 +1786,27 @@ fn assert_auction_order_preimages(
         );
         assert(order_commitment == recomputed_order_commitment, 'AUCTION_ORDER_BIND');
 
-        let recomputed_funding_note_commitment = note_commitment(
-            note_commitment_domain,
-            funding_note_asset_id,
-            funding_note_amount,
-            funding_note_owner_key,
-            funding_note_spend_authority,
-            funding_note_withdraw_authority,
-            funding_note_blinding,
-            funding_note_nonce,
-            funding_note_metadata_commitment,
-        );
-        assert(funding_note_commitment == recomputed_funding_note_commitment, 'AUCTION_NOTE_BIND');
-        assert(funding_note_ref == funding_note_commitment, 'AUCTION_REF_BIND');
-        assert(
-            check_ecdsa_signature(
-                order_commitment,
+        if order_type != ORDER_TYPE_HEARTBEAT_COVER {
+            let recomputed_funding_note_commitment = note_commitment(
+                note_commitment_domain,
+                funding_note_asset_id,
+                funding_note_amount,
+                funding_note_owner_key,
                 funding_note_spend_authority,
-                funding_authorization_r,
-                funding_authorization_s,
-            ),
-            'AUCTION_AUTH_SIG',
-        );
+                funding_note_withdraw_authority,
+                funding_note_blinding,
+                funding_note_nonce,
+                funding_note_metadata_commitment,
+            );
+            assert(funding_note_commitment == recomputed_funding_note_commitment, 'AUCTION_NOTE_BIND');
+            assert(funding_note_ref == funding_note_commitment, 'AUCTION_REF_BIND');
+            assert(
+                funding_nullifier == note_nullifier(
+                    nullifier_domain, funding_note_commitment, funding_note_spend_authority,
+                ),
+                'AUCTION_NULL_BIND',
+            );
+        }
         curve_cursor += point_count;
         index += 1;
     }
@@ -1535,14 +2265,48 @@ fn assert_best_clearing_price(
     let mut order_index = 0;
 
     while order_index < sides.len() {
-        if *order_types.at(order_index) == ORDER_TYPE_MAKER_CURVE {
-            let cursor = curve_cursor_for_order(maker_curve_point_counts, order_index);
-            let point_count: usize = (*maker_curve_point_counts.at(order_index))
-                .try_into()
-                .expect('CURVE_COUNT');
-            let mut point_index = 0;
-            while point_index < point_count {
-                let candidate = felt_to_u128(*maker_curve_prices.at(cursor + point_index));
+        if *order_types
+            .at(order_index) == ORDER_TYPE_HEARTBEAT_COVER {} else if *order_types
+                .at(order_index) == ORDER_TYPE_MAKER_CURVE {
+                let cursor = curve_cursor_for_order(maker_curve_point_counts, order_index);
+                let point_count: usize = (*maker_curve_point_counts.at(order_index))
+                    .try_into()
+                    .expect('CURVE_COUNT');
+                let mut point_index = 0;
+                while point_index < point_count {
+                    let candidate = felt_to_u128(*maker_curve_prices.at(cursor + point_index));
+                    let (matched, imbalance) = auction_score_at_price(
+                        candidate,
+                        sides,
+                        order_types,
+                        maker_curve_point_counts,
+                        maker_curve_prices,
+                        maker_curve_base_amounts,
+                        limit_prices,
+                        order_amounts,
+                        min_fills,
+                        time_in_force,
+                        funding_note_amounts,
+                    );
+                    let update = should_update_best(
+                        best_initialized,
+                        candidate,
+                        matched,
+                        imbalance,
+                        best_price,
+                        best_matched,
+                        best_imbalance,
+                    );
+                    if update == 1 {
+                        best_initialized = 1;
+                        best_price = candidate;
+                        best_matched = matched;
+                        best_imbalance = imbalance;
+                    }
+                    point_index += 1;
+                };
+            } else {
+                let candidate = felt_to_u128(*limit_prices.at(order_index));
                 let (matched, imbalance) = auction_score_at_price(
                     candidate,
                     sides,
@@ -1571,12 +2335,603 @@ fn assert_best_clearing_price(
                     best_matched = matched;
                     best_imbalance = imbalance;
                 }
-                point_index += 1;
-            };
-        } else {
-            let candidate = felt_to_u128(*limit_prices.at(order_index));
-            let (matched, imbalance) = auction_score_at_price(
-                candidate,
+            }
+        order_index += 1;
+    }
+
+    assert(best_initialized == 1, 'NO_AUCTION_PRICE');
+    assert(clearing_price == best_price, 'BAD_CLEARING_PRICE');
+}
+
+fn assert_no_executable_auction(
+    sides: Span<felt252>,
+    order_types: Span<felt252>,
+    maker_curve_point_counts: Span<felt252>,
+    maker_curve_prices: Span<felt252>,
+    maker_curve_base_amounts: Span<felt252>,
+    limit_prices: Span<felt252>,
+    order_amounts: Span<felt252>,
+    min_fills: Span<felt252>,
+    time_in_force: Span<felt252>,
+    funding_note_amounts: Span<felt252>,
+) {
+    let mut order_index = 0;
+    while order_index < sides.len() {
+        if *order_types
+            .at(order_index) == ORDER_TYPE_HEARTBEAT_COVER {} else if *order_types
+                .at(order_index) == ORDER_TYPE_MAKER_CURVE {
+                let cursor = curve_cursor_for_order(maker_curve_point_counts, order_index);
+                let point_count: usize = (*maker_curve_point_counts.at(order_index))
+                    .try_into()
+                    .expect('CURVE_COUNT');
+                let mut point_index = 0;
+                while point_index < point_count {
+                    let candidate = felt_to_u128(*maker_curve_prices.at(cursor + point_index));
+                    let (matched, _imbalance) = auction_score_at_price(
+                        candidate,
+                        sides,
+                        order_types,
+                        maker_curve_point_counts,
+                        maker_curve_prices,
+                        maker_curve_base_amounts,
+                        limit_prices,
+                        order_amounts,
+                        min_fills,
+                        time_in_force,
+                        funding_note_amounts,
+                    );
+                    assert(matched == 0, 'NOOP_HAS_CROSS');
+                    point_index += 1;
+                };
+            } else {
+                let candidate = felt_to_u128(*limit_prices.at(order_index));
+                let (matched, _imbalance) = auction_score_at_price(
+                    candidate,
+                    sides,
+                    order_types,
+                    maker_curve_point_counts,
+                    maker_curve_prices,
+                    maker_curve_base_amounts,
+                    limit_prices,
+                    order_amounts,
+                    min_fills,
+                    time_in_force,
+                    funding_note_amounts,
+                );
+                assert(matched == 0, 'NOOP_HAS_CROSS');
+            }
+        order_index += 1;
+    }
+}
+
+fn has_non_cover_orders(order_types: Span<felt252>) -> felt252 {
+    let mut index = 0;
+    while index < order_types.len() {
+        if *order_types.at(index) != ORDER_TYPE_HEARTBEAT_COVER {
+            return 1;
+        }
+        index += 1;
+    }
+    0
+}
+
+fn admission_summary_leaf(
+    order_commitment: felt252,
+    side: felt252,
+    order_type: felt252,
+    maker_curve_commitment: felt252,
+    limit_price: felt252,
+    amount: felt252,
+    min_fill: felt252,
+    time_in_force: felt252,
+    funding_note_amount: felt252,
+    funding_note_owner_key: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(ADMISSION_LEAF_DOMAIN, order_commitment);
+    state = poseidon_hash2(state, side);
+    state = poseidon_hash2(state, order_type);
+    state = poseidon_hash2(state, maker_curve_commitment);
+    state = poseidon_hash2(state, limit_price);
+    state = poseidon_hash2(state, amount);
+    state = poseidon_hash2(state, min_fill);
+    state = poseidon_hash2(state, time_in_force);
+    state = poseidon_hash2(state, funding_note_amount);
+    poseidon_hash2(state, funding_note_owner_key)
+}
+
+fn admission_summary_root(
+    order_commitments: Span<felt252>,
+    sides: Span<felt252>,
+    order_types: Span<felt252>,
+    maker_curve_commitments: Span<felt252>,
+    limit_prices: Span<felt252>,
+    order_amounts: Span<felt252>,
+    min_fills: Span<felt252>,
+    time_in_force: Span<felt252>,
+    funding_note_amounts: Span<felt252>,
+    funding_note_owner_keys: Span<felt252>,
+) -> felt252 {
+    let mut state = poseidon_hash2(ADMISSION_ROOT_DOMAIN, order_commitments.len().into());
+    let mut index = 0;
+    while index < order_commitments.len() {
+        state = poseidon_hash2(
+            state,
+            admission_summary_leaf(
+                *order_commitments.at(index),
+                *sides.at(index),
+                *order_types.at(index),
+                *maker_curve_commitments.at(index),
+                *limit_prices.at(index),
+                *order_amounts.at(index),
+                *min_fills.at(index),
+                *time_in_force.at(index),
+                *funding_note_amounts.at(index),
+                *funding_note_owner_keys.at(index),
+            ),
+        );
+        index += 1;
+    }
+    state
+}
+
+fn assert_curve_commitments_for_summary(
+    clearing_price: u128,
+    sides: Span<felt252>,
+    order_types: Span<felt252>,
+    maker_curve_domain: felt252,
+    maker_curve_commitments: Span<felt252>,
+    maker_curve_point_counts: Span<felt252>,
+    maker_curve_prices: Span<felt252>,
+    maker_curve_base_amounts: Span<felt252>,
+) {
+    let mut index = 0;
+    let mut curve_cursor = 0;
+    while index < maker_curve_commitments.len() {
+        let point_count: usize = (*maker_curve_point_counts.at(index))
+            .try_into()
+            .expect('CURVE_COUNT');
+        let (_total, _eligible, _quote_required) = assert_maker_curve(
+            *order_types.at(index),
+            *sides.at(index),
+            maker_curve_domain,
+            *maker_curve_commitments.at(index),
+            point_count,
+            curve_cursor,
+            clearing_price,
+            maker_curve_prices,
+            maker_curve_base_amounts,
+        );
+        curve_cursor += point_count;
+        index += 1;
+    }
+    assert(curve_cursor == maker_curve_prices.len(), 'AUCRES_CURVE_CURSOR');
+}
+
+fn assert_privacy_gate_failure(
+    clearing_price: u128,
+    sides: Span<felt252>,
+    order_types: Span<felt252>,
+    maker_curve_point_counts: Span<felt252>,
+    maker_curve_prices: Span<felt252>,
+    maker_curve_base_amounts: Span<felt252>,
+    limit_prices: Span<felt252>,
+    order_amounts: Span<felt252>,
+    min_fills: Span<felt252>,
+    time_in_force: Span<felt252>,
+    funding_note_amounts: Span<felt252>,
+    funding_note_owner_keys: Span<felt252>,
+    min_batch_base_liquidity: felt252,
+    min_batch_participants: felt252,
+    min_eligible_orders: felt252,
+    max_single_order_fill_bps: felt252,
+    max_single_owner_fill_bps: felt252,
+    min_maker_participants: felt252,
+    max_maker_fill_bps: felt252,
+) {
+    let active_flags = stable_active_flags(
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+    );
+    let (matched_volume, _imbalance) = auction_score_at_price(
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+    );
+    let eligible_count = eligible_order_count_at_price(
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+    );
+    let participant_count = distinct_filled_owner_count(
+        active_flags.span(),
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+        funding_note_owner_keys,
+        0,
+    );
+    let maker_participant_count = distinct_filled_owner_count(
+        active_flags.span(),
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+        funding_note_owner_keys,
+        1,
+    );
+    let max_order_fill = max_order_fill_at_price(
+        active_flags.span(),
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+        0,
+    );
+    let max_maker_fill = max_order_fill_at_price(
+        active_flags.span(),
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+        1,
+    );
+    let max_owner_fill = max_owner_fill_at_price(
+        active_flags.span(),
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+        funding_note_owner_keys,
+    );
+
+    let mut failed = 0;
+    if min_batch_base_liquidity != 0 {
+        let threshold = felt_to_u128(min_batch_base_liquidity);
+        if matched_volume > 0 {
+            if matched_volume < threshold {
+                failed = 1;
+            }
+        }
+    }
+    if min_batch_participants != 0 {
+        if participant_count > 0 {
+            if participant_count < felt_to_u128(min_batch_participants) {
+                failed = 1;
+            }
+        }
+    }
+    if min_eligible_orders != 0 {
+        if eligible_count > 0 {
+            if eligible_count < felt_to_u128(min_eligible_orders) {
+                failed = 1;
+            }
+        }
+    }
+    if matched_volume > 0 {
+        if max_single_order_fill_bps != 0 {
+            if max_order_fill * 10000 / matched_volume > felt_to_u128(max_single_order_fill_bps) {
+                failed = 1;
+            }
+        }
+        if max_single_owner_fill_bps != 0 {
+            if max_owner_fill * 10000 / matched_volume > felt_to_u128(max_single_owner_fill_bps) {
+                failed = 1;
+            }
+        }
+        if max_maker_fill_bps != 0 {
+            if max_maker_fill * 10000 / matched_volume > felt_to_u128(max_maker_fill_bps) {
+                failed = 1;
+            }
+        }
+    }
+    if min_maker_participants != 0 {
+        if maker_participant_count > 0 {
+            if maker_participant_count < felt_to_u128(min_maker_participants) {
+                failed = 1;
+            }
+        }
+    }
+    assert(failed == 1, 'PRIVACY_GATE_NOT_FAILED');
+}
+
+fn assert_privacy_gate_success(
+    clearing_price: u128,
+    sides: Span<felt252>,
+    order_types: Span<felt252>,
+    maker_curve_point_counts: Span<felt252>,
+    maker_curve_prices: Span<felt252>,
+    maker_curve_base_amounts: Span<felt252>,
+    limit_prices: Span<felt252>,
+    order_amounts: Span<felt252>,
+    min_fills: Span<felt252>,
+    time_in_force: Span<felt252>,
+    funding_note_amounts: Span<felt252>,
+    funding_note_owner_keys: Span<felt252>,
+    min_batch_base_liquidity: felt252,
+    min_batch_participants: felt252,
+    min_eligible_orders: felt252,
+    max_single_order_fill_bps: felt252,
+    max_single_owner_fill_bps: felt252,
+    min_maker_participants: felt252,
+    max_maker_fill_bps: felt252,
+) {
+    let active_flags = stable_active_flags(
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+    );
+    let (matched_volume, _imbalance) = auction_score_at_price(
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+    );
+    let eligible_count = eligible_order_count_at_price(
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+    );
+    let participant_count = distinct_filled_owner_count(
+        active_flags.span(),
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+        funding_note_owner_keys,
+        0,
+    );
+    let maker_participant_count = distinct_filled_owner_count(
+        active_flags.span(),
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+        funding_note_owner_keys,
+        1,
+    );
+    let max_order_fill = max_order_fill_at_price(
+        active_flags.span(),
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+        0,
+    );
+    let max_maker_fill = max_order_fill_at_price(
+        active_flags.span(),
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+        1,
+    );
+    let max_owner_fill = max_owner_fill_at_price(
+        active_flags.span(),
+        clearing_price,
+        sides,
+        order_types,
+        maker_curve_point_counts,
+        maker_curve_prices,
+        maker_curve_base_amounts,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+        funding_note_owner_keys,
+    );
+
+    assert(matched_volume != 0, 'PRIVACY_GATE_EMPTY_MATCH');
+    if min_batch_base_liquidity != 0 {
+        assert(matched_volume >= felt_to_u128(min_batch_base_liquidity), 'PRIVACY_MIN_LIQUIDITY');
+    }
+    if min_batch_participants != 0 {
+        assert(
+            participant_count >= felt_to_u128(min_batch_participants), 'PRIVACY_MIN_PARTICIPANTS',
+        );
+    }
+    if min_eligible_orders != 0 {
+        assert(eligible_count >= felt_to_u128(min_eligible_orders), 'PRIVACY_MIN_ELIGIBLE');
+    }
+    if max_single_order_fill_bps != 0 {
+        assert(
+            max_order_fill * 10000 / matched_volume <= felt_to_u128(max_single_order_fill_bps),
+            'PRIVACY_ORDER_DOMINANCE',
+        );
+    }
+    if max_single_owner_fill_bps != 0 {
+        assert(
+            max_owner_fill * 10000 / matched_volume <= felt_to_u128(max_single_owner_fill_bps),
+            'PRIVACY_OWNER_DOMINANCE',
+        );
+    }
+    if max_maker_fill_bps != 0 {
+        assert(
+            max_maker_fill * 10000 / matched_volume <= felt_to_u128(max_maker_fill_bps),
+            'PRIVACY_MAKER_DOMINANCE',
+        );
+    }
+    if min_maker_participants != 0 {
+        assert(
+            maker_participant_count >= felt_to_u128(min_maker_participants),
+            'PRIVACY_MIN_MAKERS',
+        );
+    }
+}
+
+fn eligible_order_count_at_price(
+    clearing_price: u128,
+    sides: Span<felt252>,
+    order_types: Span<felt252>,
+    maker_curve_point_counts: Span<felt252>,
+    maker_curve_prices: Span<felt252>,
+    maker_curve_base_amounts: Span<felt252>,
+    limit_prices: Span<felt252>,
+    order_amounts: Span<felt252>,
+    min_fills: Span<felt252>,
+    time_in_force: Span<felt252>,
+    funding_note_amounts: Span<felt252>,
+) -> u128 {
+    let mut count: u128 = 0;
+    let mut index = 0;
+    while index < sides.len() {
+        let fill = max_fill_at_candidate(
+            index,
+            clearing_price,
+            *sides.at(index),
+            *order_types.at(index),
+            maker_curve_point_counts,
+            maker_curve_prices,
+            maker_curve_base_amounts,
+            *limit_prices.at(index),
+            *order_amounts.at(index),
+            *min_fills.at(index),
+            *time_in_force.at(index),
+            *funding_note_amounts.at(index),
+        );
+        if fill > 0 {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+fn max_order_fill_at_price(
+    active_flags: Span<felt252>,
+    clearing_price: u128,
+    sides: Span<felt252>,
+    order_types: Span<felt252>,
+    maker_curve_point_counts: Span<felt252>,
+    maker_curve_prices: Span<felt252>,
+    maker_curve_base_amounts: Span<felt252>,
+    limit_prices: Span<felt252>,
+    order_amounts: Span<felt252>,
+    min_fills: Span<felt252>,
+    time_in_force: Span<felt252>,
+    funding_note_amounts: Span<felt252>,
+    maker_only: felt252,
+) -> u128 {
+    let mut max_fill: u128 = 0;
+    let mut index = 0;
+    while index < active_flags.len() {
+        if maker_only == 0 || *order_types.at(index) == ORDER_TYPE_MAKER_CURVE {
+            let fill = expected_fill_with_active_flags(
+                index,
+                active_flags,
+                clearing_price,
                 sides,
                 order_types,
                 maker_curve_point_counts,
@@ -1588,27 +2943,137 @@ fn assert_best_clearing_price(
                 time_in_force,
                 funding_note_amounts,
             );
-            let update = should_update_best(
-                best_initialized,
-                candidate,
-                matched,
-                imbalance,
-                best_price,
-                best_matched,
-                best_imbalance,
-            );
-            if update == 1 {
-                best_initialized = 1;
-                best_price = candidate;
-                best_matched = matched;
-                best_imbalance = imbalance;
+            if fill > max_fill {
+                max_fill = fill;
             }
         }
-        order_index += 1;
+        index += 1;
     }
+    max_fill
+}
 
-    assert(best_initialized == 1, 'NO_AUCTION_PRICE');
-    assert(clearing_price == best_price, 'BAD_CLEARING_PRICE');
+fn max_owner_fill_at_price(
+    active_flags: Span<felt252>,
+    clearing_price: u128,
+    sides: Span<felt252>,
+    order_types: Span<felt252>,
+    maker_curve_point_counts: Span<felt252>,
+    maker_curve_prices: Span<felt252>,
+    maker_curve_base_amounts: Span<felt252>,
+    limit_prices: Span<felt252>,
+    order_amounts: Span<felt252>,
+    min_fills: Span<felt252>,
+    time_in_force: Span<felt252>,
+    funding_note_amounts: Span<felt252>,
+    funding_note_owner_keys: Span<felt252>,
+) -> u128 {
+    let mut max_fill: u128 = 0;
+    let mut index = 0;
+    while index < active_flags.len() {
+        let owner = *funding_note_owner_keys.at(index);
+        let mut owner_fill: u128 = 0;
+        let mut cursor = 0;
+        while cursor < active_flags.len() {
+            if *funding_note_owner_keys.at(cursor) == owner {
+                owner_fill = owner_fill
+                    + expected_fill_with_active_flags(
+                        cursor,
+                        active_flags,
+                        clearing_price,
+                        sides,
+                        order_types,
+                        maker_curve_point_counts,
+                        maker_curve_prices,
+                        maker_curve_base_amounts,
+                        limit_prices,
+                        order_amounts,
+                        min_fills,
+                        time_in_force,
+                        funding_note_amounts,
+                    );
+            }
+            cursor += 1;
+        }
+        if owner_fill > max_fill {
+            max_fill = owner_fill;
+        }
+        index += 1;
+    }
+    max_fill
+}
+
+fn distinct_filled_owner_count(
+    active_flags: Span<felt252>,
+    clearing_price: u128,
+    sides: Span<felt252>,
+    order_types: Span<felt252>,
+    maker_curve_point_counts: Span<felt252>,
+    maker_curve_prices: Span<felt252>,
+    maker_curve_base_amounts: Span<felt252>,
+    limit_prices: Span<felt252>,
+    order_amounts: Span<felt252>,
+    min_fills: Span<felt252>,
+    time_in_force: Span<felt252>,
+    funding_note_amounts: Span<felt252>,
+    funding_note_owner_keys: Span<felt252>,
+    maker_only: felt252,
+) -> u128 {
+    let mut count: u128 = 0;
+    let mut index = 0;
+    while index < active_flags.len() {
+        if maker_only == 0 || *order_types.at(index) == ORDER_TYPE_MAKER_CURVE {
+            let fill = expected_fill_with_active_flags(
+                index,
+                active_flags,
+                clearing_price,
+                sides,
+                order_types,
+                maker_curve_point_counts,
+                maker_curve_prices,
+                maker_curve_base_amounts,
+                limit_prices,
+                order_amounts,
+                min_fills,
+                time_in_force,
+                funding_note_amounts,
+            );
+            if fill > 0 {
+                let owner = *funding_note_owner_keys.at(index);
+                let mut seen = 0;
+                let mut cursor = 0;
+                while cursor < index {
+                    if *funding_note_owner_keys.at(cursor) == owner {
+                        if maker_only == 0 || *order_types.at(cursor) == ORDER_TYPE_MAKER_CURVE {
+                            let prior_fill = expected_fill_with_active_flags(
+                                cursor,
+                                active_flags,
+                                clearing_price,
+                                sides,
+                                order_types,
+                                maker_curve_point_counts,
+                                maker_curve_prices,
+                                maker_curve_base_amounts,
+                                limit_prices,
+                                order_amounts,
+                                min_fills,
+                                time_in_force,
+                                funding_note_amounts,
+                            );
+                            if prior_fill > 0 {
+                                seen = 1;
+                            }
+                        }
+                    }
+                    cursor += 1;
+                }
+                if seen == 0 {
+                    count += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    count
 }
 
 fn should_update_best(
@@ -1637,6 +3102,14 @@ fn should_update_best(
         }
     }
     0
+}
+
+fn assert_all_zero(values: Span<felt252>, message: felt252) {
+    let mut index = 0;
+    while index < values.len() {
+        assert(*values.at(index) == 0, message);
+        index += 1;
+    }
 }
 
 fn auction_score_at_price(
@@ -1715,6 +3188,9 @@ fn max_fill_at_candidate(
     time_in_force: felt252,
     funding_note_amount_felt: felt252,
 ) -> u128 {
+    if order_type == ORDER_TYPE_HEARTBEAT_COVER {
+        return 0;
+    }
     let limit_price = felt_to_u128(limit_price_felt);
     let order_amount = felt_to_u128(order_amount_felt);
     let min_fill = felt_to_u128(min_fill_felt);
@@ -1931,8 +3407,7 @@ fn assert_maker_curve(
     (total_base_amount, eligible_base_amount, quote_funding_required)
 }
 
-fn assert_public_output(
-    output_index: usize,
+fn assert_public_output_present(
     expected_commitment: felt252,
     expected_asset_id: felt252,
     expected_amount: u128,
@@ -1942,17 +3417,328 @@ fn assert_public_output(
     output_note_amounts: Span<felt252>,
     output_note_withdraw_authorities: Span<felt252>,
 ) {
-    assert(output_index < output_note_commitments.len(), 'OUTPUT_EOF');
-    assert(expected_commitment == *output_note_commitments.at(output_index), 'OUTPUT_MISMATCH');
-    assert(expected_asset_id == *output_note_asset_ids.at(output_index), 'OUTPUT_ASSET_MISMATCH');
-    assert(
-        expected_amount == felt_to_u128(*output_note_amounts.at(output_index)),
-        'OUTPUT_AMOUNT_MISMATCH',
-    );
-    assert(
-        expected_withdraw_authority == *output_note_withdraw_authorities.at(output_index),
-        'OUTPUT_AUTH_MISMATCH',
-    );
+    let mut index = 0;
+    while index < output_note_commitments.len() {
+        if expected_commitment == *output_note_commitments.at(index) {
+            assert(expected_asset_id == *output_note_asset_ids.at(index), 'OUTPUT_ASSET_MISMATCH');
+            assert(
+                expected_amount == felt_to_u128(*output_note_amounts.at(index)),
+                'OUTPUT_AMOUNT_MISMATCH',
+            );
+            assert(
+                expected_withdraw_authority == *output_note_withdraw_authorities.at(index),
+                'OUTPUT_AUTH_MISMATCH',
+            );
+            return;
+        }
+        index += 1;
+    }
+    assert(false, 'OUTPUT_MISSING');
+}
+
+fn assert_netted_public_outputs(
+    base_asset_id: felt252,
+    quote_asset_id: felt252,
+    clearing_price: u128,
+    matched_fill_amounts: Span<felt252>,
+    matched_sides: Span<felt252>,
+    matched_funding_note_amounts: Span<felt252>,
+    matched_output_note_commitments: Span<felt252>,
+    matched_residual_note_flags: Span<felt252>,
+    matched_residual_note_commitments: Span<felt252>,
+    output_note_commitments: Span<felt252>,
+    output_note_amounts: Span<felt252>,
+) {
+    let _ = base_asset_id;
+    let _ = quote_asset_id;
+    let mut output_index = 0;
+    while output_index < output_note_commitments.len() {
+        let public_commitment = *output_note_commitments.at(output_index);
+        let public_amount = felt_to_u128(*output_note_amounts.at(output_index));
+        let mut expected_amount: u128 = 0;
+        let mut order_index = 0;
+        while order_index < matched_output_note_commitments.len() {
+            let filled_amount = felt_to_u128(*matched_fill_amounts.at(order_index));
+            let side = *matched_sides.at(order_index);
+            let funding_note_amount = felt_to_u128(*matched_funding_note_amounts.at(order_index));
+            let primary_amount = if side == ORDER_SIDE_BUY {
+                let fee_amount = filled_amount * PROTOCOL_FEE_BPS / FEE_BPS_DENOMINATOR;
+                filled_amount - fee_amount
+            } else {
+                assert(side == ORDER_SIDE_SELL, 'BAD_SIDE');
+                let gross_quote = filled_amount * clearing_price;
+                let fee_amount = gross_quote * PROTOCOL_FEE_BPS / FEE_BPS_DENOMINATOR;
+                gross_quote - fee_amount
+            };
+            if *matched_output_note_commitments.at(order_index) == public_commitment {
+                expected_amount = expected_amount + primary_amount;
+            }
+
+            let residual_amount = if side == ORDER_SIDE_BUY {
+                funding_note_amount - filled_amount * clearing_price
+            } else {
+                funding_note_amount - filled_amount
+            };
+            if *matched_residual_note_flags.at(order_index) == 1 {
+                if *matched_residual_note_commitments.at(order_index) == public_commitment {
+                    expected_amount = expected_amount + residual_amount;
+                }
+            }
+            order_index += 1;
+        }
+        assert(expected_amount != 0, 'UNBACKED_OUTPUT');
+        assert(public_amount == expected_amount, 'NETTED_OUTPUT_AMOUNT');
+        output_index += 1;
+    }
+}
+
+fn assert_sparse_nullifier_updates(
+    prior_nullifier_root: felt252,
+    current_nullifiers: Span<felt252>,
+    key_lows: Span<felt252>,
+    key_highs: Span<felt252>,
+    path_counts: Span<felt252>,
+    path_values: Span<felt252>,
+    path_directions: Span<felt252>,
+    sparse_leaf_domain: felt252,
+    sparse_node_domain: felt252,
+) -> felt252 {
+    assert(current_nullifiers.len() == key_lows.len(), 'NULL_KEY_LOW_LEN');
+    assert(current_nullifiers.len() == key_highs.len(), 'NULL_KEY_HIGH_LEN');
+    assert(current_nullifiers.len() == path_counts.len(), 'NULL_PATH_COUNT_LEN');
+    let mut running_root = prior_nullifier_root;
+    let mut path_cursor = 0;
+    let mut index = 0;
+    while index < current_nullifiers.len() {
+        let nullifier = *current_nullifiers.at(index);
+        assert(nullifier != 0, 'BAD_NULLIFIER');
+        let key_low: u128 = (*key_lows.at(index)).try_into().expect('NULL_KEY_LOW');
+        let key_high: u128 = (*key_highs.at(index)).try_into().expect('NULL_KEY_HIGH');
+        assert(key_high < NULLIFIER_KEY_HIGH_BOUND, 'NULL_KEY_HIGH');
+        assert(nullifier == key_low.into() + key_high.into() * TWO_POW_128, 'NULL_KEY_BIND');
+        let path_count: usize = (*path_counts.at(index)).try_into().expect('NULL_PATH_COUNT');
+        assert(path_cursor + path_count <= path_values.len(), 'NULL_PATH_EOF');
+        assert(path_cursor + path_count <= path_directions.len(), 'NULL_DIR_EOF');
+        if running_root == 0 {
+            assert(path_count == 0, 'NULL_EMPTY_PATH');
+            running_root = poseidon_hash2(sparse_leaf_domain, nullifier);
+        } else {
+            assert(path_count == NULLIFIER_SPARSE_TREE_DEPTH, 'NULL_PATH_COUNT');
+            running_root =
+                sparse_insert_nullifier(
+                    running_root,
+                    nullifier,
+                    key_low,
+                    key_high,
+                    path_cursor,
+                    path_values,
+                    path_directions,
+                    sparse_leaf_domain,
+                    sparse_node_domain,
+                );
+        }
+        path_cursor += path_count;
+        index += 1;
+    }
+    assert(path_cursor == path_values.len(), 'NULL_PATH_CURSOR');
+    assert(path_cursor == path_directions.len(), 'NULL_DIR_CURSOR');
+    running_root
+}
+
+fn assert_sparse_entry_insert(
+    prior_root: felt252,
+    entry: felt252,
+    key_low_felt: felt252,
+    key_high_felt: felt252,
+    path_count_felt: felt252,
+    ref path_cursor: usize,
+    path_values: Span<felt252>,
+    path_directions: Span<felt252>,
+    sparse_leaf_domain: felt252,
+    sparse_node_domain: felt252,
+) -> felt252 {
+    assert(entry != 0, 'BAD_SPARSE_ENTRY');
+    let key_low: u128 = key_low_felt.try_into().expect('SPARSE_KEY_LOW');
+    let key_high: u128 = key_high_felt.try_into().expect('SPARSE_KEY_HIGH');
+    assert(key_high < NULLIFIER_KEY_HIGH_BOUND, 'SPARSE_KEY_HIGH');
+    assert(entry == key_low.into() + key_high.into() * TWO_POW_128, 'SPARSE_KEY_BIND');
+    let path_count: usize = path_count_felt.try_into().expect('SPARSE_PATH_COUNT');
+    assert(path_cursor + path_count <= path_values.len(), 'SPARSE_PATH_EOF');
+    assert(path_cursor + path_count <= path_directions.len(), 'SPARSE_DIR_EOF');
+    let new_root = if prior_root == 0 {
+        assert(path_count == 0, 'SPARSE_EMPTY_PATH');
+        poseidon_hash2(sparse_leaf_domain, entry)
+    } else {
+        assert(path_count == NULLIFIER_SPARSE_TREE_DEPTH, 'SPARSE_PATH_COUNT');
+        sparse_insert_nullifier(
+            prior_root,
+            entry,
+            key_low,
+            key_high,
+            path_cursor,
+            path_values,
+            path_directions,
+            sparse_leaf_domain,
+            sparse_node_domain,
+        )
+    };
+    path_cursor += path_count;
+    new_root
+}
+
+fn assert_sparse_entry_absent(
+    prior_root: felt252,
+    entry: felt252,
+    key_low_felt: felt252,
+    key_high_felt: felt252,
+    path_count_felt: felt252,
+    ref path_cursor: usize,
+    path_values: Span<felt252>,
+    path_directions: Span<felt252>,
+    sparse_node_domain: felt252,
+) -> felt252 {
+    assert(entry != 0, 'BAD_SPARSE_ENTRY');
+    let key_low: u128 = key_low_felt.try_into().expect('SPARSE_KEY_LOW');
+    let key_high: u128 = key_high_felt.try_into().expect('SPARSE_KEY_HIGH');
+    assert(key_high < NULLIFIER_KEY_HIGH_BOUND, 'SPARSE_KEY_HIGH');
+    assert(entry == key_low.into() + key_high.into() * TWO_POW_128, 'SPARSE_KEY_BIND');
+    let path_count: usize = path_count_felt.try_into().expect('SPARSE_PATH_COUNT');
+    assert(path_cursor + path_count <= path_values.len(), 'SPARSE_PATH_EOF');
+    assert(path_cursor + path_count <= path_directions.len(), 'SPARSE_DIR_EOF');
+    if prior_root == 0 {
+        assert(path_count == 0, 'SPARSE_EMPTY_PATH');
+        return prior_root;
+    }
+    assert(path_count == NULLIFIER_SPARSE_TREE_DEPTH, 'SPARSE_PATH_COUNT');
+    let mut reconstructed_low: felt252 = 0;
+    let mut bit_weight: felt252 = 1;
+    let mut empty_root = 0;
+    let mut level = 0;
+    while level < NULLIFIER_SPARSE_TREE_DEPTH {
+        let sibling = *path_values.at(path_cursor + level);
+        let bit = *path_directions.at(path_cursor + level);
+        assert(bit == 0 || bit == 1, 'SPARSE_PATH_BIT');
+        reconstructed_low = reconstructed_low + bit * bit_weight;
+        bit_weight = bit_weight * 2;
+        if bit == 0 {
+            empty_root = sparse_nullifier_node(sparse_node_domain, empty_root, sibling);
+        } else {
+            empty_root = sparse_nullifier_node(sparse_node_domain, sibling, empty_root);
+        }
+        level += 1;
+    }
+    assert(reconstructed_low == (key_low % NULLIFIER_KEY_LOW_MODULUS).into(), 'SPARSE_KEY_LOW_BITS');
+    assert(empty_root == prior_root, 'SPARSE_ABSENT_PRIOR');
+    path_cursor += path_count;
+    prior_root
+}
+
+fn sparse_insert_nullifier(
+    prior_root: felt252,
+    nullifier: felt252,
+    key_low: u128,
+    key_high: u128,
+    path_cursor: usize,
+    path_values: Span<felt252>,
+    path_directions: Span<felt252>,
+    sparse_leaf_domain: felt252,
+    sparse_node_domain: felt252,
+) -> felt252 {
+    let mut reconstructed_low: felt252 = 0;
+    let mut bit_weight: felt252 = 1;
+    let mut empty_root = 0;
+    let mut inserted_root = poseidon_hash2(sparse_leaf_domain, nullifier);
+    let mut level = 0;
+    while level < NULLIFIER_SPARSE_TREE_DEPTH {
+        let sibling = *path_values.at(path_cursor + level);
+        let bit = *path_directions.at(path_cursor + level);
+        assert(bit == 0 || bit == 1, 'NULL_PATH_BIT');
+        reconstructed_low = reconstructed_low + bit * bit_weight;
+        bit_weight = bit_weight * 2;
+        if bit == 0 {
+            empty_root = sparse_nullifier_node(sparse_node_domain, empty_root, sibling);
+            inserted_root = sparse_nullifier_node(sparse_node_domain, inserted_root, sibling);
+        } else {
+            empty_root = sparse_nullifier_node(sparse_node_domain, sibling, empty_root);
+            inserted_root = sparse_nullifier_node(sparse_node_domain, sibling, inserted_root);
+        }
+        level += 1;
+    }
+    assert(reconstructed_low == (key_low % NULLIFIER_KEY_LOW_MODULUS).into(), 'NULL_KEY_LOW_BITS');
+    assert(empty_root == prior_root, 'NULL_SPARSE_PRIOR');
+    assert(nullifier == key_low.into() + key_high.into() * TWO_POW_128, 'NULL_KEY_BIND');
+    inserted_root
+}
+
+fn sparse_nullifier_node(domain: felt252, left: felt252, right: felt252) -> felt252 {
+    if left == 0 {
+        return right;
+    }
+    if right == 0 {
+        return left;
+    }
+    let (result, _, _) = hades_permutation(domain, left, right);
+    result
+}
+
+fn assert_note_membership(
+    note_commitment_value: felt252,
+    asset_id: felt252,
+    amount: felt252,
+    withdraw_authority: felt252,
+    prior_note_root: felt252,
+    kind: felt252,
+    prefix_root: felt252,
+    batch_root: felt252,
+    path_count_felt: felt252,
+    ref path_cursor: usize,
+    path_values: Span<felt252>,
+    path_directions: Span<felt252>,
+    suffix_count_felt: felt252,
+    ref suffix_cursor: usize,
+    suffix_roots: Span<felt252>,
+    state_transition_root_domain: felt252,
+) {
+    let path_count: usize = path_count_felt.try_into().expect('INPUT_PATH_COUNT');
+    let suffix_count: usize = suffix_count_felt.try_into().expect('INPUT_SUFFIX_COUNT');
+    assert(path_cursor + path_count <= path_values.len(), 'INPUT_PATH_EOF');
+    assert(path_cursor + path_count <= path_directions.len(), 'INPUT_DIR_EOF');
+    assert(suffix_cursor + suffix_count <= suffix_roots.len(), 'INPUT_SUFFIX_EOF');
+
+    let recomputed_batch_root = if kind == NOTE_MEMBERSHIP_KIND_DEPOSIT {
+        assert(path_count == 0, 'DEPOSIT_PATH');
+        deposit_note_root(note_commitment_value)
+    } else {
+        assert(kind == NOTE_MEMBERSHIP_KIND_SETTLEMENT_OUTPUT, 'BAD_INPUT_KIND');
+        let mut root = output_note_leaf(
+            note_commitment_value, asset_id, amount, withdraw_authority,
+        );
+        let end = path_cursor + path_count;
+        while path_cursor < end {
+            let sibling = *path_values.at(path_cursor);
+            let direction = *path_directions.at(path_cursor);
+            if direction == 0 {
+                root = output_note_node(root, sibling);
+            } else {
+                assert(direction == 1, 'BAD_INPUT_PATH_DIR');
+                root = output_note_node(sibling, root);
+            }
+            path_cursor += 1;
+        }
+        root
+    };
+    assert(recomputed_batch_root == batch_root, 'INPUT_BATCH_ROOT');
+
+    let mut root = state_transition_root(state_transition_root_domain, prefix_root, batch_root);
+    let suffix_end = suffix_cursor + suffix_count;
+    while suffix_cursor < suffix_end {
+        root =
+            state_transition_root(
+                state_transition_root_domain, root, *suffix_roots.at(suffix_cursor),
+            );
+        suffix_cursor += 1;
+    }
+    assert(root == prior_note_root, 'INPUT_ROOT_MEMBERSHIP');
 }
 
 fn assert_absent_residual(
@@ -1997,35 +3783,28 @@ fn felt_to_u128(value: felt252) -> u128 {
     value.try_into().expect('U128_RANGE')
 }
 
-fn aggregate_fees(
+fn protocol_fee_root(
+    domain: felt252,
     base_asset_id: felt252,
     quote_asset_id: felt252,
-    expected_recipient: felt252,
-    fee_asset_ids: Span<felt252>,
-    fee_recipients: Span<felt252>,
-    fee_amounts: Span<felt252>,
-) -> (u128, u128) {
-    let mut base_fee_total: u128 = 0;
-    let mut quote_fee_total: u128 = 0;
-    let mut index = 0;
-
-    while index < fee_asset_ids.len() {
-        let asset_id = *fee_asset_ids.at(index);
-        let recipient = *fee_recipients.at(index);
-        let amount = felt_to_u128(*fee_amounts.at(index));
-
-        assert(recipient == expected_recipient, 'BAD_FEE_RECIPIENT');
-        if asset_id == base_asset_id {
-            base_fee_total = base_fee_total + amount;
-        } else {
-            assert(asset_id == quote_asset_id, 'BAD_FEE_ASSET');
-            quote_fee_total = quote_fee_total + amount;
-        }
-
-        index += 1;
+    base_fee_amount: u128,
+    quote_fee_amount: u128,
+) -> felt252 {
+    let mut state = domain;
+    let mut fee_count: felt252 = 0;
+    if base_fee_amount != 0 {
+        state = poseidon_hash2(state, base_asset_id);
+        state = poseidon_hash2(state, PROTOCOL_FEE_RECIPIENT);
+        state = poseidon_hash2(state, base_fee_amount.into());
+        fee_count += 1;
     }
-
-    (base_fee_total, quote_fee_total)
+    if quote_fee_amount != 0 {
+        state = poseidon_hash2(state, quote_asset_id);
+        state = poseidon_hash2(state, PROTOCOL_FEE_RECIPIENT);
+        state = poseidon_hash2(state, quote_fee_amount.into());
+        fee_count += 1;
+    }
+    poseidon_hash2(state, fee_count)
 }
 
 fn poseidon_hash2(x: felt252, y: felt252) -> felt252 {
@@ -2052,6 +3831,10 @@ fn note_commitment(
     let with_blinding = poseidon_hash2(with_authority, blinding);
     let with_nonce = poseidon_hash2(with_blinding, nonce);
     poseidon_hash2(with_nonce, metadata_commitment)
+}
+
+fn note_nullifier(seed: felt252, note_commitment: felt252, spend_authority: felt252) -> felt252 {
+    poseidon_hash2(poseidon_hash2(seed, note_commitment), spend_authority)
 }
 
 fn order_intent_commitment(
@@ -2127,12 +3910,15 @@ fn assert_parent_link(
         assert(parent_cancel_authority != 0, 'PARENT_WITHOUT_CANCEL');
         assert(parent_authorization_secret != 0, 'PARENT_WITHOUT_AUTH');
         assert(
-            renewal_parent_secret_commitment(parent_authorization_secret) == parent_secret_commitment,
+            renewal_parent_secret_commitment(
+                parent_authorization_secret,
+            ) == parent_secret_commitment,
             'PARENT_SECRET_BIND',
         );
         assert(
-            renewal_parent_commitment(parent_secret_commitment, parent_cancel_authority)
-                == parent_order_commitment,
+            renewal_parent_commitment(
+                parent_secret_commitment, parent_cancel_authority,
+            ) == parent_order_commitment,
             'PARENT_AUTH_BIND',
         );
     }
@@ -2146,6 +3932,13 @@ fn renewal_parent_commitment(
     parent_secret_commitment: felt252, parent_cancel_authority: felt252,
 ) -> felt252 {
     let with_secret = poseidon_hash2(RENEWAL_PARENT_DOMAIN, parent_secret_commitment);
+    poseidon_hash2(with_secret, parent_cancel_authority)
+}
+
+fn renewal_parent_cancel_marker(
+    parent_secret_commitment: felt252, parent_cancel_authority: felt252,
+) -> felt252 {
+    let with_secret = poseidon_hash2(RENEWAL_PARENT_CANCEL_DOMAIN, parent_secret_commitment);
     poseidon_hash2(with_secret, parent_cancel_authority)
 }
 
@@ -2168,17 +3961,19 @@ fn public_settlement_commitment(
     encrypted_order_set_commitment: felt252,
     clearing_price: felt252,
     output_bundle_ref: felt252,
-    consumed_note_commitments: Span<felt252>,
-    consumed_nullifiers: Span<felt252>,
-    renewal_parent_order_commitments: Span<felt252>,
-    renewal_child_nullifiers: Span<felt252>,
-    output_note_commitments: Span<felt252>,
-    output_note_asset_ids: Span<felt252>,
-    output_note_amounts: Span<felt252>,
-    output_note_withdraw_authorities: Span<felt252>,
-    fee_asset_ids: Span<felt252>,
-    fee_recipients: Span<felt252>,
-    fee_amounts: Span<felt252>,
+    prior_note_root: felt252,
+    prior_nullifier_root: felt252,
+    prior_renewal_root: felt252,
+    prior_fee_root: felt252,
+    consumed_note_root: felt252,
+    consumed_nullifier_root: felt252,
+    renewal_child_root: felt252,
+    output_note_root: felt252,
+    fee_root: felt252,
+    new_note_root: felt252,
+    new_nullifier_root: felt252,
+    new_renewal_root: felt252,
+    new_fee_root: felt252,
 ) -> felt252 {
     let mut state = poseidon_hash2(seed, batch_id);
     state = poseidon_hash2(state, pair_id);
@@ -2187,43 +3982,394 @@ fn public_settlement_commitment(
     state = poseidon_hash2(state, encrypted_order_set_commitment);
     state = poseidon_hash2(state, clearing_price);
     state = poseidon_hash2(state, output_bundle_ref);
-
-    state = poseidon_hash2(state, consumed_note_commitments.len().into());
-    let mut index = 0;
-    while index < consumed_note_commitments.len() {
-        state = poseidon_hash2(state, *consumed_note_commitments.at(index));
-        state = poseidon_hash2(state, *consumed_nullifiers.at(index));
-        index += 1;
-    }
-
-    state = poseidon_hash2(state, renewal_child_nullifiers.len().into());
-    index = 0;
-    while index < renewal_child_nullifiers.len() {
-        state = poseidon_hash2(state, *renewal_parent_order_commitments.at(index));
-        state = poseidon_hash2(state, *renewal_child_nullifiers.at(index));
-        index += 1;
-    }
-
-    state = poseidon_hash2(state, output_note_commitments.len().into());
-    index = 0;
-    while index < output_note_commitments.len() {
-        state = poseidon_hash2(state, *output_note_commitments.at(index));
-        state = poseidon_hash2(state, *output_note_asset_ids.at(index));
-        state = poseidon_hash2(state, *output_note_amounts.at(index));
-        state = poseidon_hash2(state, *output_note_withdraw_authorities.at(index));
-        index += 1;
-    }
-
-    state = poseidon_hash2(state, fee_asset_ids.len().into());
-    index = 0;
-    while index < fee_asset_ids.len() {
-        state = poseidon_hash2(state, *fee_asset_ids.at(index));
-        state = poseidon_hash2(state, *fee_recipients.at(index));
-        state = poseidon_hash2(state, *fee_amounts.at(index));
-        index += 1;
-    }
+    state = poseidon_hash2(state, prior_note_root);
+    state = poseidon_hash2(state, prior_nullifier_root);
+    state = poseidon_hash2(state, prior_renewal_root);
+    state = poseidon_hash2(state, prior_fee_root);
+    state = poseidon_hash2(state, consumed_note_root);
+    state = poseidon_hash2(state, consumed_nullifier_root);
+    state = poseidon_hash2(state, renewal_child_root);
+    state = poseidon_hash2(state, output_note_root);
+    state = poseidon_hash2(state, fee_root);
+    state = poseidon_hash2(state, new_note_root);
+    state = poseidon_hash2(state, new_nullifier_root);
+    state = poseidon_hash2(state, new_renewal_root);
+    state = poseidon_hash2(state, new_fee_root);
 
     state
+}
+
+fn single_field_root(domain: felt252, values: Span<felt252>) -> felt252 {
+    let mut state = domain;
+    let mut index = 0;
+    while index < values.len() {
+        state = poseidon_hash2(state, *values.at(index));
+        index += 1;
+    }
+    poseidon_hash2(state, values.len().into())
+}
+
+fn pair_field_root(domain: felt252, left: Span<felt252>, right: Span<felt252>) -> felt252 {
+    assert(left.len() == right.len(), 'BAD_PAIR_ROOT_LEN');
+    let mut state = domain;
+    let mut index = 0;
+    while index < left.len() {
+        state = poseidon_hash2(state, *left.at(index));
+        state = poseidon_hash2(state, *right.at(index));
+        index += 1;
+    }
+    poseidon_hash2(state, left.len().into())
+}
+
+fn three_field_root(
+    domain: felt252, first: Span<felt252>, second: Span<felt252>, third: Span<felt252>,
+) -> felt252 {
+    assert(first.len() == second.len(), 'BAD_THREE_ROOT_LEN');
+    assert(first.len() == third.len(), 'BAD_THREE_ROOT_LEN');
+    let mut state = domain;
+    let mut index = 0;
+    while index < first.len() {
+        state = poseidon_hash2(state, *first.at(index));
+        state = poseidon_hash2(state, *second.at(index));
+        state = poseidon_hash2(state, *third.at(index));
+        index += 1;
+    }
+    poseidon_hash2(state, first.len().into())
+}
+
+fn four_field_root(
+    domain: felt252,
+    first: Span<felt252>,
+    second: Span<felt252>,
+    third: Span<felt252>,
+    fourth: Span<felt252>,
+) -> felt252 {
+    assert(first.len() == second.len(), 'BAD_FOUR_ROOT_LEN');
+    assert(first.len() == third.len(), 'BAD_FOUR_ROOT_LEN');
+    assert(first.len() == fourth.len(), 'BAD_FOUR_ROOT_LEN');
+    let mut state = domain;
+    let mut index = 0;
+    while index < first.len() {
+        state = poseidon_hash2(state, *first.at(index));
+        state = poseidon_hash2(state, *second.at(index));
+        state = poseidon_hash2(state, *third.at(index));
+        state = poseidon_hash2(state, *fourth.at(index));
+        index += 1;
+    }
+    poseidon_hash2(state, first.len().into())
+}
+
+fn output_note_merkle_root(
+    output_bundle_ref: felt252,
+    note_commitments: Span<felt252>,
+    asset_ids: Span<felt252>,
+    amounts: Span<felt252>,
+    withdraw_authorities: Span<felt252>,
+) -> felt252 {
+    assert(note_commitments.len() == asset_ids.len(), 'BAD_OUTPUT_ROOT_LEN');
+    assert(note_commitments.len() == amounts.len(), 'BAD_OUTPUT_ROOT_LEN');
+    assert(note_commitments.len() == withdraw_authorities.len(), 'BAD_OUTPUT_ROOT_LEN');
+    if note_commitments.len() == 0 {
+        return poseidon_hash2(EMPTY_OUTPUT_NOTE_ROOT_DOMAIN, output_bundle_ref);
+    }
+
+    let mut level = array![];
+    let mut index = 0;
+    while index < note_commitments.len() {
+        level
+            .append(
+                output_note_leaf(
+                    *note_commitments.at(index),
+                    *asset_ids.at(index),
+                    *amounts.at(index),
+                    *withdraw_authorities.at(index),
+                ),
+            );
+        index += 1;
+    }
+
+    merkle_root_from_leaves(level)
+}
+
+fn assert_output_recovery_bundle(
+    note_commitment_domain: felt252,
+    output_bundle_ref: felt252,
+    batch_id: felt252,
+    output_note_root: felt252,
+    note_commitments: Span<felt252>,
+    asset_ids: Span<felt252>,
+    amounts: Span<felt252>,
+    withdraw_authorities: Span<felt252>,
+    owner_keys: Span<felt252>,
+    spend_authorities: Span<felt252>,
+    blindings: Span<felt252>,
+    nonces: Span<felt252>,
+    metadata_commitments: Span<felt252>,
+    recovery_key_tags: Span<felt252>,
+    recovery_auth_tags: Span<felt252>,
+    recovery_ciphertext_fields: Span<felt252>,
+    recovery_dummy_commitments: Span<felt252>,
+) {
+    let mut bundle_state = OUTPUT_RECOVERY_BUNDLE_DOMAIN;
+    let mut output_index: usize = 0;
+    while output_index < note_commitments.len() {
+        let record_commitment = assert_output_recovery_record(
+            note_commitment_domain,
+            batch_id,
+            output_index,
+            output_note_root,
+            *note_commitments.at(output_index),
+            *asset_ids.at(output_index),
+            *amounts.at(output_index),
+            *withdraw_authorities.at(output_index),
+            *owner_keys.at(output_index),
+            *spend_authorities.at(output_index),
+            *blindings.at(output_index),
+            *nonces.at(output_index),
+            *metadata_commitments.at(output_index),
+            *recovery_key_tags.at(output_index),
+            *recovery_auth_tags.at(output_index),
+            recovery_ciphertext_fields,
+        );
+        bundle_state = poseidon_hash2(bundle_state, record_commitment);
+        output_index += 1;
+    }
+
+    let mut dummy_index: usize = 0;
+    while dummy_index < recovery_dummy_commitments.len() {
+        let commitment = *recovery_dummy_commitments.at(dummy_index);
+        assert(commitment != 0, 'BAD_DUMMY_RECOVERY');
+        bundle_state = poseidon_hash2(bundle_state, commitment);
+        dummy_index += 1;
+    }
+    let total_count: felt252 = (note_commitments.len() + recovery_dummy_commitments.len()).into();
+    assert(poseidon_hash2(bundle_state, total_count) == output_bundle_ref, 'OUTPUT_BUNDLE_BIND');
+}
+
+fn assert_output_recovery_record(
+    note_commitment_domain: felt252,
+    batch_id: felt252,
+    output_index: usize,
+    output_note_root: felt252,
+    note_commitment_value: felt252,
+    asset_id: felt252,
+    amount: felt252,
+    withdraw_authority: felt252,
+    owner_key: felt252,
+    spend_authority: felt252,
+    blinding: felt252,
+    nonce: felt252,
+    metadata_commitment: felt252,
+    key_tag: felt252,
+    auth_tag: felt252,
+    recovery_ciphertext_fields: Span<felt252>,
+) -> felt252 {
+    let output_index_felt: felt252 = output_index.into();
+    assert(
+        note_commitment_value == note_commitment(
+            note_commitment_domain,
+            asset_id,
+            amount,
+            owner_key,
+            spend_authority,
+            withdraw_authority,
+            blinding,
+            nonce,
+            metadata_commitment,
+        ),
+        'OUTPUT_NOTE_PREIMAGE',
+    );
+    assert(
+        key_tag == output_recovery_key_tag(spend_authority, batch_id, output_index_felt),
+        'OUTPUT_RECOVERY_TAG',
+    );
+
+    let field_cursor = output_index * OUTPUT_RECOVERY_FIELD_COUNT;
+    let mut field_index: usize = 0;
+    let mut auth_state = poseidon_hash2(OUTPUT_RECOVERY_AUTH_DOMAIN, spend_authority);
+    let mut record_state = poseidon_hash2(OUTPUT_RECOVERY_RECORD_DOMAIN, key_tag);
+    let mut stream_state = output_recovery_stream_seed(
+        spend_authority, batch_id, output_index_felt,
+    );
+    let mut plaintext_fields = array![];
+    record_state = poseidon_hash2(record_state, auth_tag);
+    while field_index < OUTPUT_RECOVERY_FIELD_COUNT {
+        let ciphertext = *recovery_ciphertext_fields.at(field_cursor + field_index);
+        stream_state = poseidon_hash2(stream_state, field_index.into());
+        let plaintext = ciphertext - stream_state;
+        assert_expected_output_recovery_field(
+            field_index,
+            plaintext,
+            batch_id,
+            output_index_felt,
+            note_commitment_value,
+            asset_id,
+            amount,
+            owner_key,
+            spend_authority,
+            withdraw_authority,
+            blinding,
+            nonce,
+            metadata_commitment,
+        );
+        auth_state = poseidon_hash2(auth_state, plaintext);
+        record_state = poseidon_hash2(record_state, ciphertext);
+        plaintext_fields.append(plaintext);
+        field_index += 1;
+    }
+    assert(auth_state == auth_tag, 'OUTPUT_RECOVERY_AUTH');
+
+    assert_output_recovery_merkle_path(
+        note_commitment_value,
+        asset_id,
+        amount,
+        withdraw_authority,
+        output_note_root,
+        plaintext_fields.span(),
+    );
+
+    record_state
+}
+
+fn assert_expected_output_recovery_field(
+    field_index: usize,
+    plaintext: felt252,
+    batch_id: felt252,
+    output_index: felt252,
+    note_commitment: felt252,
+    asset_id: felt252,
+    amount: felt252,
+    owner_key: felt252,
+    spend_authority: felt252,
+    withdraw_authority: felt252,
+    blinding: felt252,
+    nonce: felt252,
+    metadata_commitment: felt252,
+) {
+    if field_index == 0 {
+        assert(plaintext == 1, 'RECOVERY_VERSION');
+    } else if field_index == 1 {
+        assert(plaintext == batch_id, 'RECOVERY_BATCH');
+    } else if field_index == 2 {
+        assert(plaintext == output_index, 'RECOVERY_INDEX');
+    } else if field_index == 3 {
+        assert(plaintext == note_commitment, 'RECOVERY_NOTE');
+    } else if field_index == 4 {
+        assert(plaintext == asset_id, 'RECOVERY_ASSET');
+    } else if field_index == 5 {
+        assert(plaintext == amount, 'RECOVERY_AMOUNT');
+    } else if field_index == 6 {
+        assert(plaintext == owner_key, 'RECOVERY_OWNER');
+    } else if field_index == 7 {
+        assert(plaintext == spend_authority, 'RECOVERY_SPEND');
+    } else if field_index == 8 {
+        assert(plaintext == withdraw_authority, 'RECOVERY_WITHDRAW');
+    } else if field_index == 9 {
+        assert(plaintext == blinding, 'RECOVERY_BLINDING');
+    } else if field_index == 10 {
+        assert(plaintext == nonce, 'RECOVERY_NONCE');
+    } else if field_index == 11 {
+        assert(plaintext == metadata_commitment, 'RECOVERY_META');
+    }
+}
+
+fn assert_output_recovery_merkle_path(
+    note_commitment: felt252,
+    asset_id: felt252,
+    amount: felt252,
+    withdraw_authority: felt252,
+    output_note_root: felt252,
+    plaintext_fields: Span<felt252>,
+) {
+    let proof_len_felt = *plaintext_fields.at(12);
+    let proof_len: usize = proof_len_felt.try_into().expect('RECOVERY_PROOF_LEN');
+    assert(proof_len <= OUTPUT_RECOVERY_PROOF_SLOTS, 'RECOVERY_PROOF_SLOTS');
+    let mut root = output_note_leaf(note_commitment, asset_id, amount, withdraw_authority);
+    let mut slot: usize = 0;
+    while slot < OUTPUT_RECOVERY_PROOF_SLOTS {
+        let sibling_field_index = 13 + slot;
+        let direction_field_index = 13 + OUTPUT_RECOVERY_PROOF_SLOTS + slot;
+        let sibling = *plaintext_fields.at(sibling_field_index);
+        let direction = *plaintext_fields.at(direction_field_index);
+        if slot < proof_len {
+            if direction == 0 {
+                root = output_note_node(root, sibling);
+            } else {
+                assert(direction == 1, 'RECOVERY_PATH_DIR');
+                root = output_note_node(sibling, root);
+            }
+        } else {
+            assert(sibling == 0, 'RECOVERY_PATH_PAD');
+            assert(direction == 0, 'RECOVERY_DIR_PAD');
+        }
+        slot += 1;
+    }
+    assert(root == output_note_root, 'RECOVERY_OUTPUT_ROOT');
+}
+
+fn output_recovery_stream_seed(
+    spend_authority: felt252,
+    batch_id: felt252,
+    output_index: felt252,
+) -> felt252 {
+    let with_key = poseidon_hash2(OUTPUT_RECOVERY_STREAM_DOMAIN, spend_authority);
+    let with_batch = poseidon_hash2(with_key, batch_id);
+    poseidon_hash2(with_batch, output_index)
+}
+
+fn output_recovery_key_tag(
+    spend_authority: felt252, batch_id: felt252, output_index: felt252,
+) -> felt252 {
+    let with_key = poseidon_hash2(OUTPUT_RECOVERY_TAG_DOMAIN, spend_authority);
+    let with_batch = poseidon_hash2(with_key, batch_id);
+    poseidon_hash2(with_batch, output_index)
+}
+
+fn output_note_leaf(
+    note_commitment: felt252, asset_id: felt252, amount: felt252, withdraw_authority: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(OUTPUT_NOTE_LEAF_DOMAIN, note_commitment);
+    state = poseidon_hash2(state, asset_id);
+    state = poseidon_hash2(state, amount);
+    poseidon_hash2(state, withdraw_authority)
+}
+
+fn output_note_node(left: felt252, right: felt252) -> felt252 {
+    poseidon_hash2(poseidon_hash2(OUTPUT_NOTE_NODE_DOMAIN, left), right)
+}
+
+fn deposit_note_root(note_commitment: felt252) -> felt252 {
+    poseidon_hash2(poseidon_hash2(DEPOSIT_NOTE_ROOT_DOMAIN, note_commitment), 1)
+}
+
+fn merkle_root_from_leaves(mut level: Array<felt252>) -> felt252 {
+    loop {
+        if level.len() == 1 {
+            break;
+        }
+
+        let mut next = array![];
+        let mut index = 0;
+        loop {
+            if index >= level.len() {
+                break;
+            }
+            let left = *level.at(index);
+            let right = if index + 1 < level.len() {
+                *level.at(index + 1)
+            } else {
+                0
+            };
+            next.append(output_note_node(left, right));
+            index += 2;
+        }
+        level = next;
+    };
+    *level.at(0)
+}
+
+fn state_transition_root(domain: felt252, prior_root: felt252, batch_root: felt252) -> felt252 {
+    poseidon_hash2(poseidon_hash2(domain, prior_root), batch_root)
 }
 
 fn ordered_commitment_root(order_commitments: Span<felt252>) -> felt252 {
