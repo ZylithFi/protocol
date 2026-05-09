@@ -4384,3 +4384,107 @@ fn ordered_commitment_root(order_commitments: Span<felt252>) -> felt252 {
     }
     state
 }
+
+#[cfg(test)]
+mod tests {
+    use core::array::{Array, ArrayTrait};
+    use super::{
+        EMPTY_OUTPUT_NOTE_ROOT_DOMAIN, OUTPUT_RECOVERY_BUNDLE_DOMAIN, STATEMENT_TYPE_SETTLEMENT,
+        poseidon_hash2, protocol_fee_root, public_settlement_commitment, single_field_root,
+        state_transition_root, verify_settlement_statement,
+    };
+
+    #[test]
+    fn settlement_statement_accepts_root_only_noop_payload() {
+        let output_bundle_ref = poseidon_hash2(OUTPUT_RECOVERY_BUNDLE_DOMAIN, 0);
+        let output_note_root = poseidon_hash2(EMPTY_OUTPUT_NOTE_ROOT_DOMAIN, output_bundle_ref);
+        let consumed_note_root = single_field_root(0x3001, array![].span());
+        let consumed_nullifier_root = single_field_root(0x3002, array![].span());
+        let renewal_child_root = single_field_root(0x3003, array![].span());
+        let fee_root = protocol_fee_root(0x3005, 0x2006, 0x2007, 0, 0);
+        let new_note_root = state_transition_root(0x3006, 0, output_note_root);
+        let new_fee_root = state_transition_root(0x3006, 0, fee_root);
+        let transcript_commitment = public_settlement_commitment(
+            0x1006,
+            0x2001,
+            0x2002,
+            0x2003,
+            0x2004,
+            0x2005,
+            0,
+            output_bundle_ref,
+            0,
+            0,
+            0,
+            0,
+            consumed_note_root,
+            consumed_nullifier_root,
+            renewal_child_root,
+            output_note_root,
+            fee_root,
+            new_note_root,
+            0,
+            0,
+            new_fee_root,
+        );
+        let payload = empty_settlement_test_payload(transcript_commitment);
+        assert(
+            verify_settlement_statement(payload.span()) == transcript_commitment, 'BAD_TRANSCRIPT',
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn settlement_statement_rejects_public_transcript_mismatch() {
+        let payload = empty_settlement_test_payload(0xdead);
+        verify_settlement_statement(payload.span());
+    }
+
+    fn empty_settlement_test_payload(transcript_commitment: felt252) -> Array<felt252> {
+        let mut payload = array![
+            STATEMENT_TYPE_SETTLEMENT,
+            0x1001,
+            0x1002,
+            0x1003,
+            0x1004,
+            0x1005,
+            0x1006,
+            0x2001,
+            0x2002,
+            0x2003,
+            0x2004,
+            0x2005,
+            transcript_commitment,
+            0x2006,
+            0x2007,
+            0,
+            0,
+            poseidon_hash2(OUTPUT_RECOVERY_BUNDLE_DOMAIN, 0),
+            0,
+            0,
+            0,
+            0,
+            0x3001,
+            0x3002,
+            0x3003,
+            0x3004,
+            0x3005,
+            0x3006,
+            0x3007,
+            0x3008,
+        ];
+        append_empty_test_vectors(ref payload, 96);
+        payload
+    }
+
+    fn append_empty_test_vectors(ref payload: Array<felt252>, count: usize) {
+        let mut index = 0;
+        loop {
+            if index == count {
+                break;
+            }
+            payload.append(0);
+            index += 1;
+        };
+    }
+}
