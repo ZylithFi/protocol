@@ -620,7 +620,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         assert(funding_note_ref == funding_note_commitment, 'INPUT_REF_MISMATCH');
         assert(
             funding_nullifier == note_nullifier(
-                nullifier_domain, funding_note_commitment, funding_note_spend_authority,
+                nullifier_domain, funding_note_commitment, funding_note_blinding,
             ),
             'NULLIFIER_BIND',
         );
@@ -1802,7 +1802,7 @@ fn assert_auction_order_preimages(
             assert(funding_note_ref == funding_note_commitment, 'AUCTION_REF_BIND');
             assert(
                 funding_nullifier == note_nullifier(
-                    nullifier_domain, funding_note_commitment, funding_note_spend_authority,
+                    nullifier_domain, funding_note_commitment, funding_note_blinding,
                 ),
                 'AUCTION_NULL_BIND',
             );
@@ -3833,8 +3833,8 @@ fn note_commitment(
     poseidon_hash2(with_nonce, metadata_commitment)
 }
 
-fn note_nullifier(seed: felt252, note_commitment: felt252, spend_authority: felt252) -> felt252 {
-    poseidon_hash2(poseidon_hash2(seed, note_commitment), spend_authority)
+fn note_nullifier(seed: felt252, note_commitment: felt252, note_secret: felt252) -> felt252 {
+    poseidon_hash2(poseidon_hash2(seed, note_commitment), note_secret)
 }
 
 fn order_intent_commitment(
