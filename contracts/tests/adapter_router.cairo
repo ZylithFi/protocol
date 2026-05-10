@@ -34,6 +34,7 @@ const PRIVACY_POOL: felt252 = 0x999;
 const VIRTUAL_SNOS: felt252 = 'VIRTUAL_SNOS';
 const VIRTUAL_SNOS0: felt252 = 'VIRTUAL_SNOS0';
 const TEST_PROOF_PROGRAM_HASH: felt252 = 0x987654321;
+const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
 const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
 const RENEWAL_PARENT_CANCEL_DOMAIN: felt252 =
     0x26f84b60309c08d4030876815edb467f89f78e5a5f62823af4521f1be502ca3;
@@ -255,6 +256,28 @@ fn native_auction_result_message_hash(
     poseidon_hash2(state, transcript_commitment)
 }
 
+fn native_admission_message_hash(
+    auction_verifier_address: ContractAddress,
+    batch_id: felt252,
+    order_commitment_root: felt252,
+    admission_root: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(ADMISSION_MESSAGE_DOMAIN, auction_verifier_address.into());
+    state = poseidon_hash2(state, batch_id);
+    state = poseidon_hash2(state, order_commitment_root);
+    poseidon_hash2(state, admission_root)
+}
+
+fn admission_proof_message_hash(
+    proof_program_address: ContractAddress, statement_message_hash: felt252,
+) -> felt252 {
+    let mut l1_message_data = array![proof_program_address.into(), 0];
+    l1_message_data.append(2);
+    l1_message_data.append(ADMISSION_MESSAGE_DOMAIN);
+    l1_message_data.append(statement_message_hash);
+    poseidon_hash_span(l1_message_data.span())
+}
+
 fn auction_result_proof_message_hash(
     proof_program_address: ContractAddress, statement_message_hash: felt252,
 ) -> felt252 {
@@ -263,6 +286,44 @@ fn auction_result_proof_message_hash(
     l1_message_data.append(AUCTION_RESULT_MESSAGE_DOMAIN);
     l1_message_data.append(statement_message_hash);
     poseidon_hash_span(l1_message_data.span())
+}
+
+fn record_split_auction_proofs(
+    auction_verifier: ContractAddress,
+    verifier: IAuctionVerifierDispatcher,
+    settlement_account: ContractAddress,
+    batch_id: felt252,
+    order_commitment_root: felt252,
+    admission_root: felt252,
+    transcript_commitment: felt252,
+) {
+    let admission_statement = native_admission_message_hash(
+        auction_verifier, batch_id, order_commitment_root, admission_root,
+    );
+    let admission_proof_message = admission_proof_message_hash(
+        auction_verifier, admission_statement,
+    );
+    let admission_proof_facts = valid_proof_facts(99, admission_proof_message);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, admission_proof_facts.span(), CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    verifier
+        .record_admission_root_with_proof_facts(batch_id, order_commitment_root, admission_root);
+
+    let auction_statement = native_auction_result_message_hash(
+        auction_verifier, batch_id, order_commitment_root, admission_root, transcript_commitment,
+    );
+    let auction_proof_message = auction_result_proof_message_hash(
+        auction_verifier, auction_statement,
+    );
+    let auction_proof_facts = valid_proof_facts(99, auction_proof_message);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, auction_proof_facts.span(), CheatSpan::TargetCalls(1));
+    verifier
+        .record_auction_result_with_proof_facts(
+            batch_id, order_commitment_root, admission_root, transcript_commitment,
+        );
+    stop_cheat_caller_address(auction_verifier);
 }
 
 fn renewal_parent_cancel_marker_message_hash_for_verifier(
@@ -848,6 +909,15 @@ fn auction_verifier_rejects_stale_prior_note_root_after_deposit_activation() {
     let proof_artifact_commitment = native_settlement_message_hash(
         auction_verifier, transcript_commitment,
     );
+    record_split_auction_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        order_commitment_root,
+        0x333,
+        transcript_commitment,
+    );
     let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
     let proof_facts = valid_proof_facts(99, proof_message_hash);
 
@@ -1044,6 +1114,15 @@ fn auction_verifier_updates_sparse_renewal_root_during_settlement() {
     );
     let proof_artifact_commitment = native_settlement_message_hash(
         auction_verifier, transcript_commitment,
+    );
+    record_split_auction_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        order_commitment_root,
+        0x334,
+        transcript_commitment,
     );
     let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
     let proof_facts = valid_proof_facts(99, proof_message_hash);
@@ -1245,6 +1324,15 @@ fn auction_verifier_accepts_native_proof_facts() {
     let proof_artifact_commitment = native_settlement_message_hash(
         auction_verifier, transcript_commitment,
     );
+    record_split_auction_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        order_commitment_root,
+        0x335,
+        transcript_commitment,
+    );
     let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
     let proof_facts = valid_proof_facts(99, proof_message_hash);
 
@@ -1298,19 +1386,12 @@ fn auction_verifier_accepts_split_auction_result_before_settlement() {
     batches.set_auction_verifier(auction_verifier);
     batches
         .register_batch(
-            batch_id,
-            pair_id,
-            1,
-            2,
-            0,
-            order_commitment_root,
-            encrypted_order_set_commitment,
+            batch_id, pair_id, 1, 2, 0, order_commitment_root, encrypted_order_set_commitment,
         );
     stop_cheat_caller_address(batch_registry);
 
     start_cheat_caller_address(auction_verifier, admin);
     verifier.set_authorized_settlement_account(settlement_account);
-    verifier.set_split_auction_proof_required(true);
     stop_cheat_caller_address(auction_verifier);
 
     let transcript_commitment = empty_public_settlement_commitment(
@@ -1322,25 +1403,15 @@ fn auction_verifier_accepts_split_auction_result_before_settlement() {
         clearing_price,
         output_bundle_ref,
     );
-    let auction_statement = native_auction_result_message_hash(
+    record_split_auction_proofs(
         auction_verifier,
+        verifier,
+        settlement_account,
         batch_id,
         order_commitment_root,
-        order_commitment_root,
+        0x336,
         transcript_commitment,
     );
-    let auction_proof_message = auction_result_proof_message_hash(
-        auction_verifier, auction_statement,
-    );
-    let auction_proof_facts = valid_proof_facts(99, auction_proof_message);
-    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
-    cheat_proof_facts(auction_verifier, auction_proof_facts.span(), CheatSpan::TargetCalls(1));
-    start_cheat_caller_address(auction_verifier, settlement_account);
-    verifier
-        .record_auction_result_with_proof_facts(
-            batch_id, order_commitment_root, order_commitment_root, transcript_commitment,
-        );
-    stop_cheat_caller_address(auction_verifier);
 
     let proof_artifact_commitment = native_settlement_message_hash(
         auction_verifier, transcript_commitment,
@@ -1386,19 +1457,12 @@ fn auction_verifier_rejects_split_settlement_without_auction_result() {
     batches.set_auction_verifier(auction_verifier);
     batches
         .register_batch(
-            batch_id,
-            pair_id,
-            1,
-            2,
-            0,
-            order_commitment_root,
-            encrypted_order_set_commitment,
+            batch_id, pair_id, 1, 2, 0, order_commitment_root, encrypted_order_set_commitment,
         );
     stop_cheat_caller_address(batch_registry);
 
     start_cheat_caller_address(auction_verifier, admin);
     verifier.set_authorized_settlement_account(settlement_account);
-    verifier.set_split_auction_proof_required(true);
     stop_cheat_caller_address(auction_verifier);
 
     let transcript_commitment = empty_public_settlement_commitment(
@@ -1538,6 +1602,24 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
     );
     let proof_artifact_1 = native_settlement_message_hash(auction_verifier, transcript_1);
     let proof_artifact_2 = native_settlement_message_hash(auction_verifier, transcript_2);
+    record_split_auction_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id_1,
+        order_commitment_root_1,
+        0x337,
+        transcript_1,
+    );
+    record_split_auction_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id_2,
+        order_commitment_root_2,
+        0x338,
+        transcript_2,
+    );
     let messages = array![
         verifier.settlement_proof_message_hash(transcript_1),
         verifier.settlement_proof_message_hash(transcript_2),
@@ -1666,6 +1748,15 @@ fn auction_verifier_accepts_root_only_nullifier_transition() {
     );
     let proof_artifact_commitment = native_settlement_message_hash(
         auction_verifier, transcript_commitment,
+    );
+    record_split_auction_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        order_commitment_root,
+        0x339,
+        transcript_commitment,
     );
     let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
     let proof_facts = valid_proof_facts(99, proof_message_hash);
@@ -1973,6 +2064,15 @@ fn auction_verifier_withdraws_merkle_proven_settlement_output() {
     );
     let proof_artifact_commitment = native_settlement_message_hash(
         auction_verifier, transcript_commitment,
+    );
+    record_split_auction_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        0x111,
+        0x33a,
+        transcript_commitment,
     );
     let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
     let proof_facts = valid_proof_facts(99, proof_message_hash);

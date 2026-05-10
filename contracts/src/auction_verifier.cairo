@@ -22,7 +22,6 @@ pub trait IAuctionVerifier<TContractState> {
     fn set_shielded_asset_adapter(ref self: TContractState, adapter: ContractAddress);
     fn set_deposit_note_root_registrar(ref self: TContractState, registrar: ContractAddress);
     fn set_output_claim_delay_seconds(ref self: TContractState, delay_seconds: u64);
-    fn set_split_auction_proof_required(ref self: TContractState, required: bool);
     fn cancel_renewal_parent_marker(
         ref self: TContractState,
         cancel_marker: felt252,
@@ -157,7 +156,6 @@ pub mod AuctionVerifier {
         proof_program_hash: felt252,
         proof_validity_blocks: u64,
         output_claim_delay_seconds: u64,
-        split_auction_proof_required: bool,
         batch_registry: ContractAddress,
         shielded_asset_adapter: ContractAddress,
         deposit_note_root_registrar: ContractAddress,
@@ -229,11 +227,6 @@ pub mod AuctionVerifier {
         fn set_output_claim_delay_seconds(ref self: ContractState, delay_seconds: u64) {
             assert_admin(@self);
             self.output_claim_delay_seconds.write(delay_seconds);
-        }
-
-        fn set_split_auction_proof_required(ref self: ContractState, required: bool) {
-            assert_admin(@self);
-            self.split_auction_proof_required.write(required);
         }
 
         fn cancel_renewal_parent_marker(
@@ -342,11 +335,8 @@ pub mod AuctionVerifier {
             let batch = batch_registry.get_batch(batch_id);
             assert(batch.order_commitment_root == order_commitment_root, 'ORDER_ROOT_BINDING');
             let verified_admission = self.verified_admission_roots.read(batch_id);
-            if verified_admission == 0 {
-                assert(admission_root == order_commitment_root, 'ADMISSION_REQUIRED');
-            } else {
-                assert(verified_admission == admission_root, 'ADMISSION_REQUIRED');
-            }
+            assert(verified_admission != 0, 'ADMISSION_REQUIRED');
+            assert(verified_admission == admission_root, 'ADMISSION_REQUIRED');
             let expected_statement_message = native_auction_result_message_hash(
                 get_contract_address(),
                 batch_id,
@@ -818,7 +808,9 @@ pub mod AuctionVerifier {
         admission_root: felt252,
         transcript_commitment: felt252,
     ) -> felt252 {
-        let mut state = poseidon_hash2(AUCTION_RESULT_MESSAGE_DOMAIN, auction_verifier_address.into());
+        let mut state = poseidon_hash2(
+            AUCTION_RESULT_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
         state = poseidon_hash2(state, batch_id);
         state = poseidon_hash2(state, order_commitment_root);
         state = poseidon_hash2(state, admission_root);
@@ -896,12 +888,10 @@ pub mod AuctionVerifier {
             new_fee_root,
         );
         assert(recomputed_commitment == transcript_commitment, 'SETTLEMENT_BINDING');
-        if self.split_auction_proof_required.read() {
-            assert(
-                self.verified_auction_transcripts.read(batch_id) == transcript_commitment,
-                'AUCTION_PROOF_REQUIRED',
-            );
-        }
+        assert(
+            self.verified_auction_transcripts.read(batch_id) == transcript_commitment,
+            'AUCTION_PROOF_REQUIRED',
+        );
 
         batch_registry
             .record_settlement_metadata(
