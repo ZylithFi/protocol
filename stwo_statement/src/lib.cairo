@@ -88,6 +88,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let base_asset_id = read_next(data, ref index);
     let quote_asset_id = read_next(data, ref index);
     let clearing_price = read_next(data, ref index);
+    let price_base_scale = read_next(data, ref index);
     let matched_order_count = read_next(data, ref index);
     let output_bundle_ref = read_next(data, ref index);
     let prior_note_root = read_next(data, ref index);
@@ -119,6 +120,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     if matched_order_count != 0 {
         assert(clearing_price != 0, 'BAD_PRICE');
     }
+    assert(price_base_scale != 0, 'BAD_PRICE_SCALE');
     assert(output_bundle_ref != 0, 'BAD_OUTPUT_REF');
     assert(consumed_note_root_domain != 0, 'BAD_INPUT_ROOT_DOMAIN');
     assert(consumed_nullifier_root_domain != 0, 'BAD_NULL_ROOT_DOMAIN');
@@ -374,6 +376,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     assert_unique(output_note_commitments.span(), 'DUP_OUTPUT');
 
     let clearing_price_u128 = felt_to_u128(clearing_price);
+    let price_base_scale_u128 = felt_to_u128(price_base_scale);
     let mut index_order = 0;
     let mut total_buy_base: u128 = 0;
     let mut total_sell_base: u128 = 0;
@@ -552,6 +555,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             maker_curve_point_count,
             curve_cursor,
             clearing_price_u128,
+            price_base_scale_u128,
             matched_maker_curve_prices.span(),
             matched_maker_curve_base_amounts.span(),
         );
@@ -680,7 +684,9 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             assert(funding_note_asset_id == quote_asset_id, 'BUY_INPUT_ASSET');
             assert(output_note_asset_id == base_asset_id, 'BUY_OUTPUT_ASSET');
 
-            let spend_amount = filled_amount * clearing_price_u128;
+            let spend_amount = quote_amount_for_base_amount(
+                filled_amount, clearing_price_u128, price_base_scale_u128,
+            );
             assert(funding_note_amount >= spend_amount, 'BUY_FUNDS');
             let fee_amount = filled_amount * PROTOCOL_FEE_BPS / FEE_BPS_DENOMINATOR;
             total_buy_base = total_buy_base + filled_amount;
@@ -693,7 +699,9 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             assert(output_note_asset_id == quote_asset_id, 'SELL_OUTPUT_ASSET');
             assert(funding_note_amount >= filled_amount, 'SELL_FUNDS');
 
-            let gross_quote = filled_amount * clearing_price_u128;
+            let gross_quote = quote_amount_for_base_amount(
+                filled_amount, clearing_price_u128, price_base_scale_u128,
+            );
             let fee_amount = gross_quote * PROTOCOL_FEE_BPS / FEE_BPS_DENOMINATOR;
             total_sell_base = total_sell_base + filled_amount;
             expected_quote_fee = expected_quote_fee + fee_amount;
@@ -788,6 +796,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         base_asset_id,
         quote_asset_id,
         clearing_price_u128,
+        price_base_scale_u128,
         matched_fill_amounts.span(),
         matched_sides.span(),
         matched_funding_note_amounts.span(),
@@ -863,6 +872,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         order_commitment_root,
         encrypted_order_set_commitment,
         clearing_price,
+        price_base_scale,
         output_bundle_ref,
         prior_note_root,
         prior_nullifier_root,
@@ -903,6 +913,10 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
     let batch_epoch = settlement_batch_epoch(settlement_payload.span());
     let base_asset_id = settlement_base_asset_id(settlement_payload.span());
     let quote_asset_id = settlement_quote_asset_id(settlement_payload.span());
+    let price_base_scale = felt_to_u128(
+        settlement_price_base_scale(settlement_payload.span()),
+    );
+    assert(price_base_scale != 0, 'BAD_PRICE_SCALE');
 
     let order_commitments = read_vector(data, ref index);
     let sides = read_vector(data, ref index);
@@ -976,6 +990,7 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
     if order_commitments.len() != 0 {
         assert_auction_order_preimages(
             0,
+            price_base_scale,
             order_commitments.span(),
             sides.span(),
             order_types.span(),
@@ -1051,11 +1066,14 @@ pub fn verify_auction_result_statement(
     let transcript_commitment = settlement_transcript_commitment(settlement_payload.span());
     let order_commitment_root = settlement_order_commitment_root(settlement_payload.span());
     let clearing_price = settlement_clearing_price(settlement_payload.span());
+    let price_base_scale = settlement_price_base_scale(settlement_payload.span());
     let maker_curve_domain = settlement_maker_curve_domain(settlement_payload.span());
     let batch_id = settlement_batch_id(settlement_payload.span());
     let matched_order_commitments = settlement_matched_order_commitments(settlement_payload.span());
     let matched_fill_amounts = settlement_matched_fill_amounts(settlement_payload.span());
     let clearing_price_u128 = felt_to_u128(clearing_price);
+    let price_base_scale_u128 = felt_to_u128(price_base_scale);
+    assert(price_base_scale_u128 != 0, 'BAD_PRICE_SCALE');
     let admission_root = read_next(data, ref index);
 
     let order_commitments = read_vector(data, ref index);
@@ -1118,6 +1136,7 @@ pub fn verify_auction_result_statement(
     );
     assert_curve_commitments_for_summary(
         clearing_price_u128,
+        price_base_scale_u128,
         sides.span(),
         order_types.span(),
         maker_curve_domain,
@@ -1131,6 +1150,7 @@ pub fn verify_auction_result_statement(
         if privacy_gate_enforced == 1 {
             assert_privacy_gate_failure(
                 clearing_price_u128,
+                price_base_scale_u128,
                 sides.span(),
                 order_types.span(),
                 maker_curve_point_counts.span(),
@@ -1152,6 +1172,7 @@ pub fn verify_auction_result_statement(
             );
         } else {
             assert_no_executable_auction(
+                price_base_scale_u128,
                 sides.span(),
                 order_types.span(),
                 maker_curve_point_counts.span(),
@@ -1168,6 +1189,7 @@ pub fn verify_auction_result_statement(
         assert(privacy_gate_enforced == 1, 'MATCH_PRIVACY_GATE');
         assert_auction_allocation(
             clearing_price_u128,
+            price_base_scale_u128,
             order_commitments.span(),
             sides.span(),
             order_types.span(),
@@ -1185,6 +1207,7 @@ pub fn verify_auction_result_statement(
         );
         assert_best_clearing_price(
             clearing_price_u128,
+            price_base_scale_u128,
             sides.span(),
             order_types.span(),
             maker_curve_point_counts.span(),
@@ -1198,6 +1221,7 @@ pub fn verify_auction_result_statement(
         );
         assert_privacy_gate_success(
             clearing_price_u128,
+            price_base_scale_u128,
             sides.span(),
             order_types.span(),
             maker_curve_point_counts.span(),
@@ -1226,6 +1250,12 @@ fn settlement_clearing_price(settlement_payload: Span<felt252>) -> felt252 {
     assert(settlement_payload.len() > 15, 'BAD_SETTLEMENT_HEADER');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'BAD_STMT_TYPE');
     *settlement_payload.at(15)
+}
+
+fn settlement_price_base_scale(settlement_payload: Span<felt252>) -> felt252 {
+    assert(settlement_payload.len() > 16, 'BAD_SETTLEMENT_HEADER');
+    assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'BAD_STMT_TYPE');
+    *settlement_payload.at(16)
 }
 
 fn settlement_transcript_commitment(settlement_payload: Span<felt252>) -> felt252 {
@@ -1301,22 +1331,23 @@ fn settlement_quote_asset_id(settlement_payload: Span<felt252>) -> felt252 {
 }
 
 fn settlement_matched_order_commitments(settlement_payload: Span<felt252>) -> Array<felt252> {
-    assert(settlement_payload.len() > 30, 'BAD_SETTLEMENT_HEADER');
+    assert(settlement_payload.len() > 31, 'BAD_SETTLEMENT_HEADER');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'BAD_STMT_TYPE');
-    let mut index: usize = 30;
+    let mut index: usize = 31;
     read_vector(settlement_payload, ref index)
 }
 
 fn settlement_matched_fill_amounts(settlement_payload: Span<felt252>) -> Array<felt252> {
-    assert(settlement_payload.len() > 30, 'BAD_SETTLEMENT_HEADER');
+    assert(settlement_payload.len() > 31, 'BAD_SETTLEMENT_HEADER');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'BAD_STMT_TYPE');
-    let mut index: usize = 30;
+    let mut index: usize = 31;
     let _matched_order_commitments = read_vector(settlement_payload, ref index);
     read_vector(settlement_payload, ref index)
 }
 
 fn assert_auction_order_preimages(
     clearing_price: u128,
+    price_base_scale: u128,
     order_commitments: Span<felt252>,
     sides: Span<felt252>,
     order_types: Span<felt252>,
@@ -1443,6 +1474,7 @@ fn assert_auction_order_preimages(
             point_count,
             curve_cursor,
             clearing_price,
+            price_base_scale,
             maker_curve_prices,
             maker_curve_base_amounts,
         );
@@ -1544,6 +1576,7 @@ fn assert_auction_order_preimages(
 
 fn assert_auction_allocation(
     clearing_price: u128,
+    price_base_scale: u128,
     order_commitments: Span<felt252>,
     sides: Span<felt252>,
     order_types: Span<felt252>,
@@ -1561,6 +1594,7 @@ fn assert_auction_allocation(
 ) {
     let active_flags = stable_active_flags(
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -1583,6 +1617,7 @@ fn assert_auction_allocation(
             index,
             active_flags.span(),
             clearing_price,
+            price_base_scale,
             sides,
             order_types,
             maker_curve_point_counts,
@@ -1623,6 +1658,7 @@ fn assert_auction_allocation(
     assert(total_buy_fill == total_sell_fill, 'ALLOCATION_IMBALANCE');
     let (max_matched, _imbalance) = auction_score_at_price(
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -1639,6 +1675,7 @@ fn assert_auction_allocation(
 
 fn stable_active_flags(
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -1652,6 +1689,7 @@ fn stable_active_flags(
 ) -> Array<felt252> {
     let mut active_flags = initial_active_flags(
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -1671,6 +1709,7 @@ fn stable_active_flags(
         let next_flags = next_active_flags(
             active_flags.span(),
             clearing_price,
+            price_base_scale,
             sides,
             order_types,
             maker_curve_point_counts,
@@ -1694,6 +1733,7 @@ fn stable_active_flags(
 
 fn initial_active_flags(
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -1711,6 +1751,7 @@ fn initial_active_flags(
         let max_fill = max_fill_at_candidate(
             index,
             clearing_price,
+            price_base_scale,
             *sides.at(index),
             *order_types.at(index),
             maker_curve_point_counts,
@@ -1735,6 +1776,7 @@ fn initial_active_flags(
 fn next_active_flags(
     active_flags: Span<felt252>,
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -1756,6 +1798,7 @@ fn next_active_flags(
                 index,
                 active_flags,
                 clearing_price,
+                price_base_scale,
                 sides,
                 order_types,
                 maker_curve_point_counts,
@@ -1804,6 +1847,7 @@ fn expected_fill_with_active_flags(
     target_index: usize,
     active_flags: Span<felt252>,
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -1822,6 +1866,7 @@ fn expected_fill_with_active_flags(
     let max_fill = max_fill_at_candidate(
         target_index,
         clearing_price,
+        price_base_scale,
         target_side,
         *order_types.at(target_index),
         maker_curve_point_counts,
@@ -1842,6 +1887,7 @@ fn expected_fill_with_active_flags(
         active_flags,
         opposite_side,
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -1857,6 +1903,7 @@ fn expected_fill_with_active_flags(
         target_index,
         active_flags,
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -1875,6 +1922,7 @@ fn active_capacity_total(
     active_flags: Span<felt252>,
     side: felt252,
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -1894,6 +1942,7 @@ fn active_capacity_total(
                 max_fill_at_candidate(
                     index,
                     clearing_price,
+                    price_base_scale,
                     *sides.at(index),
                     *order_types.at(index),
                     maker_curve_point_counts,
@@ -1915,6 +1964,7 @@ fn active_priority_capacity_before(
     target_index: usize,
     active_flags: Span<felt252>,
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -1946,6 +1996,7 @@ fn active_priority_capacity_before(
                     max_fill_at_candidate(
                         index,
                         clearing_price,
+                        price_base_scale,
                         *sides.at(index),
                         *order_types.at(index),
                         maker_curve_point_counts,
@@ -1976,6 +2027,7 @@ fn greedy_priority_fill(
 
 fn assert_best_clearing_price(
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -2006,6 +2058,7 @@ fn assert_best_clearing_price(
                     let candidate = felt_to_u128(*maker_curve_prices.at(cursor + point_index));
                     let (matched, imbalance) = auction_score_at_price(
                         candidate,
+                        price_base_scale,
                         sides,
                         order_types,
                         maker_curve_point_counts,
@@ -2038,6 +2091,7 @@ fn assert_best_clearing_price(
                 let candidate = felt_to_u128(*limit_prices.at(order_index));
                 let (matched, imbalance) = auction_score_at_price(
                     candidate,
+                    price_base_scale,
                     sides,
                     order_types,
                     maker_curve_point_counts,
@@ -2073,6 +2127,7 @@ fn assert_best_clearing_price(
 }
 
 fn assert_no_executable_auction(
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -2098,6 +2153,7 @@ fn assert_no_executable_auction(
                     let candidate = felt_to_u128(*maker_curve_prices.at(cursor + point_index));
                     let (matched, _imbalance) = auction_score_at_price(
                         candidate,
+                        price_base_scale,
                         sides,
                         order_types,
                         maker_curve_point_counts,
@@ -2116,6 +2172,7 @@ fn assert_no_executable_auction(
                 let candidate = felt_to_u128(*limit_prices.at(order_index));
                 let (matched, _imbalance) = auction_score_at_price(
                     candidate,
+                    price_base_scale,
                     sides,
                     order_types,
                     maker_curve_point_counts,
@@ -2206,6 +2263,7 @@ fn admission_summary_root(
 
 fn assert_curve_commitments_for_summary(
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_domain: felt252,
@@ -2228,6 +2286,7 @@ fn assert_curve_commitments_for_summary(
             point_count,
             curve_cursor,
             clearing_price,
+            price_base_scale,
             maker_curve_prices,
             maker_curve_base_amounts,
         );
@@ -2239,6 +2298,7 @@ fn assert_curve_commitments_for_summary(
 
 fn assert_privacy_gate_failure(
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -2260,6 +2320,7 @@ fn assert_privacy_gate_failure(
 ) {
     let active_flags = stable_active_flags(
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2273,6 +2334,7 @@ fn assert_privacy_gate_failure(
     );
     let (matched_volume, _imbalance) = auction_score_at_price(
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2286,6 +2348,7 @@ fn assert_privacy_gate_failure(
     );
     let eligible_count = eligible_order_count_at_price(
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2300,6 +2363,7 @@ fn assert_privacy_gate_failure(
     let participant_count = distinct_filled_owner_count(
         active_flags.span(),
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2316,6 +2380,7 @@ fn assert_privacy_gate_failure(
     let maker_participant_count = distinct_filled_owner_count(
         active_flags.span(),
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2332,6 +2397,7 @@ fn assert_privacy_gate_failure(
     let max_order_fill = max_order_fill_at_price(
         active_flags.span(),
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2347,6 +2413,7 @@ fn assert_privacy_gate_failure(
     let max_maker_fill = max_order_fill_at_price(
         active_flags.span(),
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2362,6 +2429,7 @@ fn assert_privacy_gate_failure(
     let max_owner_fill = max_owner_fill_at_price(
         active_flags.span(),
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2427,6 +2495,7 @@ fn assert_privacy_gate_failure(
 
 fn assert_privacy_gate_success(
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -2448,6 +2517,7 @@ fn assert_privacy_gate_success(
 ) {
     let active_flags = stable_active_flags(
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2461,6 +2531,7 @@ fn assert_privacy_gate_success(
     );
     let (matched_volume, _imbalance) = auction_score_at_price(
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2474,6 +2545,7 @@ fn assert_privacy_gate_success(
     );
     let eligible_count = eligible_order_count_at_price(
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2488,6 +2560,7 @@ fn assert_privacy_gate_success(
     let participant_count = distinct_filled_owner_count(
         active_flags.span(),
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2504,6 +2577,7 @@ fn assert_privacy_gate_success(
     let maker_participant_count = distinct_filled_owner_count(
         active_flags.span(),
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2520,6 +2594,7 @@ fn assert_privacy_gate_success(
     let max_order_fill = max_order_fill_at_price(
         active_flags.span(),
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2535,6 +2610,7 @@ fn assert_privacy_gate_success(
     let max_maker_fill = max_order_fill_at_price(
         active_flags.span(),
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2550,6 +2626,7 @@ fn assert_privacy_gate_success(
     let max_owner_fill = max_owner_fill_at_price(
         active_flags.span(),
         clearing_price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2602,6 +2679,7 @@ fn assert_privacy_gate_success(
 
 fn eligible_order_count_at_price(
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -2619,6 +2697,7 @@ fn eligible_order_count_at_price(
         let fill = max_fill_at_candidate(
             index,
             clearing_price,
+            price_base_scale,
             *sides.at(index),
             *order_types.at(index),
             maker_curve_point_counts,
@@ -2641,6 +2720,7 @@ fn eligible_order_count_at_price(
 fn max_order_fill_at_price(
     active_flags: Span<felt252>,
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -2661,6 +2741,7 @@ fn max_order_fill_at_price(
                 index,
                 active_flags,
                 clearing_price,
+                price_base_scale,
                 sides,
                 order_types,
                 maker_curve_point_counts,
@@ -2684,6 +2765,7 @@ fn max_order_fill_at_price(
 fn max_owner_fill_at_price(
     active_flags: Span<felt252>,
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -2709,6 +2791,7 @@ fn max_owner_fill_at_price(
                         cursor,
                         active_flags,
                         clearing_price,
+                        price_base_scale,
                         sides,
                         order_types,
                         maker_curve_point_counts,
@@ -2734,6 +2817,7 @@ fn max_owner_fill_at_price(
 fn distinct_filled_owner_count(
     active_flags: Span<felt252>,
     clearing_price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -2755,6 +2839,7 @@ fn distinct_filled_owner_count(
                 index,
                 active_flags,
                 clearing_price,
+                price_base_scale,
                 sides,
                 order_types,
                 maker_curve_point_counts,
@@ -2777,6 +2862,7 @@ fn distinct_filled_owner_count(
                                 cursor,
                                 active_flags,
                                 clearing_price,
+                                price_base_scale,
                                 sides,
                                 order_types,
                                 maker_curve_point_counts,
@@ -2843,6 +2929,7 @@ fn assert_all_zero(values: Span<felt252>, message: felt252) {
 
 fn auction_score_at_price(
     price: u128,
+    price_base_scale: u128,
     sides: Span<felt252>,
     order_types: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
@@ -2856,6 +2943,7 @@ fn auction_score_at_price(
 ) -> (u128, u128) {
     let active_flags = stable_active_flags(
         price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2871,6 +2959,7 @@ fn auction_score_at_price(
         active_flags.span(),
         ORDER_SIDE_BUY,
         price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2886,6 +2975,7 @@ fn auction_score_at_price(
         active_flags.span(),
         ORDER_SIDE_SELL,
         price,
+        price_base_scale,
         sides,
         order_types,
         maker_curve_point_counts,
@@ -2906,6 +2996,7 @@ fn auction_score_at_price(
 fn max_fill_at_candidate(
     order_index: usize,
     price: u128,
+    price_base_scale: u128,
     side: felt252,
     order_type: felt252,
     maker_curve_point_counts: Span<felt252>,
@@ -2953,7 +3044,10 @@ fn max_fill_at_candidate(
         if price == 0 {
             return 0;
         }
-        let available_amount = u128_min(requested_amount, funding_note_amount / price);
+        let available_amount = u128_min(
+            requested_amount,
+            base_amount_affordable_for_quote(funding_note_amount, price, price_base_scale),
+        );
         if available_amount < min_fill {
             return 0;
         }
@@ -3032,6 +3126,23 @@ fn u128_abs_diff(left: u128, right: u128) -> u128 {
     right - left
 }
 
+fn quote_amount_for_base_amount(
+    base_amount: u128, price: u128, price_base_scale: u128,
+) -> u128 {
+    assert(price_base_scale != 0, 'BAD_PRICE_SCALE');
+    base_amount * price / price_base_scale
+}
+
+fn base_amount_affordable_for_quote(
+    quote_amount: u128, price: u128, price_base_scale: u128,
+) -> u128 {
+    assert(price_base_scale != 0, 'BAD_PRICE_SCALE');
+    if price == 0 {
+        return 0;
+    }
+    quote_amount * price_base_scale / price
+}
+
 fn read_next(data: Span<felt252>, ref index: usize) -> felt252 {
     assert(index < data.len(), 'UNEXPECTED_EOF');
     let value = *data.at(index);
@@ -3080,6 +3191,7 @@ fn assert_maker_curve(
     point_count: usize,
     cursor: usize,
     clearing_price: u128,
+    price_base_scale: u128,
     prices: Span<felt252>,
     base_amounts: Span<felt252>,
 ) -> (u128, u128, u128) {
@@ -3115,7 +3227,10 @@ fn assert_maker_curve(
         }
         previous_price = price;
         total_base_amount = total_base_amount + base_amount;
-        quote_funding_required = quote_funding_required + price * base_amount;
+        quote_funding_required =
+            quote_funding_required + quote_amount_for_base_amount(
+                base_amount, price, price_base_scale,
+            );
         if side == ORDER_SIDE_BUY {
             if price >= clearing_price {
                 eligible_base_amount = eligible_base_amount + base_amount;
@@ -3169,6 +3284,7 @@ fn assert_netted_public_outputs(
     base_asset_id: felt252,
     quote_asset_id: felt252,
     clearing_price: u128,
+    price_base_scale: u128,
     matched_fill_amounts: Span<felt252>,
     matched_sides: Span<felt252>,
     matched_funding_note_amounts: Span<felt252>,
@@ -3195,7 +3311,9 @@ fn assert_netted_public_outputs(
                 filled_amount - fee_amount
             } else {
                 assert(side == ORDER_SIDE_SELL, 'BAD_SIDE');
-                let gross_quote = filled_amount * clearing_price;
+                let gross_quote = quote_amount_for_base_amount(
+                    filled_amount, clearing_price, price_base_scale,
+                );
                 let fee_amount = gross_quote * PROTOCOL_FEE_BPS / FEE_BPS_DENOMINATOR;
                 gross_quote - fee_amount
             };
@@ -3204,7 +3322,9 @@ fn assert_netted_public_outputs(
             }
 
             let residual_amount = if side == ORDER_SIDE_BUY {
-                funding_note_amount - filled_amount * clearing_price
+                funding_note_amount - quote_amount_for_base_amount(
+                    filled_amount, clearing_price, price_base_scale,
+                )
             } else {
                 funding_note_amount - filled_amount
             };
@@ -3691,6 +3811,7 @@ fn public_settlement_commitment(
     order_commitment_root: felt252,
     encrypted_order_set_commitment: felt252,
     clearing_price: felt252,
+    price_base_scale: felt252,
     output_bundle_ref: felt252,
     prior_note_root: felt252,
     prior_nullifier_root: felt252,
@@ -3712,6 +3833,7 @@ fn public_settlement_commitment(
     state = poseidon_hash2(state, order_commitment_root);
     state = poseidon_hash2(state, encrypted_order_set_commitment);
     state = poseidon_hash2(state, clearing_price);
+    state = poseidon_hash2(state, price_base_scale);
     state = poseidon_hash2(state, output_bundle_ref);
     state = poseidon_hash2(state, prior_note_root);
     state = poseidon_hash2(state, prior_nullifier_root);
@@ -4141,6 +4263,7 @@ mod tests {
             0x2004,
             0x2005,
             0,
+            1,
             output_bundle_ref,
             0,
             0,
@@ -4172,7 +4295,7 @@ mod tests {
     fn empty_settlement_test_payload(transcript_commitment: felt252) -> Array<felt252> {
         let mut payload = array![
             STATEMENT_TYPE_SETTLEMENT, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 0x2001,
-            0x2002, 0x2003, 0x2004, 0x2005, transcript_commitment, 0x2006, 0x2007, 0, 0,
+            0x2002, 0x2003, 0x2004, 0x2005, transcript_commitment, 0x2006, 0x2007, 0, 1, 0,
             poseidon_hash2(OUTPUT_RECOVERY_BUNDLE_DOMAIN, 0), 0, 0, 0, 0, 0x3001, 0x3002, 0x3003,
             0x3004, 0x3005, 0x3006, 0x3007, 0x3008,
         ];

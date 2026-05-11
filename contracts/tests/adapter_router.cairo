@@ -55,6 +55,7 @@ const CONSUMED_NULLIFIER_ROOT_DOMAIN: felt252 =
     0x052259833b97a525483b8fff0635ce1f9fdfd08b5a8db2486d4a05378989b0f0;
 const TEST_CHAIN_ID: felt252 = 'SN_SEPOLIA';
 const WRONG_CHAIN_ID: felt252 = 'SN_MAIN';
+const TEST_PRICE_BASE_SCALE: u128 = 1;
 
 fn deploy_commitment_registry(admin: ContractAddress) -> ContractAddress {
     let class = declare("CommitmentRegistry").unwrap().contract_class();
@@ -431,6 +432,7 @@ fn root_only_public_settlement_commitment(
     state = poseidon_hash2(state, order_commitment_root);
     state = poseidon_hash2(state, encrypted_order_set_commitment);
     state = poseidon_hash2(state, clearing_price.into());
+    state = poseidon_hash2(state, TEST_PRICE_BASE_SCALE.into());
     state = poseidon_hash2(state, output_bundle_ref);
     state = poseidon_hash2(state, prior_note_root);
     state = poseidon_hash2(state, prior_nullifier_root);
@@ -479,6 +481,7 @@ fn submit_root_settlement(
             transcript_commitment,
             proof_artifact_commitment,
             clearing_price,
+            TEST_PRICE_BASE_SCALE,
             output_bundle_ref,
             prior_note_root,
             prior_nullifier_root,
@@ -567,6 +570,7 @@ fn append_root_settlement_input(
     inputs.append(transcript_commitment);
     inputs.append(proof_artifact_commitment);
     inputs.append(clearing_price.into());
+    inputs.append(TEST_PRICE_BASE_SCALE.into());
     inputs.append(output_bundle_ref);
     inputs.append(prior_note_root);
     inputs.append(prior_nullifier_root);

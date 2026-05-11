@@ -55,6 +55,7 @@ pub trait IAuctionVerifier<TContractState> {
         transcript_commitment: felt252,
         proof_artifact_commitment: felt252,
         clearing_price: u128,
+        price_base_scale: u128,
         output_bundle_ref: felt252,
         prior_note_root: felt252,
         prior_nullifier_root: felt252,
@@ -361,6 +362,7 @@ pub mod AuctionVerifier {
             transcript_commitment: felt252,
             proof_artifact_commitment: felt252,
             clearing_price: u128,
+            price_base_scale: u128,
             output_bundle_ref: felt252,
             prior_note_root: felt252,
             prior_nullifier_root: felt252,
@@ -395,6 +397,7 @@ pub mod AuctionVerifier {
                 encrypted_order_set_commitment,
                 transcript_commitment,
                 clearing_price,
+                price_base_scale,
                 output_bundle_ref,
                 prior_note_root,
                 prior_nullifier_root,
@@ -619,6 +622,7 @@ pub mod AuctionVerifier {
             let transcript_commitment = read_next(data, ref index);
             let proof_artifact_commitment = read_next(data, ref index);
             read_next_u128(data, ref index);
+            read_next_u128(data, ref index);
             read_next(data, ref index);
             read_next(data, ref index);
             read_next(data, ref index);
@@ -667,6 +671,7 @@ pub mod AuctionVerifier {
             let transcript_commitment = read_next(data, ref index);
             let proof_artifact_commitment = read_next(data, ref index);
             let clearing_price = read_next_u128(data, ref index);
+            let price_base_scale = read_next_u128(data, ref index);
             let output_bundle_ref = read_next(data, ref index);
             let prior_note_root = read_next(data, ref index);
             let prior_nullifier_root = read_next(data, ref index);
@@ -693,6 +698,7 @@ pub mod AuctionVerifier {
                 encrypted_order_set_commitment,
                 transcript_commitment,
                 clearing_price,
+                price_base_scale,
                 output_bundle_ref,
                 prior_note_root,
                 prior_nullifier_root,
@@ -825,6 +831,7 @@ pub mod AuctionVerifier {
         encrypted_order_set_commitment: felt252,
         transcript_commitment: felt252,
         clearing_price: u128,
+        price_base_scale: u128,
         output_bundle_ref: felt252,
         prior_note_root: felt252,
         prior_nullifier_root: felt252,
@@ -846,6 +853,7 @@ pub mod AuctionVerifier {
         assert(prior_nullifier_root == self.current_nullifier_root.read(), 'NULLIFIER_ROOT_STALE');
         assert(prior_renewal_root == self.current_renewal_root.read(), 'RENEWAL_ROOT_STALE');
         assert(prior_fee_root == self.current_fee_root.read(), 'FEE_ROOT_STALE');
+        assert(price_base_scale != 0, 'BAD_PRICE_SCALE');
         assert(
             new_note_root == state_transition_root(prior_note_root, output_note_root),
             'NEW_NOTE_ROOT',
@@ -872,6 +880,7 @@ pub mod AuctionVerifier {
             order_commitment_root,
             encrypted_order_set_commitment,
             clearing_price,
+            price_base_scale,
             output_bundle_ref,
             prior_note_root,
             prior_nullifier_root,
@@ -917,6 +926,7 @@ pub mod AuctionVerifier {
         order_commitment_root: felt252,
         encrypted_order_set_commitment: felt252,
         clearing_price: u128,
+        price_base_scale: u128,
         output_bundle_ref: felt252,
         prior_note_root: felt252,
         prior_nullifier_root: felt252,
@@ -940,6 +950,7 @@ pub mod AuctionVerifier {
         state = poseidon_hash2(state, order_commitment_root);
         state = poseidon_hash2(state, encrypted_order_set_commitment);
         state = poseidon_hash2(state, clearing_price.into());
+        state = poseidon_hash2(state, price_base_scale.into());
         state = poseidon_hash2(state, output_bundle_ref);
         state = poseidon_hash2(state, prior_note_root);
         state = poseidon_hash2(state, prior_nullifier_root);
