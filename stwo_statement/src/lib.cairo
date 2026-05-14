@@ -47,6 +47,9 @@ const STATEMENT_TYPE_ADMISSION: felt252 = 3;
 const STATEMENT_TYPE_AUCTION_RESULT: felt252 = 4;
 const ADMISSION_ROOT_DOMAIN: felt252 = 0x7a796c6974685f61646d69745f726f6f745f7631;
 const ADMISSION_LEAF_DOMAIN: felt252 = 0x7a796c6974685f61646d69745f6c6561665f7631;
+const MAX_ORDER_FUNDING_INPUTS: usize = 4;
+const FUNDING_INPUT_SET_DOMAIN: felt252 = 0x7a796c6974685f66756e64696e675f7365745f7631;
+const FUNDING_NULLIFIER_SET_DOMAIN: felt252 = 0x7a796c6974685f66756e64696e675f6e756c6c5f7631;
 
 #[executable]
 fn main(input: Array<felt252>) -> felt252 {
@@ -153,15 +156,18 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let matched_parent_authorization_secrets = read_vector(data, ref index);
     let matched_auditor_flags = read_vector(data, ref index);
     let matched_funding_note_refs = read_vector(data, ref index);
+    let matched_funding_input_counts = read_vector(data, ref index);
     let matched_funding_note_commitments = read_vector(data, ref index);
     let matched_funding_note_asset_ids = read_vector(data, ref index);
-    let matched_funding_note_amounts = read_vector(data, ref index);
-    let matched_funding_note_owner_keys = read_vector(data, ref index);
+    let matched_funding_input_amounts = read_vector(data, ref index);
+    let matched_funding_input_owner_keys = read_vector(data, ref index);
     let matched_funding_note_spend_authorities = read_vector(data, ref index);
     let matched_funding_note_withdraw_authorities = read_vector(data, ref index);
     let matched_funding_note_blindings = read_vector(data, ref index);
     let matched_funding_note_nonces = read_vector(data, ref index);
     let matched_funding_note_metadata_commitments = read_vector(data, ref index);
+    let matched_funding_note_amounts = read_vector(data, ref index);
+    let matched_funding_note_owner_keys = read_vector(data, ref index);
     let matched_funding_authorization_rs = read_vector(data, ref index);
     let matched_funding_authorization_ss = read_vector(data, ref index);
     let matched_funding_nullifiers = read_vector(data, ref index);
@@ -232,6 +238,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
 
     let matched_len: felt252 = matched_order_commitments.len().into();
     assert(matched_len == matched_order_count, 'BAD_MATCH_COUNT');
+    let funding_input_count = sum_funding_input_counts(matched_funding_input_counts.span());
     assert_all_lengths_match(
         matched_order_commitments.len(),
         array![
@@ -246,13 +253,8 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             matched_parent_secret_commitments.len().into(),
             matched_parent_cancel_authorities.len().into(),
             matched_parent_authorization_secrets.len().into(), matched_auditor_flags.len().into(),
-            matched_funding_note_refs.len().into(), matched_funding_note_commitments.len().into(),
-            matched_funding_note_asset_ids.len().into(), matched_funding_note_amounts.len().into(),
-            matched_funding_note_owner_keys.len().into(),
-            matched_funding_note_spend_authorities.len().into(),
-            matched_funding_note_withdraw_authorities.len().into(),
-            matched_funding_note_blindings.len().into(), matched_funding_note_nonces.len().into(),
-            matched_funding_note_metadata_commitments.len().into(),
+            matched_funding_note_refs.len().into(), matched_funding_input_counts.len().into(),
+            matched_funding_note_amounts.len().into(), matched_funding_note_owner_keys.len().into(),
             matched_funding_authorization_rs.len().into(),
             matched_funding_authorization_ss.len().into(), matched_funding_nullifiers.len().into(),
             matched_recipient_owner_keys.len().into(),
@@ -274,13 +276,27 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             matched_residual_note_withdraw_authorities.len().into(),
             matched_residual_note_blindings.len().into(), matched_residual_note_nonces.len().into(),
             matched_residual_note_metadata_commitments.len().into(),
+        ]
+            .span(),
+        'BAD_WITNESS_LEN',
+    );
+    assert_all_lengths_match(
+        funding_input_count,
+        array![
+            matched_funding_note_commitments.len().into(),
+            matched_funding_note_asset_ids.len().into(), matched_funding_input_amounts.len().into(),
+            matched_funding_input_owner_keys.len().into(),
+            matched_funding_note_spend_authorities.len().into(),
+            matched_funding_note_withdraw_authorities.len().into(),
+            matched_funding_note_blindings.len().into(), matched_funding_note_nonces.len().into(),
+            matched_funding_note_metadata_commitments.len().into(),
             consumed_note_commitments.len().into(), consumed_nullifiers.len().into(),
             note_membership_kinds.len().into(), note_membership_prefix_roots.len().into(),
             note_membership_batch_roots.len().into(), note_membership_path_counts.len().into(),
             note_membership_suffix_counts.len().into(),
         ]
             .span(),
-        'BAD_WITNESS_LEN',
+        'BAD_INPUT_LEN',
     );
     assert(
         note_membership_path_values.len() == note_membership_path_directions.len(),
@@ -389,6 +405,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let mut running_renewal_root = prior_renewal_root;
     let mut note_membership_path_cursor = 0;
     let mut note_membership_suffix_cursor = 0;
+    let mut funding_input_cursor = 0;
 
     while index_order < matched_order_commitments.len() {
         let order_commitment = *matched_order_commitments.at(index_order);
@@ -410,17 +427,9 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         let parent_authorization_secret = *matched_parent_authorization_secrets.at(index_order);
         let auditor_view_allowed = *matched_auditor_flags.at(index_order);
         let funding_note_ref = *matched_funding_note_refs.at(index_order);
-        let funding_note_commitment = *matched_funding_note_commitments.at(index_order);
-        let funding_note_asset_id = *matched_funding_note_asset_ids.at(index_order);
+        let funding_input_count_felt = *matched_funding_input_counts.at(index_order);
         let funding_note_amount_felt = *matched_funding_note_amounts.at(index_order);
         let funding_note_owner_key = *matched_funding_note_owner_keys.at(index_order);
-        let funding_note_spend_authority = *matched_funding_note_spend_authorities.at(index_order);
-        let funding_note_withdraw_authority = *matched_funding_note_withdraw_authorities
-            .at(index_order);
-        let funding_note_blinding = *matched_funding_note_blindings.at(index_order);
-        let funding_note_nonce_felt = *matched_funding_note_nonces.at(index_order);
-        let funding_note_metadata_commitment = *matched_funding_note_metadata_commitments
-            .at(index_order);
         let funding_authorization_r = *matched_funding_authorization_rs.at(index_order);
         let funding_authorization_s = *matched_funding_authorization_ss.at(index_order);
         let funding_nullifier = *matched_funding_nullifiers.at(index_order);
@@ -467,11 +476,10 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         assert(filled_amount_felt != 0, 'ZERO_FILL');
         assert(order_amount_felt != 0, 'ZERO_ORDER');
         assert(min_fill_felt != 0, 'ZERO_MIN_FILL');
-        assert(funding_note_commitment != 0, 'BAD_INPUT_NOTE');
+        assert(funding_note_ref != 0, 'BAD_FUNDING_REF');
         assert(output_note_commitment != 0, 'BAD_OUTPUT_NOTE');
         assert(funding_note_owner_key != 0, 'BAD_INPUT_OWNER');
-        assert(funding_note_spend_authority != 0, 'BAD_INPUT_SPEND');
-        assert(funding_note_withdraw_authority != 0, 'BAD_INPUT_AUTH');
+        assert(funding_note_amount_felt != 0, 'BAD_FUNDS');
         assert(funding_authorization_r != 0, 'BAD_AUTH_R');
         assert(funding_authorization_s != 0, 'BAD_AUTH_S');
         assert(recipient_owner_key != 0, 'BAD_RECIPIENT');
@@ -481,9 +489,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         assert(output_note_owner_key != 0, 'BAD_OUTPUT_OWNER');
         assert(output_note_spend_authority != 0, 'BAD_OUTPUT_SPEND');
         assert(output_note_withdraw_authority != 0, 'BAD_OUTPUT_AUTH');
-        assert(funding_note_blinding != 0, 'BAD_INPUT_BLIND');
         assert(output_note_blinding != 0, 'BAD_OUTPUT_BLIND');
-        assert(funding_note_metadata_commitment != 0, 'BAD_INPUT_META');
         assert(output_note_metadata_commitment != 0, 'BAD_OUTPUT_META');
         assert(funding_nullifier != 0, 'BAD_NULLIFIER');
         assert(output_note_amount_felt != 0, 'ZERO_OUTPUT');
@@ -608,25 +614,127 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         );
         assert(order_commitment == recomputed_order_commitment, 'ORDER_BIND');
 
-        let recomputed_funding_note_commitment = note_commitment(
-            note_commitment_domain,
-            funding_note_asset_id,
-            funding_note_amount_felt,
-            funding_note_owner_key,
-            funding_note_spend_authority,
-            funding_note_withdraw_authority,
-            funding_note_blinding,
-            funding_note_nonce_felt,
-            funding_note_metadata_commitment,
-        );
-        assert(funding_note_commitment == recomputed_funding_note_commitment, 'INPUT_NOTE_BIND');
-        assert(funding_note_ref == funding_note_commitment, 'INPUT_REF_MISMATCH');
+        let funding_input_count: usize = funding_input_count_felt
+            .try_into()
+            .expect('FUNDING_INPUT_COUNT');
+        assert(funding_input_count != 0, 'NO_FUNDING_INPUTS');
+        assert(funding_input_count <= MAX_ORDER_FUNDING_INPUTS, 'TOO_MANY_INPUTS');
         assert(
-            funding_nullifier == note_nullifier(
-                nullifier_domain, funding_note_commitment, funding_note_blinding,
-            ),
-            'NULLIFIER_BIND',
+            funding_input_cursor + funding_input_count <= consumed_note_commitments.len(),
+            'INPUT_CURSOR_EOF',
         );
+        let first_input_commitment = *matched_funding_note_commitments.at(funding_input_cursor);
+        let first_input_nullifier = note_nullifier(
+            nullifier_domain,
+            first_input_commitment,
+            *matched_funding_note_blindings.at(funding_input_cursor),
+        );
+        let first_spend_authority = *matched_funding_note_spend_authorities
+            .at(funding_input_cursor);
+        assert(first_spend_authority != 0, 'BAD_INPUT_SPEND');
+        assert(
+            check_ecdsa_signature(
+                order_commitment,
+                first_spend_authority,
+                funding_authorization_r,
+                funding_authorization_s,
+            ),
+            'BAD_AUTH_SIG',
+        );
+        let mut input_set_state = FUNDING_INPUT_SET_DOMAIN;
+        let mut nullifier_set_state = FUNDING_NULLIFIER_SET_DOMAIN;
+        let mut funding_input_index = 0;
+        let mut recomputed_funding_amount: u128 = 0;
+        while funding_input_index < funding_input_count {
+            let flat_index = funding_input_cursor + funding_input_index;
+            let funding_note_commitment = *matched_funding_note_commitments.at(flat_index);
+            let funding_note_asset_id = *matched_funding_note_asset_ids.at(flat_index);
+            let funding_input_amount_felt = *matched_funding_input_amounts.at(flat_index);
+            let funding_input_owner_key = *matched_funding_input_owner_keys.at(flat_index);
+            let funding_note_spend_authority = *matched_funding_note_spend_authorities
+                .at(flat_index);
+            let funding_note_withdraw_authority = *matched_funding_note_withdraw_authorities
+                .at(flat_index);
+            let funding_note_blinding = *matched_funding_note_blindings.at(flat_index);
+            let funding_note_nonce_felt = *matched_funding_note_nonces.at(flat_index);
+            let funding_note_metadata_commitment = *matched_funding_note_metadata_commitments
+                .at(flat_index);
+
+            assert(funding_note_commitment != 0, 'BAD_INPUT_NOTE');
+            assert(funding_input_amount_felt != 0, 'BAD_INPUT_AMOUNT');
+            assert(funding_input_owner_key == funding_note_owner_key, 'INPUT_OWNER_MISMATCH');
+            assert(funding_note_spend_authority == first_spend_authority, 'INPUT_SPEND_MISMATCH');
+            assert(funding_note_withdraw_authority != 0, 'BAD_INPUT_AUTH');
+            assert(funding_note_blinding != 0, 'BAD_INPUT_BLIND');
+            assert(funding_note_metadata_commitment != 0, 'BAD_INPUT_META');
+            if side == ORDER_SIDE_BUY {
+                assert(funding_note_asset_id == quote_asset_id, 'BUY_INPUT_ASSET');
+            } else {
+                assert(side == ORDER_SIDE_SELL, 'BAD_SIDE');
+                assert(funding_note_asset_id == base_asset_id, 'SELL_INPUT_ASSET');
+            }
+
+            let recomputed_funding_note_commitment = note_commitment(
+                note_commitment_domain,
+                funding_note_asset_id,
+                funding_input_amount_felt,
+                funding_input_owner_key,
+                funding_note_spend_authority,
+                funding_note_withdraw_authority,
+                funding_note_blinding,
+                funding_note_nonce_felt,
+                funding_note_metadata_commitment,
+            );
+            assert(
+                funding_note_commitment == recomputed_funding_note_commitment, 'INPUT_NOTE_BIND',
+            );
+            let input_nullifier = note_nullifier(
+                nullifier_domain, funding_note_commitment, funding_note_blinding,
+            );
+            assert(
+                funding_note_commitment == *consumed_note_commitments.at(flat_index),
+                'INPUT_MISMATCH',
+            );
+            assert(input_nullifier == *consumed_nullifiers.at(flat_index), 'NULLIFIER_MISMATCH');
+            assert_note_membership(
+                funding_note_commitment,
+                funding_note_asset_id,
+                funding_input_amount_felt,
+                funding_note_withdraw_authority,
+                prior_note_root,
+                *note_membership_kinds.at(flat_index),
+                *note_membership_prefix_roots.at(flat_index),
+                *note_membership_batch_roots.at(flat_index),
+                *note_membership_path_counts.at(flat_index),
+                ref note_membership_path_cursor,
+                note_membership_path_values.span(),
+                note_membership_path_directions.span(),
+                *note_membership_suffix_counts.at(flat_index),
+                ref note_membership_suffix_cursor,
+                note_membership_suffix_roots.span(),
+                state_transition_root_domain,
+            );
+            input_set_state = poseidon_hash2(input_set_state, funding_note_commitment);
+            nullifier_set_state = poseidon_hash2(nullifier_set_state, input_nullifier);
+            recomputed_funding_amount = recomputed_funding_amount
+                + felt_to_u128(funding_input_amount_felt);
+            funding_input_index += 1;
+        }
+        let recomputed_funding_note_ref = if funding_input_count == 1 {
+            first_input_commitment
+        } else {
+            poseidon_hash2(input_set_state, funding_input_count.into())
+        };
+        let recomputed_funding_nullifier = if funding_input_count == 1 {
+            first_input_nullifier
+        } else {
+            poseidon_hash2(nullifier_set_state, funding_input_count.into())
+        };
+        assert(funding_note_ref == recomputed_funding_note_ref, 'INPUT_REF_MISMATCH');
+        assert(funding_nullifier == recomputed_funding_nullifier, 'NULLIFIER_BIND');
+        assert(recomputed_funding_amount == funding_note_amount, 'INPUT_AMOUNT_SUM');
+        funding_input_cursor += funding_input_count;
+
         let recomputed_output_note_commitment = note_commitment(
             note_commitment_domain,
             output_note_asset_id,
@@ -639,29 +747,6 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             output_note_metadata_commitment,
         );
         assert(output_note_commitment == recomputed_output_note_commitment, 'OUTPUT_NOTE_BIND');
-
-        assert(
-            funding_note_commitment == *consumed_note_commitments.at(index_order), 'INPUT_MISMATCH',
-        );
-        assert(funding_nullifier == *consumed_nullifiers.at(index_order), 'NULLIFIER_MISMATCH');
-        assert_note_membership(
-            funding_note_commitment,
-            funding_note_asset_id,
-            funding_note_amount_felt,
-            funding_note_withdraw_authority,
-            prior_note_root,
-            *note_membership_kinds.at(index_order),
-            *note_membership_prefix_roots.at(index_order),
-            *note_membership_batch_roots.at(index_order),
-            *note_membership_path_counts.at(index_order),
-            ref note_membership_path_cursor,
-            note_membership_path_values.span(),
-            note_membership_path_directions.span(),
-            *note_membership_suffix_counts.at(index_order),
-            ref note_membership_suffix_cursor,
-            note_membership_suffix_roots.span(),
-            state_transition_root_domain,
-        );
 
         assert_public_output_present(
             output_note_commitment,
@@ -681,7 +766,6 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
 
         let expected_residual_amount = if side == ORDER_SIDE_BUY {
             assert(limit_price >= clearing_price_u128, 'BUY_LIMIT');
-            assert(funding_note_asset_id == quote_asset_id, 'BUY_INPUT_ASSET');
             assert(output_note_asset_id == base_asset_id, 'BUY_OUTPUT_ASSET');
 
             let spend_amount = quote_amount_for_base_amount(
@@ -695,7 +779,6 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         } else {
             assert(side == ORDER_SIDE_SELL, 'BAD_SIDE');
             assert(limit_price <= clearing_price_u128, 'SELL_LIMIT');
-            assert(funding_note_asset_id == base_asset_id, 'SELL_INPUT_ASSET');
             assert(output_note_asset_id == quote_asset_id, 'SELL_OUTPUT_ASSET');
             assert(funding_note_amount >= filled_amount, 'SELL_FUNDS');
 
@@ -767,6 +850,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
 
         index_order += 1;
     }
+    assert(funding_input_cursor == consumed_note_commitments.len(), 'FUNDING_CURSOR');
     assert(renewal_cursor == renewal_child_nullifiers.len(), 'RENEWAL_CURSOR');
     assert(
         renewal_child_path_cursor == renewal_child_sparse_path_values.len(), 'RENEWAL_PATH_CURSOR',
@@ -913,9 +997,7 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
     let batch_epoch = settlement_batch_epoch(settlement_payload.span());
     let base_asset_id = settlement_base_asset_id(settlement_payload.span());
     let quote_asset_id = settlement_quote_asset_id(settlement_payload.span());
-    let price_base_scale = felt_to_u128(
-        settlement_price_base_scale(settlement_payload.span()),
-    );
+    let price_base_scale = felt_to_u128(settlement_price_base_scale(settlement_payload.span()));
     assert(price_base_scale != 0, 'BAD_PRICE_SCALE');
 
     let order_commitments = read_vector(data, ref index);
@@ -938,15 +1020,18 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
     let parent_authorization_secrets = read_vector(data, ref index);
     let auditor_flags = read_vector(data, ref index);
     let funding_note_refs = read_vector(data, ref index);
+    let funding_input_counts = read_vector(data, ref index);
     let funding_note_commitments = read_vector(data, ref index);
     let funding_note_asset_ids = read_vector(data, ref index);
-    let funding_note_amounts = read_vector(data, ref index);
-    let funding_note_owner_keys = read_vector(data, ref index);
+    let funding_input_amounts = read_vector(data, ref index);
+    let funding_input_owner_keys = read_vector(data, ref index);
     let funding_note_spend_authorities = read_vector(data, ref index);
     let funding_note_withdraw_authorities = read_vector(data, ref index);
     let funding_note_blindings = read_vector(data, ref index);
     let funding_note_nonces = read_vector(data, ref index);
     let funding_note_metadata_commitments = read_vector(data, ref index);
+    let funding_note_amounts = read_vector(data, ref index);
+    let funding_note_owner_keys = read_vector(data, ref index);
     let funding_authorization_rs = read_vector(data, ref index);
     let funding_authorization_ss = read_vector(data, ref index);
     let funding_nullifiers = read_vector(data, ref index);
@@ -955,6 +1040,7 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
     let recipient_withdraw_authorities = read_vector(data, ref index);
     let res_auths = read_vector(data, ref index);
     let res_auths_span = res_auths.span();
+    let funding_input_count = sum_funding_input_counts(funding_input_counts.span());
 
     assert_all_lengths_match(
         order_commitments.len(),
@@ -966,18 +1052,26 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
             parent_order_commitments.len().into(), parent_child_indexes.len().into(),
             parent_secret_commitments.len().into(), parent_cancel_authorities.len().into(),
             parent_authorization_secrets.len().into(), funding_note_refs.len().into(),
-            funding_note_commitments.len().into(), funding_note_asset_ids.len().into(),
-            funding_note_amounts.len().into(), funding_note_owner_keys.len().into(),
-            funding_note_spend_authorities.len().into(),
-            funding_note_withdraw_authorities.len().into(), funding_note_blindings.len().into(),
-            funding_note_nonces.len().into(), funding_note_metadata_commitments.len().into(),
-            funding_authorization_rs.len().into(), funding_authorization_ss.len().into(),
-            funding_nullifiers.len().into(), recipient_owner_keys.len().into(),
-            recipient_spend_authorities.len().into(), recipient_withdraw_authorities.len().into(),
-            res_auths_span.len().into(),
+            funding_input_counts.len().into(), funding_note_amounts.len().into(),
+            funding_note_owner_keys.len().into(), funding_authorization_rs.len().into(),
+            funding_authorization_ss.len().into(), funding_nullifiers.len().into(),
+            recipient_owner_keys.len().into(), recipient_spend_authorities.len().into(),
+            recipient_withdraw_authorities.len().into(), res_auths_span.len().into(),
         ]
             .span(),
         'BAD_ADMISSION_LEN',
+    );
+    assert_all_lengths_match(
+        funding_input_count,
+        array![
+            funding_note_commitments.len().into(), funding_note_asset_ids.len().into(),
+            funding_input_amounts.len().into(), funding_input_owner_keys.len().into(),
+            funding_note_spend_authorities.len().into(),
+            funding_note_withdraw_authorities.len().into(), funding_note_blindings.len().into(),
+            funding_note_nonces.len().into(), funding_note_metadata_commitments.len().into(),
+        ]
+            .span(),
+        'BAD_ADMISSION_INPUT',
     );
     let total_curve_points = sum_curve_point_counts(maker_curve_point_counts.span());
     assert(maker_curve_prices.len() == total_curve_points, 'BAD_ADMISSION_CURVES');
@@ -1011,15 +1105,18 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
             parent_authorization_secrets.span(),
             auditor_flags.span(),
             funding_note_refs.span(),
+            funding_input_counts.span(),
             funding_note_commitments.span(),
             funding_note_asset_ids.span(),
-            funding_note_amounts.span(),
-            funding_note_owner_keys.span(),
+            funding_input_amounts.span(),
+            funding_input_owner_keys.span(),
             funding_note_spend_authorities.span(),
             funding_note_withdraw_authorities.span(),
             funding_note_blindings.span(),
             funding_note_nonces.span(),
             funding_note_metadata_commitments.span(),
+            funding_note_amounts.span(),
+            funding_note_owner_keys.span(),
             funding_authorization_rs.span(),
             funding_authorization_ss.span(),
             funding_nullifiers.span(),
@@ -1368,15 +1465,18 @@ fn assert_auction_order_preimages(
     parent_authorization_secrets: Span<felt252>,
     auditor_flags: Span<felt252>,
     funding_note_refs: Span<felt252>,
+    funding_input_counts: Span<felt252>,
     funding_note_commitments: Span<felt252>,
     funding_note_asset_ids: Span<felt252>,
-    funding_note_amounts: Span<felt252>,
-    funding_note_owner_keys: Span<felt252>,
+    funding_input_amounts: Span<felt252>,
+    funding_input_owner_keys: Span<felt252>,
     funding_note_spend_authorities: Span<felt252>,
     funding_note_withdraw_authorities: Span<felt252>,
     funding_note_blindings: Span<felt252>,
     funding_note_nonces: Span<felt252>,
     funding_note_metadata_commitments: Span<felt252>,
+    funding_note_amounts: Span<felt252>,
+    funding_note_owner_keys: Span<felt252>,
     funding_authorization_rs: Span<felt252>,
     funding_authorization_ss: Span<felt252>,
     funding_nullifiers: Span<felt252>,
@@ -1397,6 +1497,7 @@ fn assert_auction_order_preimages(
 ) {
     let mut index = 0;
     let mut curve_cursor = 0;
+    let mut funding_input_cursor = 0;
     while index < order_commitments.len() {
         let order_commitment = *order_commitments.at(index);
         let side = *sides.at(index);
@@ -1414,15 +1515,9 @@ fn assert_auction_order_preimages(
         let parent_authorization_secret = *parent_authorization_secrets.at(index);
         let auditor_view_allowed = *auditor_flags.at(index);
         let funding_note_ref = *funding_note_refs.at(index);
-        let funding_note_commitment = *funding_note_commitments.at(index);
-        let funding_note_asset_id = *funding_note_asset_ids.at(index);
+        let funding_input_count_felt = *funding_input_counts.at(index);
         let funding_note_amount = *funding_note_amounts.at(index);
         let funding_note_owner_key = *funding_note_owner_keys.at(index);
-        let funding_note_spend_authority = *funding_note_spend_authorities.at(index);
-        let funding_note_withdraw_authority = *funding_note_withdraw_authorities.at(index);
-        let funding_note_blinding = *funding_note_blindings.at(index);
-        let funding_note_nonce = *funding_note_nonces.at(index);
-        let funding_note_metadata_commitment = *funding_note_metadata_commitments.at(index);
         let funding_authorization_r = *funding_authorization_rs.at(index);
         let funding_authorization_s = *funding_authorization_ss.at(index);
         let funding_nullifier = *funding_nullifiers.at(index);
@@ -1490,33 +1585,38 @@ fn assert_auction_order_preimages(
             }
         }
 
-        if order_type != ORDER_TYPE_HEARTBEAT_COVER {
-            assert(funding_note_ref != 0, 'BAD_FUNDING_REF');
-            assert(funding_note_commitment != 0, 'BAD_FUNDING_NOTE');
-            assert(funding_note_owner_key != 0, 'BAD_FUNDING_OWNER');
-            assert(funding_note_spend_authority != 0, 'BAD_FUNDING_SPEND');
-            assert(funding_note_withdraw_authority != 0, 'BAD_FUNDING_AUTH');
-            assert(funding_note_blinding != 0, 'BAD_FUNDING_BLIND');
-            assert(funding_note_metadata_commitment != 0, 'BAD_FUNDING_META');
-            assert(funding_authorization_r != 0, 'BAD_AUTH_R');
-            assert(funding_authorization_s != 0, 'BAD_AUTH_S');
-            assert(
-                check_ecdsa_signature(
-                    order_commitment,
-                    funding_note_spend_authority,
-                    funding_authorization_r,
-                    funding_authorization_s,
-                ),
-                'BAD_AUTH_SIG',
-            );
-            assert(funding_nullifier != 0, 'BAD_NULLIFIER');
-            assert(funding_note_amount != 0, 'BAD_FUNDS');
-            if side == ORDER_SIDE_BUY {
-                assert(funding_note_asset_id == quote_asset_id, 'BUY_INPUT_ASSET');
-            } else {
-                assert(funding_note_asset_id == base_asset_id, 'SELL_INPUT_ASSET');
-            }
-        }
+        let funding_input_count: usize = funding_input_count_felt
+            .try_into()
+            .expect('FUNDING_INPUT_COUNT');
+        assert(funding_input_count != 0, 'NO_FUNDING_INPUTS');
+        assert(funding_input_count <= MAX_ORDER_FUNDING_INPUTS, 'TOO_MANY_INPUTS');
+        assert(
+            funding_input_cursor + funding_input_count <= funding_note_commitments.len(),
+            'INPUT_CURSOR_EOF',
+        );
+        assert(funding_note_ref != 0, 'BAD_FUNDING_REF');
+        assert(funding_note_owner_key != 0, 'BAD_FUNDING_OWNER');
+        assert(funding_authorization_r != 0, 'BAD_AUTH_R');
+        assert(funding_authorization_s != 0, 'BAD_AUTH_S');
+        assert(funding_nullifier != 0, 'BAD_NULLIFIER');
+        assert(funding_note_amount != 0, 'BAD_FUNDS');
+        let first_input_commitment = *funding_note_commitments.at(funding_input_cursor);
+        let first_input_nullifier = note_nullifier(
+            nullifier_domain,
+            first_input_commitment,
+            *funding_note_blindings.at(funding_input_cursor),
+        );
+        let first_spend_authority = *funding_note_spend_authorities.at(funding_input_cursor);
+        assert(first_spend_authority != 0, 'BAD_FUNDING_SPEND');
+        assert(
+            check_ecdsa_signature(
+                order_commitment,
+                first_spend_authority,
+                funding_authorization_r,
+                funding_authorization_s,
+            ),
+            'BAD_AUTH_SIG',
+        );
         let recomputed_order_commitment = order_intent_commitment(
             order_commitment_domain,
             pair_id,
@@ -1545,12 +1645,40 @@ fn assert_auction_order_preimages(
         );
         assert(order_commitment == recomputed_order_commitment, 'AUCTION_ORDER_BIND');
 
-        if order_type != ORDER_TYPE_HEARTBEAT_COVER {
+        let mut input_set_state = FUNDING_INPUT_SET_DOMAIN;
+        let mut nullifier_set_state = FUNDING_NULLIFIER_SET_DOMAIN;
+        let mut funding_input_index = 0;
+        let mut recomputed_funding_amount: u128 = 0;
+        while funding_input_index < funding_input_count {
+            let flat_index = funding_input_cursor + funding_input_index;
+            let funding_note_commitment = *funding_note_commitments.at(flat_index);
+            let funding_note_asset_id = *funding_note_asset_ids.at(flat_index);
+            let funding_input_amount = *funding_input_amounts.at(flat_index);
+            let funding_input_owner_key = *funding_input_owner_keys.at(flat_index);
+            let funding_note_spend_authority = *funding_note_spend_authorities.at(flat_index);
+            let funding_note_withdraw_authority = *funding_note_withdraw_authorities.at(flat_index);
+            let funding_note_blinding = *funding_note_blindings.at(flat_index);
+            let funding_note_nonce = *funding_note_nonces.at(flat_index);
+            let funding_note_metadata_commitment = *funding_note_metadata_commitments
+                .at(flat_index);
+            assert(funding_note_commitment != 0, 'BAD_FUNDING_NOTE');
+            assert(funding_input_amount != 0, 'BAD_FUNDING_AMOUNT');
+            assert(funding_input_owner_key == funding_note_owner_key, 'INPUT_OWNER_MISMATCH');
+            assert(funding_note_spend_authority == first_spend_authority, 'INPUT_SPEND_MISMATCH');
+            assert(funding_note_withdraw_authority != 0, 'BAD_FUNDING_AUTH');
+            assert(funding_note_blinding != 0, 'BAD_FUNDING_BLIND');
+            assert(funding_note_metadata_commitment != 0, 'BAD_FUNDING_META');
+            if side == ORDER_SIDE_BUY {
+                assert(funding_note_asset_id == quote_asset_id, 'BUY_INPUT_ASSET');
+            } else {
+                assert(side == ORDER_SIDE_SELL, 'BAD_SIDE');
+                assert(funding_note_asset_id == base_asset_id, 'SELL_INPUT_ASSET');
+            }
             let recomputed_funding_note_commitment = note_commitment(
                 note_commitment_domain,
                 funding_note_asset_id,
-                funding_note_amount,
-                funding_note_owner_key,
+                funding_input_amount,
+                funding_input_owner_key,
                 funding_note_spend_authority,
                 funding_note_withdraw_authority,
                 funding_note_blinding,
@@ -1560,18 +1688,34 @@ fn assert_auction_order_preimages(
             assert(
                 funding_note_commitment == recomputed_funding_note_commitment, 'AUCTION_NOTE_BIND',
             );
-            assert(funding_note_ref == funding_note_commitment, 'AUCTION_REF_BIND');
-            assert(
-                funding_nullifier == note_nullifier(
-                    nullifier_domain, funding_note_commitment, funding_note_blinding,
-                ),
-                'AUCTION_NULL_BIND',
+            let input_nullifier = note_nullifier(
+                nullifier_domain, funding_note_commitment, funding_note_blinding,
             );
+            input_set_state = poseidon_hash2(input_set_state, funding_note_commitment);
+            nullifier_set_state = poseidon_hash2(nullifier_set_state, input_nullifier);
+            recomputed_funding_amount = recomputed_funding_amount
+                + felt_to_u128(funding_input_amount);
+            funding_input_index += 1;
         }
+        let recomputed_funding_note_ref = if funding_input_count == 1 {
+            first_input_commitment
+        } else {
+            poseidon_hash2(input_set_state, funding_input_count.into())
+        };
+        let recomputed_funding_nullifier = if funding_input_count == 1 {
+            first_input_nullifier
+        } else {
+            poseidon_hash2(nullifier_set_state, funding_input_count.into())
+        };
+        assert(funding_note_ref == recomputed_funding_note_ref, 'AUCTION_REF_BIND');
+        assert(funding_nullifier == recomputed_funding_nullifier, 'AUCTION_NULL_BIND');
+        assert(recomputed_funding_amount == felt_to_u128(funding_note_amount), 'AUCTION_FUNDS_SUM');
+        funding_input_cursor += funding_input_count;
         curve_cursor += point_count;
         index += 1;
     }
     assert(curve_cursor == maker_curve_prices.len(), 'AUCTION_CURVE_CURSOR');
+    assert(funding_input_cursor == funding_note_commitments.len(), 'AUCTION_INPUT_CURSOR');
 }
 
 fn assert_auction_allocation(
@@ -3126,9 +3270,7 @@ fn u128_abs_diff(left: u128, right: u128) -> u128 {
     right - left
 }
 
-fn quote_amount_for_base_amount(
-    base_amount: u128, price: u128, price_base_scale: u128,
-) -> u128 {
+fn quote_amount_for_base_amount(base_amount: u128, price: u128, price_base_scale: u128) -> u128 {
     assert(price_base_scale != 0, 'BAD_PRICE_SCALE');
     base_amount * price / price_base_scale
 }
@@ -3170,6 +3312,19 @@ fn assert_all_lengths_match(expected_len: usize, lengths: Span<felt252>, message
         assert(*lengths.at(index) == expected, message);
         index += 1;
     };
+}
+
+fn sum_funding_input_counts(counts: Span<felt252>) -> usize {
+    let mut index = 0;
+    let mut total = 0;
+    while index < counts.len() {
+        let count: usize = (*counts.at(index)).try_into().expect('FUNDING_COUNT');
+        assert(count != 0, 'NO_FUNDING_INPUTS');
+        assert(count <= MAX_ORDER_FUNDING_INPUTS, 'TOO_MANY_INPUTS');
+        total += count;
+        index += 1;
+    }
+    total
 }
 
 fn sum_curve_point_counts(counts: Span<felt252>) -> usize {
@@ -3227,10 +3382,8 @@ fn assert_maker_curve(
         }
         previous_price = price;
         total_base_amount = total_base_amount + base_amount;
-        quote_funding_required =
-            quote_funding_required + quote_amount_for_base_amount(
-                base_amount, price, price_base_scale,
-            );
+        quote_funding_required = quote_funding_required
+            + quote_amount_for_base_amount(base_amount, price, price_base_scale);
         if side == ORDER_SIDE_BUY {
             if price >= clearing_price {
                 eligible_base_amount = eligible_base_amount + base_amount;
@@ -3322,9 +3475,8 @@ fn assert_netted_public_outputs(
             }
 
             let residual_amount = if side == ORDER_SIDE_BUY {
-                funding_note_amount - quote_amount_for_base_amount(
-                    filled_amount, clearing_price, price_base_scale,
-                )
+                funding_note_amount
+                    - quote_amount_for_base_amount(filled_amount, clearing_price, price_base_scale)
             } else {
                 funding_note_amount - filled_amount
             };
