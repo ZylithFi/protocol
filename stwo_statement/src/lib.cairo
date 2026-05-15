@@ -31,10 +31,9 @@ const OUTPUT_RECOVERY_FIELD_COUNT: usize = 21;
 const OUTPUT_RECOVERY_BUNDLE_DOMAIN: felt252 = 0x7a796c6974685f6f75745f62756e646c655f7631;
 const OUTPUT_RECOVERY_RECORD_DOMAIN: felt252 = 0x7a796c6974685f6f75745f7265635f7631;
 const DEPOSIT_NOTE_ROOT_DOMAIN: felt252 = 0x7a796c6974685f6465706f7369745f6e6f74655f726f6f745f7631;
-const NULLIFIER_SPARSE_TREE_DEPTH: usize = 64;
+const NULLIFIER_SPARSE_TREE_DEPTH: usize = 128;
 const RENEWAL_SPARSE_TREE_DEPTH: usize = 128;
 const NULLIFIER_KEY_HIGH_BOUND: u128 = 0x10000000000000000000000000000000;
-const NULLIFIER_KEY_LOW_MODULUS: u128 = 0x10000000000000000;
 const TWO_POW_128: felt252 = 0x100000000000000000000000000000000;
 const NOTE_MEMBERSHIP_KIND_DEPOSIT: felt252 = 0;
 const NOTE_MEMBERSHIP_KIND_SETTLEMENT_OUTPUT: felt252 = 1;
@@ -332,6 +331,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     assert(nullifier_sparse_key_lows.len() == consumed_nullifiers.len(), 'E');
     assert(nullifier_sparse_key_highs.len() == consumed_nullifiers.len(), 'E');
     assert(nullifier_sparse_path_counts.len() == consumed_nullifiers.len(), 'E');
+    assert(nullifier_sparse_path_values.len() == nullifier_sparse_path_directions.len(), 'E');
     assert(renewal_parent_order_commitments.len() == renewal_child_nullifiers.len(), 'E');
     assert(renewal_child_sparse_key_lows.len() == renewal_child_nullifiers.len(), 'E');
     assert(renewal_child_sparse_key_highs.len() == renewal_child_nullifiers.len(), 'E');
@@ -816,17 +816,10 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let new_note_root = state_transition_root(
         state_transition_root_domain, prior_note_root, output_note_root,
     );
-    let new_nullifier_root = assert_sparse_nullifier_updates(
-        prior_nullifier_root,
-        consumed_nullifiers.span(),
-        nullifier_sparse_key_lows.span(),
-        nullifier_sparse_key_highs.span(),
-        nullifier_sparse_path_counts.span(),
-        nullifier_sparse_path_values.span(),
-        nullifier_sparse_path_directions.span(),
-        nullifier_sparse_leaf_domain,
-        nullifier_sparse_node_domain,
-    );
+    let new_nullifier_root = read_next(data, ref index);
+    if consumed_nullifiers.len() == 0 {
+        assert(new_nullifier_root == prior_nullifier_root, 'E');
+    }
     let new_renewal_root = read_next(data, ref index);
     if renewal_child_nullifiers.len() == 0 {
         assert(new_renewal_root == prior_renewal_root, 'E');
@@ -868,6 +861,96 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     assert(index == data.len(), 'E');
 
     transcript_commitment
+}
+
+pub fn verify_nullifier_statement(data: Span<felt252>) -> (felt252, felt252, felt252, felt252) {
+    let mut index: usize = 0;
+
+    let statement_type = read_next(data, ref index);
+    assert(statement_type == STATEMENT_TYPE_SETTLEMENT, 'E');
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    let transcript_commitment = read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    let prior_nullifier_root = read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    let consumed_nullifier_root_domain = read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    let nullifier_sparse_leaf_domain = read_next(data, ref index);
+    let nullifier_sparse_node_domain = read_next(data, ref index);
+
+    assert(transcript_commitment != 0, 'E');
+    assert(consumed_nullifier_root_domain != 0, 'E');
+    assert(nullifier_sparse_leaf_domain != 0, 'E');
+    assert(nullifier_sparse_node_domain != 0, 'E');
+
+    skip_vectors(data, ref index, 59);
+    let consumed_note_commitments = read_vector(data, ref index);
+    let consumed_nullifiers = read_vector(data, ref index);
+    let nullifier_sparse_key_lows = read_vector(data, ref index);
+    let nullifier_sparse_key_highs = read_vector(data, ref index);
+    let nullifier_sparse_path_counts = read_vector(data, ref index);
+    let nullifier_sparse_path_values = read_vector(data, ref index);
+    let nullifier_sparse_path_directions = read_vector(data, ref index);
+    skip_vectors(data, ref index, 33);
+    let claimed_new_nullifier_root = read_next(data, ref index);
+    read_next(data, ref index);
+    assert(index == data.len(), 'E');
+
+    assert(consumed_note_commitments.len() == consumed_nullifiers.len(), 'E');
+    assert(nullifier_sparse_key_lows.len() == consumed_nullifiers.len(), 'E');
+    assert(nullifier_sparse_key_highs.len() == consumed_nullifiers.len(), 'E');
+    assert(nullifier_sparse_path_counts.len() == consumed_nullifiers.len(), 'E');
+    assert_unique(consumed_nullifiers.span(), 'E');
+
+    let consumed_nullifier_root = single_field_root(
+        consumed_nullifier_root_domain, consumed_nullifiers.span(),
+    );
+    let running_nullifier_root = assert_sparse_nullifier_updates(
+        prior_nullifier_root,
+        consumed_nullifiers.span(),
+        nullifier_sparse_key_lows.span(),
+        nullifier_sparse_key_highs.span(),
+        nullifier_sparse_path_counts.span(),
+        nullifier_sparse_path_values.span(),
+        nullifier_sparse_path_directions.span(),
+        nullifier_sparse_leaf_domain,
+        nullifier_sparse_node_domain,
+    );
+    if consumed_nullifiers.len() == 0 {
+        assert(claimed_new_nullifier_root == prior_nullifier_root, 'E');
+    } else {
+        assert(running_nullifier_root == claimed_new_nullifier_root, 'E');
+    }
+    (
+        transcript_commitment,
+        prior_nullifier_root,
+        consumed_nullifier_root,
+        claimed_new_nullifier_root,
+    )
 }
 
 pub fn verify_renewal_statement(data: Span<felt252>) -> (felt252, felt252, felt252, felt252) {
@@ -1013,6 +1096,7 @@ pub fn verify_renewal_statement(data: Span<felt252>) -> (felt252, felt252, felt2
     read_vector(data, ref index);
     read_vector(data, ref index);
     read_vector(data, ref index);
+    read_next(data, ref index);
     let claimed_new_renewal_root = read_next(data, ref index);
     assert(index == data.len(), 'E');
 
@@ -3567,6 +3651,14 @@ fn read_vector(data: Span<felt252>, ref index: usize) -> Array<felt252> {
     values
 }
 
+fn skip_vectors(data: Span<felt252>, ref index: usize, count: usize) {
+    let mut cursor = 0;
+    while cursor < count {
+        read_vector(data, ref index);
+        cursor += 1;
+    }
+}
+
 fn assert_all_lengths_match(expected_len: usize, lengths: Span<felt252>, message: felt252) {
     let expected: felt252 = expected_len.into();
     let mut index = 0;
@@ -3890,7 +3982,7 @@ fn assert_sparse_entry_absent(
         }
         level += 1;
     }
-    assert(reconstructed_low == (key_low % NULLIFIER_KEY_LOW_MODULUS).into(), 'E');
+    assert(reconstructed_low == key_low.into(), 'E');
     assert(empty_root == prior_root, 'E');
     path_cursor += path_count;
     prior_root
@@ -4052,7 +4144,7 @@ fn sparse_insert_nullifier(
         }
         level += 1;
     }
-    assert(reconstructed_low == (key_low % NULLIFIER_KEY_LOW_MODULUS).into(), 'E');
+    assert(reconstructed_low == key_low.into(), 'E');
     assert(empty_root == prior_root, 'E');
     assert(nullifier == key_low.into() + key_high.into() * TWO_POW_128, 'E');
     inserted_root
@@ -4616,7 +4708,8 @@ mod tests {
     use super::{
         EMPTY_OUTPUT_NOTE_ROOT_DOMAIN, OUTPUT_RECOVERY_BUNDLE_DOMAIN, STATEMENT_TYPE_SETTLEMENT,
         poseidon_hash2, protocol_fee_root, public_settlement_commitment, single_field_root,
-        state_transition_root, verify_renewal_statement, verify_settlement_statement,
+        state_transition_root, verify_nullifier_statement, verify_renewal_statement,
+        verify_settlement_statement,
     };
 
     #[test]
@@ -4713,6 +4806,52 @@ mod tests {
         assert(new_renewal_root == 0, 'E');
     }
 
+    #[test]
+    fn nullifier_statement_accepts_root_only_noop_payload() {
+        let output_bundle_ref = poseidon_hash2(OUTPUT_RECOVERY_BUNDLE_DOMAIN, 0);
+        let output_note_root = poseidon_hash2(EMPTY_OUTPUT_NOTE_ROOT_DOMAIN, output_bundle_ref);
+        let consumed_note_root = single_field_root(0x3001, array![].span());
+        let consumed_nullifier_root = single_field_root(0x3002, array![].span());
+        let renewal_child_root = single_field_root(0x3003, array![].span());
+        let fee_root = protocol_fee_root(0x3005, 0x2006, 0x2007, 0x4010, 0, 0);
+        let new_note_root = state_transition_root(0x3006, 0, output_note_root);
+        let new_fee_root = state_transition_root(0x3006, 0, fee_root);
+        let transcript_commitment = public_settlement_commitment(
+            0x1006,
+            0x2001,
+            0x2002,
+            0x2003,
+            0x2004,
+            0x2005,
+            0,
+            1,
+            4,
+            0,
+            0x4010,
+            output_bundle_ref,
+            0,
+            0,
+            0,
+            0,
+            consumed_note_root,
+            consumed_nullifier_root,
+            renewal_child_root,
+            output_note_root,
+            fee_root,
+            new_note_root,
+            0,
+            0,
+            new_fee_root,
+        );
+        let payload = empty_settlement_test_payload(transcript_commitment);
+        let (transcript, prior_nullifier_root, consumed_root, new_nullifier_root) =
+            verify_nullifier_statement(payload.span());
+        assert(transcript == transcript_commitment, 'E');
+        assert(prior_nullifier_root == 0, 'E');
+        assert(consumed_root == consumed_nullifier_root, 'E');
+        assert(new_nullifier_root == 0, 'E');
+    }
+
     fn empty_settlement_test_payload(transcript_commitment: felt252) -> Array<felt252> {
         let mut payload = array![
             STATEMENT_TYPE_SETTLEMENT, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 0x2001,
@@ -4720,7 +4859,7 @@ mod tests {
             0, 0x4010, 0, poseidon_hash2(OUTPUT_RECOVERY_BUNDLE_DOMAIN, 0), 0, 0, 0, 0, 0x3001,
             0x3002, 0x3003, 0x3004, 0x3005, 0x3006, 0x3007, 0x3008,
         ];
-        append_empty_test_vectors(ref payload, 100);
+        append_empty_test_vectors(ref payload, 101);
         payload
     }
 

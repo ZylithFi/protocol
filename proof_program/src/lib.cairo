@@ -8,6 +8,13 @@ pub trait ISettlementStatementProgram<TContractState> {
 }
 
 #[starknet::interface]
+pub trait INullifierStatementProgram<TContractState> {
+    fn verify_nullifier_statement(
+        ref self: TContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> (felt252, felt252, felt252, felt252);
+}
+
+#[starknet::interface]
 pub trait IRenewalStatementProgram<TContractState> {
     fn verify_renewal_statement(
         ref self: TContractState, serialized_settlement_witness: Span<felt252>,
@@ -59,6 +66,23 @@ pub mod SettlementStatementProgram {
 }
 
 #[starknet::contract]
+pub mod NullifierStatementProgram {
+    use zylith_settlement_statement::verify_nullifier_statement as verify_nullifier_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl NullifierStatementProgramImpl of super::INullifierStatementProgram<ContractState> {
+        fn verify_nullifier_statement(
+            ref self: ContractState, serialized_settlement_witness: Span<felt252>,
+        ) -> (felt252, felt252, felt252, felt252) {
+            verify_nullifier_statement_impl(serialized_settlement_witness)
+        }
+    }
+}
+
+#[starknet::contract]
 pub mod RenewalStatementProgram {
     use zylith_settlement_statement::verify_renewal_statement as verify_renewal_statement_impl;
 
@@ -85,11 +109,13 @@ pub mod AuctionProofProgram {
     use starknet::{ContractAddress, SyscallResultTrait, get_contract_address};
     use zylith_settlement_statement::{verify_admission_statement, verify_auction_result_statement};
     use super::{
+        INullifierStatementProgramDispatcher, INullifierStatementProgramDispatcherTrait,
         IRenewalStatementProgramDispatcher, IRenewalStatementProgramDispatcherTrait,
         ISettlementStatementProgramDispatcher, ISettlementStatementProgramDispatcherTrait,
     };
 
     const SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_settle_v1';
+    const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
     const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
     const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
     const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
@@ -99,6 +125,7 @@ pub mod AuctionProofProgram {
     #[storage]
     struct Storage {
         settlement_statement_program: ContractAddress,
+        nullifier_statement_program: ContractAddress,
         renewal_statement_program: ContractAddress,
     }
 
@@ -106,11 +133,14 @@ pub mod AuctionProofProgram {
     fn constructor(
         ref self: ContractState,
         settlement_statement_program: ContractAddress,
+        nullifier_statement_program: ContractAddress,
         renewal_statement_program: ContractAddress,
     ) {
         assert(!settlement_statement_program.is_zero(), 'BAD_STMT_PROGRAM');
+        assert(!nullifier_statement_program.is_zero(), 'BAD_NULL_PROGRAM');
         assert(!renewal_statement_program.is_zero(), 'BAD_RENEW_PROGRAM');
         self.settlement_statement_program.write(settlement_statement_program);
+        self.nullifier_statement_program.write(nullifier_statement_program);
         self.renewal_statement_program.write(renewal_statement_program);
     }
 
@@ -127,6 +157,16 @@ pub mod AuctionProofProgram {
             };
             let transcript_commitment = settlement_statement_program
                 .verify_settlement_statement(serialized_settlement_witness);
+            let nullifier_statement_program = INullifierStatementProgramDispatcher {
+                contract_address: self.nullifier_statement_program.read(),
+            };
+            let (
+                nullifier_transcript_commitment,
+                prior_nullifier_root,
+                consumed_nullifier_root,
+                new_nullifier_root,
+            ) = nullifier_statement_program.verify_nullifier_statement(serialized_settlement_witness);
+            assert(nullifier_transcript_commitment == transcript_commitment, 'NULLIFIER_BINDING');
             let renewal_statement_program = IRenewalStatementProgramDispatcher {
                 contract_address: self.renewal_statement_program.read(),
             };
@@ -140,6 +180,13 @@ pub mod AuctionProofProgram {
             let settlement_message = emit_settlement_proof_message(
                 auction_verifier, transcript_commitment,
             );
+            let nullifier_message = emit_nullifier_proof_message(
+                auction_verifier,
+                transcript_commitment,
+                prior_nullifier_root,
+                consumed_nullifier_root,
+                new_nullifier_root,
+            );
             let renewal_message = emit_renewal_proof_message(
                 auction_verifier,
                 transcript_commitment,
@@ -147,7 +194,7 @@ pub mod AuctionProofProgram {
                 renewal_child_root,
                 new_renewal_root,
             );
-            poseidon_hash2(settlement_message, renewal_message)
+            poseidon_hash2(poseidon_hash2(settlement_message, nullifier_message), renewal_message)
         }
 
         fn compile_admission_proof(
@@ -196,6 +243,9 @@ pub mod AuctionProofProgram {
             let settlement_statement_program = ISettlementStatementProgramDispatcher {
                 contract_address: self.settlement_statement_program.read(),
             };
+            let nullifier_statement_program = INullifierStatementProgramDispatcher {
+                contract_address: self.nullifier_statement_program.read(),
+            };
             let renewal_statement_program = IRenewalStatementProgramDispatcher {
                 contract_address: self.renewal_statement_program.read(),
             };
@@ -209,6 +259,13 @@ pub mod AuctionProofProgram {
                 let transcript_commitment = settlement_statement_program
                     .verify_settlement_statement(witness.span());
                 let (
+                    nullifier_transcript_commitment,
+                    prior_nullifier_root,
+                    consumed_nullifier_root,
+                    new_nullifier_root,
+                ) = nullifier_statement_program.verify_nullifier_statement(witness.span());
+                assert(nullifier_transcript_commitment == transcript_commitment, 'NULLIFIER_BINDING');
+                let (
                     renewal_transcript_commitment,
                     prior_renewal_root,
                     renewal_child_root,
@@ -218,6 +275,13 @@ pub mod AuctionProofProgram {
                 let settlement_message = emit_settlement_proof_message(
                     auction_verifier, transcript_commitment,
                 );
+                let nullifier_message = emit_nullifier_proof_message(
+                    auction_verifier,
+                    transcript_commitment,
+                    prior_nullifier_root,
+                    consumed_nullifier_root,
+                    new_nullifier_root,
+                );
                 let renewal_message = emit_renewal_proof_message(
                     auction_verifier,
                     transcript_commitment,
@@ -226,6 +290,7 @@ pub mod AuctionProofProgram {
                     new_renewal_root,
                 );
                 aggregate = poseidon_hash2(aggregate, settlement_message);
+                aggregate = poseidon_hash2(aggregate, nullifier_message);
                 aggregate = poseidon_hash2(aggregate, renewal_message);
                 cursor += 1;
             }
@@ -257,6 +322,26 @@ pub mod AuctionProofProgram {
         send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
             .unwrap_syscall();
         settlement_proof_message_hash_from_statement(get_contract_address(), statement_message_hash)
+    }
+
+    fn emit_nullifier_proof_message(
+        auction_verifier: ContractAddress,
+        transcript_commitment: felt252,
+        prior_nullifier_root: felt252,
+        consumed_nullifier_root: felt252,
+        new_nullifier_root: felt252,
+    ) -> felt252 {
+        let statement_message_hash = native_nullifier_message_hash(
+            auction_verifier,
+            transcript_commitment,
+            prior_nullifier_root,
+            consumed_nullifier_root,
+            new_nullifier_root,
+        );
+        let payload = nullifier_proof_payload(statement_message_hash);
+        send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
+            .unwrap_syscall();
+        nullifier_proof_message_hash_from_statement(get_contract_address(), statement_message_hash)
     }
 
     fn emit_renewal_proof_message(
@@ -342,6 +427,10 @@ pub mod AuctionProofProgram {
         array![SETTLEMENT_MESSAGE_DOMAIN, statement_message_hash]
     }
 
+    fn nullifier_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![NULLIFIER_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
     fn renewal_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![RENEWAL_MESSAGE_DOMAIN, statement_message_hash]
     }
@@ -359,6 +448,15 @@ pub mod AuctionProofProgram {
     ) -> felt252 {
         let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
         let payload = settlement_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn nullifier_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = nullifier_proof_payload(statement_message_hash);
         payload.serialize(ref l1_message_data);
         poseidon_hash_span(l1_message_data.span())
     }
@@ -403,6 +501,21 @@ pub mod AuctionProofProgram {
             auction_verifier_address.into(),
         );
         state = poseidon_hash2(state, transcript_commitment);
+        state
+    }
+
+    fn native_nullifier_message_hash(
+        auction_verifier_address: ContractAddress,
+        transcript_commitment: felt252,
+        prior_nullifier_root: felt252,
+        consumed_nullifier_root: felt252,
+        new_nullifier_root: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(NULLIFIER_MESSAGE_DOMAIN, auction_verifier_address.into());
+        state = poseidon_hash2(state, transcript_commitment);
+        state = poseidon_hash2(state, prior_nullifier_root);
+        state = poseidon_hash2(state, consumed_nullifier_root);
+        state = poseidon_hash2(state, new_nullifier_root);
         state
     }
 
