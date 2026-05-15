@@ -2,6 +2,8 @@ use starknet::ContractAddress;
 
 #[starknet::interface]
 pub trait ICommitmentRegistry<TContractState> {
+    fn propose_admin(ref self: TContractState, new_admin: ContractAddress);
+    fn accept_admin(ref self: TContractState);
     fn set_batch_registrar(ref self: TContractState, registrar: ContractAddress);
     fn set_privacy_deposit_bridge(ref self: TContractState, bridge: ContractAddress);
     fn set_auction_verifier(ref self: TContractState, verifier: ContractAddress);
@@ -16,6 +18,9 @@ pub trait ICommitmentRegistry<TContractState> {
     fn is_note_commitment_registered(self: @TContractState, commitment: felt252) -> bool;
     fn order_commitment_batch(self: @TContractState, commitment: felt252) -> felt252;
     fn note_commitment_batch(self: @TContractState, commitment: felt252) -> felt252;
+    fn admin_address(self: @TContractState) -> ContractAddress;
+    fn pending_admin_address(self: @TContractState) -> ContractAddress;
+    fn admin_transfer_pending(self: @TContractState) -> bool;
     fn batch_registrar_address(self: @TContractState) -> ContractAddress;
     fn privacy_deposit_bridge_address(self: @TContractState) -> ContractAddress;
     fn auction_verifier_address(self: @TContractState) -> ContractAddress;
@@ -36,6 +41,8 @@ pub mod CommitmentRegistry {
     #[storage]
     struct Storage {
         admin: ContractAddress,
+        pending_admin: ContractAddress,
+        admin_transfer_pending: bool,
         batch_registrar: ContractAddress,
         privacy_deposit_bridge: ContractAddress,
         auction_verifier: ContractAddress,
@@ -53,6 +60,22 @@ pub mod CommitmentRegistry {
 
     #[abi(embed_v0)]
     impl CommitmentRegistryImpl of super::ICommitmentRegistry<ContractState> {
+        fn propose_admin(ref self: ContractState, new_admin: ContractAddress) {
+            assert_admin(@self);
+            assert(!new_admin.is_zero(), 'BAD_ADMIN');
+            assert(new_admin != self.admin.read(), 'BAD_ADMIN');
+            self.pending_admin.write(new_admin);
+            self.admin_transfer_pending.write(true);
+        }
+
+        fn accept_admin(ref self: ContractState) {
+            let caller = get_caller_address();
+            assert(self.admin_transfer_pending.read(), 'NO_ADMIN_TRANSFER');
+            assert(caller == self.pending_admin.read(), 'UNAUTHORIZED');
+            self.admin.write(caller);
+            self.admin_transfer_pending.write(false);
+        }
+
         fn set_batch_registrar(ref self: ContractState, registrar: ContractAddress) {
             assert_admin(@self);
             assert(!registrar.is_zero(), 'BAD_REGISTRAR');
@@ -143,6 +166,18 @@ pub mod CommitmentRegistry {
 
         fn note_commitment_batch(self: @ContractState, commitment: felt252) -> felt252 {
             self.note_commitment_batch_ids.read(commitment)
+        }
+
+        fn admin_address(self: @ContractState) -> ContractAddress {
+            self.admin.read()
+        }
+
+        fn pending_admin_address(self: @ContractState) -> ContractAddress {
+            self.pending_admin.read()
+        }
+
+        fn admin_transfer_pending(self: @ContractState) -> bool {
+            self.admin_transfer_pending.read()
         }
 
         fn batch_registrar_address(self: @ContractState) -> ContractAddress {

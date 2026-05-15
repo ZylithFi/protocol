@@ -3,6 +3,8 @@ use zylith_protocol::types::{BatchStatus, BatchView};
 
 #[starknet::interface]
 pub trait IBatchRegistry<TContractState> {
+    fn propose_admin(ref self: TContractState, new_admin: ContractAddress);
+    fn accept_admin(ref self: TContractState);
     fn set_batch_registrar(ref self: TContractState, registrar: ContractAddress);
     fn set_auction_verifier(ref self: TContractState, verifier: ContractAddress);
     fn register_batch(
@@ -38,6 +40,9 @@ pub trait IBatchRegistry<TContractState> {
     );
     fn batch_exists(self: @TContractState, batch_id: felt252) -> bool;
     fn get_batch(self: @TContractState, batch_id: felt252) -> BatchView;
+    fn admin_address(self: @TContractState) -> ContractAddress;
+    fn pending_admin_address(self: @TContractState) -> ContractAddress;
+    fn admin_transfer_pending(self: @TContractState) -> bool;
     fn batch_registrar_address(self: @TContractState) -> ContractAddress;
     fn auction_verifier_address(self: @TContractState) -> ContractAddress;
 }
@@ -55,6 +60,8 @@ pub mod BatchRegistry {
     #[storage]
     struct Storage {
         admin: ContractAddress,
+        pending_admin: ContractAddress,
+        admin_transfer_pending: bool,
         batch_registrar: ContractAddress,
         auction_verifier: ContractAddress,
         batch_exists: Map<felt252, bool>,
@@ -82,6 +89,22 @@ pub mod BatchRegistry {
 
     #[abi(embed_v0)]
     impl BatchRegistryImpl of super::IBatchRegistry<ContractState> {
+        fn propose_admin(ref self: ContractState, new_admin: ContractAddress) {
+            assert_admin(@self);
+            assert(!new_admin.is_zero(), 'BAD_ADMIN');
+            assert(new_admin != self.admin.read(), 'BAD_ADMIN');
+            self.pending_admin.write(new_admin);
+            self.admin_transfer_pending.write(true);
+        }
+
+        fn accept_admin(ref self: ContractState) {
+            let caller = get_caller_address();
+            assert(self.admin_transfer_pending.read(), 'NO_ADMIN_TRANSFER');
+            assert(caller == self.pending_admin.read(), 'UNAUTHORIZED');
+            self.admin.write(caller);
+            self.admin_transfer_pending.write(false);
+        }
+
         fn set_batch_registrar(ref self: ContractState, registrar: ContractAddress) {
             assert_admin(@self);
             assert(!registrar.is_zero(), 'BAD_REGISTRAR');
@@ -210,6 +233,18 @@ pub mod BatchRegistry {
                 transcript_commitment: self.transcript_commitments.read(batch_id),
                 clearing_price: self.clearing_prices.read(batch_id),
             }
+        }
+
+        fn admin_address(self: @ContractState) -> ContractAddress {
+            self.admin.read()
+        }
+
+        fn pending_admin_address(self: @ContractState) -> ContractAddress {
+            self.pending_admin.read()
+        }
+
+        fn admin_transfer_pending(self: @ContractState) -> bool {
+            self.admin_transfer_pending.read()
         }
 
         fn batch_registrar_address(self: @ContractState) -> ContractAddress {

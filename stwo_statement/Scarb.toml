@@ -7,6 +7,7 @@ edition = "2024_07"
 sierra = true
 
 [[target.executable]]
+function = "zylith_settlement_statement::executable::main"
 
 [cairo]
 enable-gas = false

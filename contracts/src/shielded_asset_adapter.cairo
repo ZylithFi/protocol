@@ -2,6 +2,8 @@ use zylith_protocol::types::{DepositRecord, WithdrawalRecord};
 
 #[starknet::interface]
 pub trait IShieldedAssetAdapter<TContractState> {
+    fn propose_admin(ref self: TContractState, new_admin: starknet::ContractAddress);
+    fn accept_admin(ref self: TContractState);
     fn set_privacy_deposit_bridge(ref self: TContractState, bridge: starknet::ContractAddress);
     fn set_fee_ledger(ref self: TContractState, fee_ledger: starknet::ContractAddress);
     fn set_auction_verifier(ref self: TContractState, verifier: starknet::ContractAddress);
@@ -51,6 +53,9 @@ pub trait IShieldedAssetAdapter<TContractState> {
     fn deposit_record(self: @TContractState, deposit_id: u64) -> DepositRecord;
     fn withdrawal_count(self: @TContractState) -> u64;
     fn withdrawal_record(self: @TContractState, withdrawal_id: u64) -> WithdrawalRecord;
+    fn admin_address(self: @TContractState) -> starknet::ContractAddress;
+    fn pending_admin_address(self: @TContractState) -> starknet::ContractAddress;
+    fn admin_transfer_pending(self: @TContractState) -> bool;
     fn privacy_deposit_bridge_address(self: @TContractState) -> starknet::ContractAddress;
     fn fee_ledger_address(self: @TContractState) -> starknet::ContractAddress;
     fn auction_verifier_address(self: @TContractState) -> starknet::ContractAddress;
@@ -73,6 +78,8 @@ pub mod ShieldedAssetAdapter {
     #[storage]
     struct Storage {
         admin: ContractAddress,
+        pending_admin: ContractAddress,
+        admin_transfer_pending: bool,
         privacy_deposit_bridge: ContractAddress,
         fee_ledger: ContractAddress,
         auction_verifier: ContractAddress,
@@ -104,6 +111,22 @@ pub mod ShieldedAssetAdapter {
 
     #[abi(embed_v0)]
     impl ShieldedAssetAdapterImpl of super::IShieldedAssetAdapter<ContractState> {
+        fn propose_admin(ref self: ContractState, new_admin: ContractAddress) {
+            assert_admin(@self);
+            assert(!new_admin.is_zero(), 'BAD_ADMIN');
+            assert(new_admin != self.admin.read(), 'BAD_ADMIN');
+            self.pending_admin.write(new_admin);
+            self.admin_transfer_pending.write(true);
+        }
+
+        fn accept_admin(ref self: ContractState) {
+            let caller = get_caller_address();
+            assert(self.admin_transfer_pending.read(), 'NO_ADMIN_TRANSFER');
+            assert(caller == self.pending_admin.read(), 'UNAUTHORIZED');
+            self.admin.write(caller);
+            self.admin_transfer_pending.write(false);
+        }
+
         fn set_privacy_deposit_bridge(ref self: ContractState, bridge: ContractAddress) {
             assert_admin(@self);
             assert(!bridge.is_zero(), 'BAD_PRIVACY_BRIDGE');
@@ -337,6 +360,18 @@ pub mod ShieldedAssetAdapter {
                 recipient: self.withdrawal_recipients_by_id.read(withdrawal_id),
                 note_commitment: self.withdrawal_note_commitments.read(withdrawal_id),
             }
+        }
+
+        fn admin_address(self: @ContractState) -> ContractAddress {
+            self.admin.read()
+        }
+
+        fn pending_admin_address(self: @ContractState) -> ContractAddress {
+            self.pending_admin.read()
+        }
+
+        fn admin_transfer_pending(self: @ContractState) -> bool {
+            self.admin_transfer_pending.read()
         }
 
         fn privacy_deposit_bridge_address(self: @ContractState) -> ContractAddress {

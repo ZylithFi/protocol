@@ -7,6 +7,9 @@ edition = "2024_07"
 starknet = ">=2.11.4"
 zylith_settlement_statement = { path = "../stwo_statement" }
 
+[dev-dependencies]
+snforge_std = "0.59.0"
+
 [lib]
 sierra = true
 

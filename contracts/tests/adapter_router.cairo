@@ -53,9 +53,14 @@ const OUTPUT_WITHDRAWAL_DOMAIN: felt252 =
 const DEPOSIT_NOTE_ROOT_DOMAIN: felt252 = 0x7a796c6974685f6465706f7369745f6e6f74655f726f6f745f7631;
 const CONSUMED_NULLIFIER_ROOT_DOMAIN: felt252 =
     0x052259833b97a525483b8fff0635ce1f9fdfd08b5a8db2486d4a05378989b0f0;
+const FEE_ROOT_DOMAIN: felt252 = 0x079a9e0b9d4a6b4cac728c0e5f6298e37533fa1348f020f3575a78c5adf7d44b;
 const TEST_CHAIN_ID: felt252 = 'SN_SEPOLIA';
 const WRONG_CHAIN_ID: felt252 = 'SN_MAIN';
 const TEST_PRICE_BASE_SCALE: u128 = 1;
+const TEST_TAKER_FEE_BPS: u128 = 4;
+const TEST_MAKER_FEE_BPS: u128 = 0;
+const TEST_PROTOCOL_FEE_RECIPIENT: felt252 =
+    0x02478731e01081aa57abe958afa8c29dfa83032c10d647a63b0394c23beb6192;
 
 fn deploy_commitment_registry(admin: ContractAddress) -> ContractAddress {
     let class = declare("CommitmentRegistry").unwrap().contract_class();
@@ -113,8 +118,239 @@ fn deploy_auction_verifier(
     let verifier = IAuctionVerifierDispatcher { contract_address: verifier_address };
     start_cheat_caller_address(verifier_address, admin);
     verifier.set_proof_program(verifier_address, TEST_PROOF_PROGRAM_HASH);
+    verifier.set_protocol_fee_recipient(TEST_PROTOCOL_FEE_RECIPIENT);
+    verifier.set_pair_fee_config(0x888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS);
+    verifier.set_pair_fee_config(0x889, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS);
+    verifier.set_pair_fee_config(0x1888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS);
+    verifier.set_pair_fee_config(0x2888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS);
     stop_cheat_caller_address(verifier_address);
     verifier_address
+}
+
+#[test]
+fn auction_verifier_guardian_can_pause_and_admin_can_unpause() {
+    let admin = as_address(0x111);
+    let guardian = as_address(0x222);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_pause_guardian(guardian);
+    stop_cheat_caller_address(auction_verifier);
+
+    start_cheat_caller_address(auction_verifier, guardian);
+    verifier.pause();
+    stop_cheat_caller_address(auction_verifier);
+    assert(verifier.is_paused(), 'NOT_PAUSED');
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.unpause();
+    stop_cheat_caller_address(auction_verifier);
+    assert(!verifier.is_paused(), 'STILL_PAUSED');
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_pause_blocks_admission_recording() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    verifier.pause();
+    stop_cheat_caller_address(auction_verifier);
+
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    verifier.record_admission_root_with_proof_facts(1, 2, 3);
+}
+
+#[test]
+fn auction_verifier_admin_rotation_accepts_new_admin() {
+    let admin = as_address(0x111);
+    let new_admin = as_address(0x222);
+    let guardian = as_address(0x333);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.propose_admin(new_admin);
+    stop_cheat_caller_address(auction_verifier);
+    assert(verifier.admin_transfer_pending(), 'NO_TRANSFER');
+    assert(verifier.pending_admin_address() == new_admin, 'BAD_PENDING_ADMIN');
+
+    start_cheat_caller_address(auction_verifier, new_admin);
+    verifier.accept_admin();
+    verifier.set_pause_guardian(guardian);
+    stop_cheat_caller_address(auction_verifier);
+
+    assert(verifier.admin_address() == new_admin, 'BAD_ADMIN');
+    assert(!verifier.admin_transfer_pending(), 'TRANSFER_STILL_PENDING');
+    assert(verifier.pause_guardian_address() == guardian, 'BAD_GUARDIAN');
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_old_admin_loses_authority_after_rotation() {
+    let admin = as_address(0x111);
+    let new_admin = as_address(0x222);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.propose_admin(new_admin);
+    stop_cheat_caller_address(auction_verifier);
+
+    start_cheat_caller_address(auction_verifier, new_admin);
+    verifier.accept_admin();
+    stop_cheat_caller_address(auction_verifier);
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_pause_guardian(as_address(0x333));
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_fee_config_above_protocol_cap() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_pair_fee_config(0x888, 101, 0);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_direct_pair_fee_reconfiguration() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_pair_fee_config(0x888, 5, 0);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_early_pair_fee_execution() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    cheat_block_timestamp(auction_verifier, 1_000, CheatSpan::TargetCalls(1));
+    verifier.propose_pair_fee_config(0x888, 5, 0);
+    cheat_block_timestamp(auction_verifier, 87_399, CheatSpan::TargetCalls(1));
+    verifier.execute_pair_fee_config(0x888);
+}
+
+#[test]
+fn auction_verifier_timelocks_pair_fee_reconfiguration() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    cheat_block_timestamp(auction_verifier, 1_000, CheatSpan::TargetCalls(1));
+    verifier.propose_pair_fee_config(0x888, 5, 0);
+    stop_cheat_caller_address(auction_verifier);
+
+    let (pending_taker, pending_maker, eta, active) = verifier.pending_pair_fee_config(0x888);
+    assert(pending_taker == 5, 'BAD_PENDING_TAKER');
+    assert(pending_maker == 0, 'BAD_PENDING_MAKER');
+    assert(eta == 87_400, 'BAD_PAIR_FEE_ETA');
+    assert(active, 'PAIR_FEE_NOT_PENDING');
+
+    start_cheat_caller_address(auction_verifier, admin);
+    cheat_block_timestamp(auction_verifier, 87_400, CheatSpan::TargetCalls(1));
+    verifier.execute_pair_fee_config(0x888);
+    stop_cheat_caller_address(auction_verifier);
+
+    let (taker, maker, configured) = verifier.pair_fee_config(0x888);
+    assert(taker == 5, 'BAD_TAKER');
+    assert(maker == 0, 'BAD_MAKER');
+    assert(configured, 'PAIR_FEE_UNSET');
+    let (_pending_taker, _pending_maker, _eta, active_after) = verifier
+        .pending_pair_fee_config(0x888);
+    assert(!active_after, 'PAIR_FEE_STILL_PENDING');
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_direct_protocol_fee_recipient_change() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_protocol_fee_recipient(TEST_PROTOCOL_FEE_RECIPIENT + 1);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_early_protocol_fee_recipient_execution() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    cheat_block_timestamp(auction_verifier, 1_000, CheatSpan::TargetCalls(1));
+    verifier.propose_protocol_fee_recipient(TEST_PROTOCOL_FEE_RECIPIENT + 1);
+    cheat_block_timestamp(auction_verifier, 605_799, CheatSpan::TargetCalls(1));
+    verifier.execute_protocol_fee_recipient();
+}
+
+#[test]
+fn auction_verifier_timelocks_protocol_fee_recipient_change() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    let new_recipient = TEST_PROTOCOL_FEE_RECIPIENT + 1;
+
+    start_cheat_caller_address(auction_verifier, admin);
+    cheat_block_timestamp(auction_verifier, 1_000, CheatSpan::TargetCalls(1));
+    verifier.propose_protocol_fee_recipient(new_recipient);
+    stop_cheat_caller_address(auction_verifier);
+
+    let (pending, eta, active) = verifier.pending_protocol_fee_recipient();
+    assert(pending == new_recipient, 'BAD_PENDING_RECIPIENT');
+    assert(eta == 605_800, 'BAD_RECIPIENT_ETA');
+    assert(active, 'RECIPIENT_NOT_PENDING');
+
+    start_cheat_caller_address(auction_verifier, admin);
+    cheat_block_timestamp(auction_verifier, 605_800, CheatSpan::TargetCalls(1));
+    verifier.execute_protocol_fee_recipient();
+    stop_cheat_caller_address(auction_verifier);
+
+    assert(verifier.protocol_fee_recipient() == new_recipient, 'BAD_FEE_RECIPIENT');
+    let (_pending, _eta, active_after) = verifier.pending_protocol_fee_recipient();
+    assert(!active_after, 'RECIPIENT_STILL_PENDING');
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_claim_delay_above_protocol_cap() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_output_claim_delay_seconds(604801);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_proof_program_change_after_lock() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.lock_proof_program();
+    assert(verifier.proof_program_is_locked(), 'NOT_LOCKED');
+    verifier.set_proof_program(as_address(0x555), TEST_PROOF_PROGRAM_HASH + 1);
 }
 
 fn authorize_privacy_deposit_bridge(
@@ -402,6 +638,26 @@ fn empty_renewal_child_root() -> felt252 {
     single_field_root(RENEWAL_CHILD_ROOT_DOMAIN, empty.span())
 }
 
+fn empty_fee_root() -> felt252 {
+    poseidon_hash2(FEE_ROOT_DOMAIN, 0)
+}
+
+fn normalized_fee_root(fee_root: felt252) -> felt252 {
+    if fee_root == 0 {
+        return empty_fee_root();
+    }
+    fee_root
+}
+
+fn normalized_new_fee_root(
+    prior_fee_root: felt252, fee_root: felt252, new_fee_root: felt252,
+) -> felt252 {
+    if fee_root == 0 && new_fee_root == root_only_state_transition(prior_fee_root, 0) {
+        return root_only_state_transition(prior_fee_root, empty_fee_root());
+    }
+    new_fee_root
+}
+
 fn root_only_public_settlement_commitment(
     batch_id: felt252,
     pair_id: felt252,
@@ -424,6 +680,8 @@ fn root_only_public_settlement_commitment(
     new_renewal_root: felt252,
     new_fee_root: felt252,
 ) -> felt252 {
+    let bound_fee_root = normalized_fee_root(fee_root);
+    let bound_new_fee_root = normalized_new_fee_root(prior_fee_root, fee_root, new_fee_root);
     let mut state = poseidon_hash2(
         0x283f626418aa97a073f64500f7e35dd8bf7c01ff8611917c3c38e5be92eb205, batch_id,
     );
@@ -433,6 +691,9 @@ fn root_only_public_settlement_commitment(
     state = poseidon_hash2(state, encrypted_order_set_commitment);
     state = poseidon_hash2(state, clearing_price.into());
     state = poseidon_hash2(state, TEST_PRICE_BASE_SCALE.into());
+    state = poseidon_hash2(state, TEST_TAKER_FEE_BPS.into());
+    state = poseidon_hash2(state, TEST_MAKER_FEE_BPS.into());
+    state = poseidon_hash2(state, TEST_PROTOCOL_FEE_RECIPIENT);
     state = poseidon_hash2(state, output_bundle_ref);
     state = poseidon_hash2(state, prior_note_root);
     state = poseidon_hash2(state, prior_nullifier_root);
@@ -442,11 +703,11 @@ fn root_only_public_settlement_commitment(
     state = poseidon_hash2(state, consumed_nullifier_root);
     state = poseidon_hash2(state, renewal_child_root);
     state = poseidon_hash2(state, output_note_root);
-    state = poseidon_hash2(state, fee_root);
+    state = poseidon_hash2(state, bound_fee_root);
     state = poseidon_hash2(state, new_note_root);
     state = poseidon_hash2(state, new_nullifier_root);
     state = poseidon_hash2(state, new_renewal_root);
-    state = poseidon_hash2(state, new_fee_root);
+    state = poseidon_hash2(state, bound_new_fee_root);
     state
 }
 
@@ -473,6 +734,10 @@ fn submit_root_settlement(
     new_renewal_root: felt252,
     new_fee_root: felt252,
 ) {
+    let bound_fee_root = normalized_fee_root(fee_root);
+    let bound_new_fee_root = normalized_new_fee_root(prior_fee_root, fee_root, new_fee_root);
+    let fee_asset_ids: Array<felt252> = array![];
+    let fee_amounts: Array<u128> = array![];
     verifier
         .submit_settlement_with_proof_facts(
             batch_id,
@@ -482,6 +747,9 @@ fn submit_root_settlement(
             proof_artifact_commitment,
             clearing_price,
             TEST_PRICE_BASE_SCALE,
+            TEST_TAKER_FEE_BPS,
+            TEST_MAKER_FEE_BPS,
+            TEST_PROTOCOL_FEE_RECIPIENT,
             output_bundle_ref,
             prior_note_root,
             prior_nullifier_root,
@@ -491,11 +759,13 @@ fn submit_root_settlement(
             consumed_nullifier_root,
             renewal_child_root,
             output_note_root,
-            fee_root,
+            bound_fee_root,
             new_note_root,
             new_nullifier_root,
             new_renewal_root,
-            new_fee_root,
+            bound_new_fee_root,
+            fee_asset_ids.span(),
+            fee_amounts.span(),
         );
 }
 
@@ -564,6 +834,8 @@ fn append_root_settlement_input(
     new_renewal_root: felt252,
     new_fee_root: felt252,
 ) {
+    let bound_fee_root = normalized_fee_root(fee_root);
+    let bound_new_fee_root = normalized_new_fee_root(prior_fee_root, fee_root, new_fee_root);
     inputs.append(batch_id);
     inputs.append(order_commitment_root);
     inputs.append(encrypted_order_set_commitment);
@@ -571,6 +843,9 @@ fn append_root_settlement_input(
     inputs.append(proof_artifact_commitment);
     inputs.append(clearing_price.into());
     inputs.append(TEST_PRICE_BASE_SCALE.into());
+    inputs.append(TEST_TAKER_FEE_BPS.into());
+    inputs.append(TEST_MAKER_FEE_BPS.into());
+    inputs.append(TEST_PROTOCOL_FEE_RECIPIENT);
     inputs.append(output_bundle_ref);
     inputs.append(prior_note_root);
     inputs.append(prior_nullifier_root);
@@ -580,11 +855,13 @@ fn append_root_settlement_input(
     inputs.append(consumed_nullifier_root);
     inputs.append(renewal_child_root);
     inputs.append(output_note_root);
-    inputs.append(fee_root);
+    inputs.append(bound_fee_root);
     inputs.append(new_note_root);
     inputs.append(new_nullifier_root);
     inputs.append(new_renewal_root);
-    inputs.append(new_fee_root);
+    inputs.append(bound_new_fee_root);
+    inputs.append(0);
+    inputs.append(0);
 }
 
 fn valid_proof_facts(base_block_number: u64, proof_message_hash: felt252) -> Array<felt252> {
@@ -711,6 +988,7 @@ fn fee_ledger_claims_accrued_fees_from_adapter_escrow() {
     let admin = as_address(0x111);
     let auction_verifier = as_address(0x333);
     let fee_recipient = 0x444;
+    let fee_claim_authority = as_address(0x666);
     let claim_recipient = as_address(0x555);
     let token_address = deploy_mock_erc20();
     let commitment_registry = deploy_commitment_registry(admin);
@@ -736,6 +1014,7 @@ fn fee_ledger_claims_accrued_fees_from_adapter_escrow() {
     start_cheat_caller_address(fee_ledger, admin);
     fees.set_auction_verifier(auction_verifier);
     fees.set_shielded_asset_adapter(shielded_asset_adapter);
+    fees.set_fee_claim_authority(fee_claim_authority);
     stop_cheat_caller_address(fee_ledger);
 
     token.mint(privacy_deposit_bridge, as_u256(100));
@@ -747,13 +1026,68 @@ fn fee_ledger_claims_accrued_fees_from_adapter_escrow() {
     fees.accrue_fees(array![ASSET_ID].span(), array![fee_recipient].span(), array![7_u128].span());
     stop_cheat_caller_address(fee_ledger);
 
-    start_cheat_caller_address(fee_ledger, admin);
+    start_cheat_caller_address(fee_ledger, fee_claim_authority);
     fees.claim_fees(ASSET_ID, fee_recipient, 7, claim_recipient);
     stop_cheat_caller_address(fee_ledger);
 
     assert(fees.accrued_fee(ASSET_ID, fee_recipient) == 0, 'FEE_NOT_CLAIMED');
     assert(adapter.escrowed_balance(ASSET_ID) == 93, 'BAD_ESCROW');
     assert(token.balance_of(claim_recipient).low == 7, 'BAD_CLAIM_BALANCE');
+}
+
+#[test]
+#[should_panic]
+fn fee_ledger_rejects_direct_fee_claim_authority_change() {
+    let admin = as_address(0x111);
+    let fee_ledger = deploy_fee_ledger(admin);
+    let fees = IFeeLedgerDispatcher { contract_address: fee_ledger };
+
+    start_cheat_caller_address(fee_ledger, admin);
+    fees.set_fee_claim_authority(as_address(0x222));
+    fees.set_fee_claim_authority(as_address(0x333));
+}
+
+#[test]
+#[should_panic]
+fn fee_ledger_rejects_early_fee_claim_authority_execution() {
+    let admin = as_address(0x111);
+    let fee_ledger = deploy_fee_ledger(admin);
+    let fees = IFeeLedgerDispatcher { contract_address: fee_ledger };
+
+    start_cheat_caller_address(fee_ledger, admin);
+    fees.set_fee_claim_authority(as_address(0x222));
+    cheat_block_timestamp(fee_ledger, 1_000, CheatSpan::TargetCalls(1));
+    fees.propose_fee_claim_authority(as_address(0x333));
+    cheat_block_timestamp(fee_ledger, 605_799, CheatSpan::TargetCalls(1));
+    fees.execute_fee_claim_authority();
+}
+
+#[test]
+fn fee_ledger_timelocks_fee_claim_authority_change() {
+    let admin = as_address(0x111);
+    let fee_ledger = deploy_fee_ledger(admin);
+    let fees = IFeeLedgerDispatcher { contract_address: fee_ledger };
+    let new_authority = as_address(0x333);
+
+    start_cheat_caller_address(fee_ledger, admin);
+    fees.set_fee_claim_authority(as_address(0x222));
+    cheat_block_timestamp(fee_ledger, 1_000, CheatSpan::TargetCalls(1));
+    fees.propose_fee_claim_authority(new_authority);
+    stop_cheat_caller_address(fee_ledger);
+
+    let (pending, eta, active) = fees.pending_fee_claim_authority();
+    assert(pending == new_authority, 'BAD_PENDING_AUTH');
+    assert(eta == 605_800, 'BAD_AUTH_ETA');
+    assert(active, 'AUTH_NOT_PENDING');
+
+    start_cheat_caller_address(fee_ledger, admin);
+    cheat_block_timestamp(fee_ledger, 605_800, CheatSpan::TargetCalls(1));
+    fees.execute_fee_claim_authority();
+    stop_cheat_caller_address(fee_ledger);
+
+    assert(fees.fee_claim_authority_address() == new_authority, 'BAD_AUTHORITY');
+    let (_pending, _eta, active_after) = fees.pending_fee_claim_authority();
+    assert(!active_after, 'AUTH_STILL_PENDING');
 }
 
 #[test]
@@ -1367,7 +1701,7 @@ fn auction_verifier_accepts_native_proof_facts() {
     let _ = empty_nullifier_root;
     assert(current_nullifier_root == 0, 'BAD_CURRENT_NULL');
     assert(current_renewal_root == 0, 'BAD_CURRENT_RENEW');
-    assert(current_fee_root == root_only_state_transition(0, 0), 'BAD_CURRENT_FEE');
+    assert(current_fee_root == root_only_state_transition(0, empty_fee_root()), 'BAD_CURRENT_FEE');
 }
 
 #[test]
@@ -1518,10 +1852,10 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
     let first_new_note_root = root_only_state_transition(0, empty_batch_root);
     let first_new_nullifier_root = 0;
     let first_new_renewal_root = 0;
-    let first_new_fee_root = root_only_state_transition(0, empty_batch_root);
+    let first_new_fee_root = root_only_state_transition(0, empty_fee_root());
     let second_new_note_root = root_only_state_transition(first_new_note_root, empty_batch_root);
     let second_new_renewal_root = first_new_renewal_root;
-    let second_new_fee_root = root_only_state_transition(first_new_fee_root, empty_batch_root);
+    let second_new_fee_root = root_only_state_transition(first_new_fee_root, empty_fee_root());
     let empty_nullifiers = array![];
     let empty_nullifier_root = single_field_root(
         CONSUMED_NULLIFIER_ROOT_DOMAIN, empty_nullifiers.span(),
