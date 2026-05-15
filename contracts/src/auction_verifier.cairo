@@ -159,6 +159,7 @@ pub mod AuctionVerifier {
     const VIRTUAL_SNOS: felt252 = 'VIRTUAL_SNOS';
     const VIRTUAL_SNOS0: felt252 = 'VIRTUAL_SNOS0';
     const SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_settle_v1';
+    const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
     const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
     const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
     const SETTLEMENT_PROOF_MESSAGE_TO: felt252 = 0;
@@ -574,6 +575,16 @@ pub mod AuctionVerifier {
                 settlement_proof_message_hash_from_statement(
                     self.proof_program.read(), expected_statement_message,
                 ),
+                renewal_proof_message_hash_from_statement(
+                    self.proof_program.read(),
+                    native_renewal_message_hash(
+                        get_contract_address(),
+                        transcript_commitment,
+                        prior_renewal_root,
+                        renewal_child_root,
+                        new_renewal_root,
+                    ),
+                ),
             ];
             assert_valid_proof_facts_messages(@self, expected_messages.span());
 
@@ -928,16 +939,16 @@ pub mod AuctionVerifier {
             read_next(data, ref index);
             read_next(data, ref index);
             read_next(data, ref index);
+            let prior_renewal_root = read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            let renewal_child_root = read_next(data, ref index);
             read_next(data, ref index);
             read_next(data, ref index);
             read_next(data, ref index);
             read_next(data, ref index);
-            read_next(data, ref index);
-            read_next(data, ref index);
-            read_next(data, ref index);
-            read_next(data, ref index);
-            read_next(data, ref index);
-            read_next(data, ref index);
+            let new_renewal_root = read_next(data, ref index);
             read_next(data, ref index);
             skip_span(data, ref index);
             skip_span(data, ref index);
@@ -950,6 +961,19 @@ pub mod AuctionVerifier {
                 .append(
                     settlement_proof_message_hash_from_statement(
                         self.proof_program.read(), statement_message,
+                    ),
+                );
+            expected_messages
+                .append(
+                    renewal_proof_message_hash_from_statement(
+                        self.proof_program.read(),
+                        native_renewal_message_hash(
+                            get_contract_address(),
+                            transcript_commitment,
+                            prior_renewal_root,
+                            renewal_child_root,
+                            new_renewal_root,
+                        ),
                     ),
                 );
             cursor += 1;
@@ -1057,6 +1081,10 @@ pub mod AuctionVerifier {
         array![SETTLEMENT_MESSAGE_DOMAIN, statement_message_hash]
     }
 
+    fn renewal_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![RENEWAL_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
     fn admission_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![ADMISSION_MESSAGE_DOMAIN, statement_message_hash]
     }
@@ -1070,6 +1098,15 @@ pub mod AuctionVerifier {
     ) -> felt252 {
         let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
         let payload = settlement_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn renewal_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = renewal_proof_payload(statement_message_hash);
         payload.serialize(ref l1_message_data);
         poseidon_hash_span(l1_message_data.span())
     }
@@ -1105,6 +1142,21 @@ pub mod AuctionVerifier {
             auction_verifier_address.into(),
         );
         state = poseidon_hash2(state, transcript_commitment);
+        state
+    }
+
+    fn native_renewal_message_hash(
+        auction_verifier_address: ContractAddress,
+        transcript_commitment: felt252,
+        prior_renewal_root: felt252,
+        renewal_child_root: felt252,
+        new_renewal_root: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(RENEWAL_MESSAGE_DOMAIN, auction_verifier_address.into());
+        state = poseidon_hash2(state, transcript_commitment);
+        state = poseidon_hash2(state, prior_renewal_root);
+        state = poseidon_hash2(state, renewal_child_root);
+        state = poseidon_hash2(state, new_renewal_root);
         state
     }
 

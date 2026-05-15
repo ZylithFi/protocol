@@ -356,9 +356,6 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let mut expected_quote_fee: u128 = 0;
     let mut curve_cursor = 0;
     let mut renewal_cursor = 0;
-    let mut renewal_child_path_cursor = 0;
-    let mut renewal_cancel_path_cursor = 0;
-    let mut running_renewal_root = prior_renewal_root;
     let mut note_membership_path_cursor = 0;
     let mut note_membership_suffix_cursor = 0;
     let mut funding_input_cursor = 0;
@@ -472,36 +469,6 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
                     ),
                 'E',
             );
-            let renewal_cancel_marker = renewal_parent_cancel_marker(
-                parent_secret_commitment, parent_cancel_authority,
-            );
-            running_renewal_root =
-                assert_sparse_entry_absent(
-                    running_renewal_root,
-                    renewal_cancel_marker,
-                    *renewal_cancel_sparse_key_lows.at(renewal_cursor),
-                    *renewal_cancel_sparse_key_highs.at(renewal_cursor),
-                    *renewal_cancel_sparse_path_counts.at(renewal_cursor),
-                    ref renewal_cancel_path_cursor,
-                    renewal_cancel_sparse_path_values.span(),
-                    renewal_cancel_sparse_path_directions.span(),
-                    RENEWAL_SPARSE_TREE_DEPTH,
-                    nullifier_sparse_node_domain,
-                );
-            running_renewal_root =
-                assert_sparse_entry_insert(
-                    running_renewal_root,
-                    *renewal_child_nullifiers.at(renewal_cursor),
-                    *renewal_child_sparse_key_lows.at(renewal_cursor),
-                    *renewal_child_sparse_key_highs.at(renewal_cursor),
-                    *renewal_child_sparse_path_counts.at(renewal_cursor),
-                    ref renewal_child_path_cursor,
-                    renewal_child_sparse_path_values.span(),
-                    renewal_child_sparse_path_directions.span(),
-                    RENEWAL_SPARSE_TREE_DEPTH,
-                    nullifier_sparse_leaf_domain,
-                    nullifier_sparse_node_domain,
-                );
             renewal_cursor += 1;
         }
         assert(order_type == ORDER_TYPE_LIMIT_BATCH || order_type == ORDER_TYPE_MAKER_CURVE, 'E');
@@ -780,10 +747,6 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     }
     assert(funding_input_cursor == consumed_note_commitments.len(), 'E');
     assert(renewal_cursor == renewal_child_nullifiers.len(), 'E');
-    assert(renewal_child_path_cursor == renewal_child_sparse_path_values.len(), 'E');
-    assert(renewal_child_path_cursor == renewal_child_sparse_path_directions.len(), 'E');
-    assert(renewal_cancel_path_cursor == renewal_cancel_sparse_path_values.len(), 'E');
-    assert(renewal_cancel_path_cursor == renewal_cancel_sparse_path_directions.len(), 'E');
     assert(note_membership_path_cursor == note_membership_path_values.len(), 'E');
     assert(note_membership_path_cursor == note_membership_path_directions.len(), 'E');
     assert(note_membership_suffix_cursor == note_membership_suffix_roots.len(), 'E');
@@ -864,7 +827,10 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         nullifier_sparse_leaf_domain,
         nullifier_sparse_node_domain,
     );
-    let new_renewal_root = running_renewal_root;
+    let new_renewal_root = read_next(data, ref index);
+    if renewal_child_nullifiers.len() == 0 {
+        assert(new_renewal_root == prior_renewal_root, 'E');
+    }
     let new_fee_root = state_transition_root(
         state_transition_root_domain, prior_fee_root, fee_root,
     );
@@ -902,6 +868,255 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     assert(index == data.len(), 'E');
 
     transcript_commitment
+}
+
+pub fn verify_renewal_statement(data: Span<felt252>) -> (felt252, felt252, felt252, felt252) {
+    let mut index: usize = 0;
+
+    let statement_type = read_next(data, ref index);
+    assert(statement_type == STATEMENT_TYPE_SETTLEMENT, 'E');
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    let transcript_commitment = read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    let prior_renewal_root = read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    let renewal_child_root_domain = read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
+    let nullifier_sparse_leaf_domain = read_next(data, ref index);
+    let nullifier_sparse_node_domain = read_next(data, ref index);
+
+    assert(transcript_commitment != 0, 'E');
+    assert(renewal_child_root_domain != 0, 'E');
+    assert(nullifier_sparse_leaf_domain != 0, 'E');
+    assert(nullifier_sparse_node_domain != 0, 'E');
+
+    let matched_order_commitments = read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    let matched_parent_order_commitments = read_vector(data, ref index);
+    let matched_parent_child_indexes = read_vector(data, ref index);
+    let matched_parent_secret_commitments = read_vector(data, ref index);
+    let matched_parent_cancel_authorities = read_vector(data, ref index);
+    let matched_parent_authorization_secrets = read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    let renewal_parent_order_commitments = read_vector(data, ref index);
+    let renewal_child_nullifiers = read_vector(data, ref index);
+    let renewal_child_sparse_key_lows = read_vector(data, ref index);
+    let renewal_child_sparse_key_highs = read_vector(data, ref index);
+    let renewal_child_sparse_path_counts = read_vector(data, ref index);
+    let renewal_child_sparse_path_values = read_vector(data, ref index);
+    let renewal_child_sparse_path_directions = read_vector(data, ref index);
+    let renewal_cancel_sparse_key_lows = read_vector(data, ref index);
+    let renewal_cancel_sparse_key_highs = read_vector(data, ref index);
+    let renewal_cancel_sparse_path_counts = read_vector(data, ref index);
+    let renewal_cancel_sparse_path_values = read_vector(data, ref index);
+    let renewal_cancel_sparse_path_directions = read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    read_vector(data, ref index);
+    let claimed_new_renewal_root = read_next(data, ref index);
+    assert(index == data.len(), 'E');
+
+    assert_all_lengths_match(
+        matched_order_commitments.len(),
+        array![
+            matched_parent_order_commitments.len().into(),
+            matched_parent_child_indexes.len().into(),
+            matched_parent_secret_commitments.len().into(),
+            matched_parent_cancel_authorities.len().into(),
+            matched_parent_authorization_secrets.len().into(),
+        ]
+            .span(),
+        'E',
+    );
+    assert(renewal_parent_order_commitments.len() == renewal_child_nullifiers.len(), 'E');
+    assert(renewal_child_sparse_key_lows.len() == renewal_child_nullifiers.len(), 'E');
+    assert(renewal_child_sparse_key_highs.len() == renewal_child_nullifiers.len(), 'E');
+    assert(renewal_child_sparse_path_counts.len() == renewal_child_nullifiers.len(), 'E');
+    assert(renewal_cancel_sparse_key_lows.len() == renewal_child_nullifiers.len(), 'E');
+    assert(renewal_cancel_sparse_key_highs.len() == renewal_child_nullifiers.len(), 'E');
+    assert(renewal_cancel_sparse_path_counts.len() == renewal_child_nullifiers.len(), 'E');
+    assert_unique(renewal_child_nullifiers.span(), 'E');
+
+    let mut renewal_cursor = 0;
+    let mut renewal_child_path_cursor = 0;
+    let mut renewal_cancel_path_cursor = 0;
+    let mut running_renewal_root = prior_renewal_root;
+    let mut order_index = 0;
+    while order_index < matched_order_commitments.len() {
+        let parent_order_commitment = *matched_parent_order_commitments.at(order_index);
+        let parent_child_index = *matched_parent_child_indexes.at(order_index);
+        let parent_secret_commitment = *matched_parent_secret_commitments.at(order_index);
+        let parent_cancel_authority = *matched_parent_cancel_authorities.at(order_index);
+        let parent_authorization_secret = *matched_parent_authorization_secrets.at(order_index);
+        assert_parent_link(
+            parent_order_commitment,
+            parent_child_index,
+            parent_secret_commitment,
+            parent_cancel_authority,
+            parent_authorization_secret,
+        );
+        if parent_order_commitment != 0 {
+            assert(renewal_cursor < renewal_child_nullifiers.len(), 'E');
+            assert(
+                *renewal_parent_order_commitments.at(renewal_cursor) == parent_order_commitment,
+                'E',
+            );
+            assert(
+                *renewal_child_nullifiers
+                    .at(
+                        renewal_cursor,
+                    ) == renewal_child_nullifier(
+                        parent_order_commitment, parent_child_index, parent_authorization_secret,
+                    ),
+                'E',
+            );
+            let renewal_cancel_marker = renewal_parent_cancel_marker(
+                parent_secret_commitment, parent_cancel_authority,
+            );
+            running_renewal_root =
+                assert_renewal_entry_absent(
+                    running_renewal_root,
+                    renewal_cancel_marker,
+                    *renewal_cancel_sparse_key_lows.at(renewal_cursor),
+                    *renewal_cancel_sparse_key_highs.at(renewal_cursor),
+                    *renewal_cancel_sparse_path_counts.at(renewal_cursor),
+                    ref renewal_cancel_path_cursor,
+                    renewal_cancel_sparse_path_values.span(),
+                    renewal_cancel_sparse_path_directions.span(),
+                    nullifier_sparse_node_domain,
+                );
+            running_renewal_root =
+                assert_renewal_entry_insert(
+                    running_renewal_root,
+                    *renewal_child_nullifiers.at(renewal_cursor),
+                    *renewal_child_sparse_key_lows.at(renewal_cursor),
+                    *renewal_child_sparse_key_highs.at(renewal_cursor),
+                    *renewal_child_sparse_path_counts.at(renewal_cursor),
+                    ref renewal_child_path_cursor,
+                    renewal_child_sparse_path_values.span(),
+                    renewal_child_sparse_path_directions.span(),
+                    nullifier_sparse_leaf_domain,
+                    nullifier_sparse_node_domain,
+                );
+            renewal_cursor += 1;
+        }
+        order_index += 1;
+    }
+    assert(renewal_cursor == renewal_child_nullifiers.len(), 'E');
+    assert(renewal_child_path_cursor == renewal_child_sparse_path_values.len(), 'E');
+    assert(renewal_child_path_cursor == renewal_child_sparse_path_directions.len(), 'E');
+    assert(renewal_cancel_path_cursor == renewal_cancel_sparse_path_values.len(), 'E');
+    assert(renewal_cancel_path_cursor == renewal_cancel_sparse_path_directions.len(), 'E');
+
+    let renewal_child_root = single_field_root(
+        renewal_child_root_domain, renewal_child_nullifiers.span(),
+    );
+    if renewal_child_nullifiers.len() == 0 {
+        assert(claimed_new_renewal_root == prior_renewal_root, 'E');
+    } else {
+        assert(running_renewal_root == claimed_new_renewal_root, 'E');
+    }
+    (transcript_commitment, prior_renewal_root, renewal_child_root, claimed_new_renewal_root)
 }
 
 pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, felt252) {
@@ -3581,7 +3796,6 @@ fn assert_sparse_nullifier_updates(
                     path_cursor,
                     path_values,
                     path_directions,
-                    NULLIFIER_SPARSE_TREE_DEPTH,
                     sparse_leaf_domain,
                     sparse_node_domain,
                 );
@@ -3603,7 +3817,6 @@ fn assert_sparse_entry_insert(
     ref path_cursor: usize,
     path_values: Span<felt252>,
     path_directions: Span<felt252>,
-    tree_depth: usize,
     sparse_leaf_domain: felt252,
     sparse_node_domain: felt252,
 ) -> felt252 {
@@ -3619,7 +3832,7 @@ fn assert_sparse_entry_insert(
         assert(path_count == 0, 'E');
         poseidon_hash2(sparse_leaf_domain, entry)
     } else {
-        assert(path_count == tree_depth, 'E');
+        assert(path_count == NULLIFIER_SPARSE_TREE_DEPTH, 'E');
         sparse_insert_nullifier(
             prior_root,
             entry,
@@ -3628,7 +3841,6 @@ fn assert_sparse_entry_insert(
             path_cursor,
             path_values,
             path_directions,
-            tree_depth,
             sparse_leaf_domain,
             sparse_node_domain,
         )
@@ -3646,7 +3858,6 @@ fn assert_sparse_entry_absent(
     ref path_cursor: usize,
     path_values: Span<felt252>,
     path_directions: Span<felt252>,
-    tree_depth: usize,
     sparse_node_domain: felt252,
 ) -> felt252 {
     assert(entry != 0, 'E');
@@ -3661,12 +3872,12 @@ fn assert_sparse_entry_absent(
         assert(path_count == 0, 'E');
         return prior_root;
     }
-    assert(path_count == tree_depth, 'E');
+    assert(path_count == NULLIFIER_SPARSE_TREE_DEPTH, 'E');
     let mut reconstructed_low: felt252 = 0;
     let mut bit_weight: felt252 = 1;
     let mut empty_root = 0;
     let mut level = 0;
-    while level < tree_depth {
+    while level < NULLIFIER_SPARSE_TREE_DEPTH {
         let sibling = *path_values.at(path_cursor + level);
         let bit = *path_directions.at(path_cursor + level);
         assert(bit == 0 || bit == 1, 'E');
@@ -3679,35 +3890,117 @@ fn assert_sparse_entry_absent(
         }
         level += 1;
     }
-    let expected_low = if tree_depth == NULLIFIER_SPARSE_TREE_DEPTH {
-        (key_low % NULLIFIER_KEY_LOW_MODULUS).into()
-    } else {
-        key_low.into()
-    };
-    assert(reconstructed_low == expected_low, 'E');
+    assert(reconstructed_low == (key_low % NULLIFIER_KEY_LOW_MODULUS).into(), 'E');
     assert(empty_root == prior_root, 'E');
     path_cursor += path_count;
     prior_root
 }
 
-fn sparse_insert_nullifier(
+fn assert_renewal_entry_insert(
     prior_root: felt252,
-    nullifier: felt252,
+    entry: felt252,
+    key_low_felt: felt252,
+    key_high_felt: felt252,
+    path_count_felt: felt252,
+    ref path_cursor: usize,
+    path_values: Span<felt252>,
+    path_directions: Span<felt252>,
+    sparse_leaf_domain: felt252,
+    sparse_node_domain: felt252,
+) -> felt252 {
+    assert(entry != 0, 'E');
+    let key_low: u128 = key_low_felt.try_into().expect('E');
+    let key_high: u128 = key_high_felt.try_into().expect('E');
+    assert(key_high < NULLIFIER_KEY_HIGH_BOUND, 'E');
+    assert(entry == key_low.into() + key_high.into() * TWO_POW_128, 'E');
+    let path_count: usize = path_count_felt.try_into().expect('E');
+    assert(path_cursor + path_count <= path_values.len(), 'E');
+    assert(path_cursor + path_count <= path_directions.len(), 'E');
+    let new_root = if prior_root == 0 {
+        assert(path_count == 0, 'E');
+        poseidon_hash2(sparse_leaf_domain, entry)
+    } else {
+        assert(path_count == RENEWAL_SPARSE_TREE_DEPTH, 'E');
+        sparse_insert_renewal(
+            prior_root,
+            entry,
+            key_low,
+            key_high,
+            path_cursor,
+            path_values,
+            path_directions,
+            sparse_leaf_domain,
+            sparse_node_domain,
+        )
+    };
+    path_cursor += path_count;
+    new_root
+}
+
+fn assert_renewal_entry_absent(
+    prior_root: felt252,
+    entry: felt252,
+    key_low_felt: felt252,
+    key_high_felt: felt252,
+    path_count_felt: felt252,
+    ref path_cursor: usize,
+    path_values: Span<felt252>,
+    path_directions: Span<felt252>,
+    sparse_node_domain: felt252,
+) -> felt252 {
+    assert(entry != 0, 'E');
+    let key_low: u128 = key_low_felt.try_into().expect('E');
+    let key_high: u128 = key_high_felt.try_into().expect('E');
+    assert(key_high < NULLIFIER_KEY_HIGH_BOUND, 'E');
+    assert(entry == key_low.into() + key_high.into() * TWO_POW_128, 'E');
+    let path_count: usize = path_count_felt.try_into().expect('E');
+    assert(path_cursor + path_count <= path_values.len(), 'E');
+    assert(path_cursor + path_count <= path_directions.len(), 'E');
+    if prior_root == 0 {
+        assert(path_count == 0, 'E');
+        return prior_root;
+    }
+    assert(path_count == RENEWAL_SPARSE_TREE_DEPTH, 'E');
+    let mut reconstructed_low: felt252 = 0;
+    let mut bit_weight: felt252 = 1;
+    let mut empty_root = 0;
+    let mut level = 0;
+    while level < RENEWAL_SPARSE_TREE_DEPTH {
+        let sibling = *path_values.at(path_cursor + level);
+        let bit = *path_directions.at(path_cursor + level);
+        assert(bit == 0 || bit == 1, 'E');
+        reconstructed_low = reconstructed_low + bit * bit_weight;
+        bit_weight = bit_weight * 2;
+        if bit == 0 {
+            empty_root = sparse_nullifier_node(sparse_node_domain, empty_root, sibling);
+        } else {
+            empty_root = sparse_nullifier_node(sparse_node_domain, sibling, empty_root);
+        }
+        level += 1;
+    }
+    assert(reconstructed_low == key_low.into(), 'E');
+    assert(empty_root == prior_root, 'E');
+    path_cursor += path_count;
+    prior_root
+}
+
+fn sparse_insert_renewal(
+    prior_root: felt252,
+    entry: felt252,
     key_low: u128,
     key_high: u128,
     path_cursor: usize,
     path_values: Span<felt252>,
     path_directions: Span<felt252>,
-    tree_depth: usize,
     sparse_leaf_domain: felt252,
     sparse_node_domain: felt252,
 ) -> felt252 {
     let mut reconstructed_low: felt252 = 0;
     let mut bit_weight: felt252 = 1;
     let mut empty_root = 0;
-    let mut inserted_root = poseidon_hash2(sparse_leaf_domain, nullifier);
+    let mut inserted_root = poseidon_hash2(sparse_leaf_domain, entry);
     let mut level = 0;
-    while level < tree_depth {
+    while level < RENEWAL_SPARSE_TREE_DEPTH {
         let sibling = *path_values.at(path_cursor + level);
         let bit = *path_directions.at(path_cursor + level);
         assert(bit == 0 || bit == 1, 'E');
@@ -3722,12 +4015,44 @@ fn sparse_insert_nullifier(
         }
         level += 1;
     }
-    let expected_low = if tree_depth == NULLIFIER_SPARSE_TREE_DEPTH {
-        (key_low % NULLIFIER_KEY_LOW_MODULUS).into()
-    } else {
-        key_low.into()
-    };
-    assert(reconstructed_low == expected_low, 'E');
+    assert(reconstructed_low == key_low.into(), 'E');
+    assert(empty_root == prior_root, 'E');
+    assert(entry == key_low.into() + key_high.into() * TWO_POW_128, 'E');
+    inserted_root
+}
+
+fn sparse_insert_nullifier(
+    prior_root: felt252,
+    nullifier: felt252,
+    key_low: u128,
+    key_high: u128,
+    path_cursor: usize,
+    path_values: Span<felt252>,
+    path_directions: Span<felt252>,
+    sparse_leaf_domain: felt252,
+    sparse_node_domain: felt252,
+) -> felt252 {
+    let mut reconstructed_low: felt252 = 0;
+    let mut bit_weight: felt252 = 1;
+    let mut empty_root = 0;
+    let mut inserted_root = poseidon_hash2(sparse_leaf_domain, nullifier);
+    let mut level = 0;
+    while level < NULLIFIER_SPARSE_TREE_DEPTH {
+        let sibling = *path_values.at(path_cursor + level);
+        let bit = *path_directions.at(path_cursor + level);
+        assert(bit == 0 || bit == 1, 'E');
+        reconstructed_low = reconstructed_low + bit * bit_weight;
+        bit_weight = bit_weight * 2;
+        if bit == 0 {
+            empty_root = sparse_nullifier_node(sparse_node_domain, empty_root, sibling);
+            inserted_root = sparse_nullifier_node(sparse_node_domain, inserted_root, sibling);
+        } else {
+            empty_root = sparse_nullifier_node(sparse_node_domain, sibling, empty_root);
+            inserted_root = sparse_nullifier_node(sparse_node_domain, sibling, inserted_root);
+        }
+        level += 1;
+    }
+    assert(reconstructed_low == (key_low % NULLIFIER_KEY_LOW_MODULUS).into(), 'E');
     assert(empty_root == prior_root, 'E');
     assert(nullifier == key_low.into() + key_high.into() * TWO_POW_128, 'E');
     inserted_root
@@ -4291,7 +4616,7 @@ mod tests {
     use super::{
         EMPTY_OUTPUT_NOTE_ROOT_DOMAIN, OUTPUT_RECOVERY_BUNDLE_DOMAIN, STATEMENT_TYPE_SETTLEMENT,
         poseidon_hash2, protocol_fee_root, public_settlement_commitment, single_field_root,
-        state_transition_root, verify_settlement_statement,
+        state_transition_root, verify_renewal_statement, verify_settlement_statement,
     };
 
     #[test]
@@ -4342,6 +4667,52 @@ mod tests {
         verify_settlement_statement(payload.span());
     }
 
+    #[test]
+    fn renewal_statement_accepts_root_only_noop_payload() {
+        let output_bundle_ref = poseidon_hash2(OUTPUT_RECOVERY_BUNDLE_DOMAIN, 0);
+        let output_note_root = poseidon_hash2(EMPTY_OUTPUT_NOTE_ROOT_DOMAIN, output_bundle_ref);
+        let consumed_note_root = single_field_root(0x3001, array![].span());
+        let consumed_nullifier_root = single_field_root(0x3002, array![].span());
+        let renewal_child_root = single_field_root(0x3003, array![].span());
+        let fee_root = protocol_fee_root(0x3005, 0x2006, 0x2007, 0x4010, 0, 0);
+        let new_note_root = state_transition_root(0x3006, 0, output_note_root);
+        let new_fee_root = state_transition_root(0x3006, 0, fee_root);
+        let transcript_commitment = public_settlement_commitment(
+            0x1006,
+            0x2001,
+            0x2002,
+            0x2003,
+            0x2004,
+            0x2005,
+            0,
+            1,
+            4,
+            0,
+            0x4010,
+            output_bundle_ref,
+            0,
+            0,
+            0,
+            0,
+            consumed_note_root,
+            consumed_nullifier_root,
+            renewal_child_root,
+            output_note_root,
+            fee_root,
+            new_note_root,
+            0,
+            0,
+            new_fee_root,
+        );
+        let payload = empty_settlement_test_payload(transcript_commitment);
+        let (transcript, prior_renewal_root, child_root, new_renewal_root) =
+            verify_renewal_statement(payload.span());
+        assert(transcript == transcript_commitment, 'E');
+        assert(prior_renewal_root == 0, 'E');
+        assert(child_root == renewal_child_root, 'E');
+        assert(new_renewal_root == 0, 'E');
+    }
+
     fn empty_settlement_test_payload(transcript_commitment: felt252) -> Array<felt252> {
         let mut payload = array![
             STATEMENT_TYPE_SETTLEMENT, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 0x2001,
@@ -4349,7 +4720,7 @@ mod tests {
             0, 0x4010, 0, poseidon_hash2(OUTPUT_RECOVERY_BUNDLE_DOMAIN, 0), 0, 0, 0, 0, 0x3001,
             0x3002, 0x3003, 0x3004, 0x3005, 0x3006, 0x3007, 0x3008,
         ];
-        append_empty_test_vectors(ref payload, 99);
+        append_empty_test_vectors(ref payload, 100);
         payload
     }
 

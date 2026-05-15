@@ -8,6 +8,13 @@ pub trait ISettlementStatementProgram<TContractState> {
 }
 
 #[starknet::interface]
+pub trait IRenewalStatementProgram<TContractState> {
+    fn verify_renewal_statement(
+        ref self: TContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> (felt252, felt252, felt252, felt252);
+}
+
+#[starknet::interface]
 pub trait IAuctionProofProgram<TContractState> {
     fn compile_settlement_proof(
         ref self: TContractState,
@@ -52,6 +59,23 @@ pub mod SettlementStatementProgram {
 }
 
 #[starknet::contract]
+pub mod RenewalStatementProgram {
+    use zylith_settlement_statement::verify_renewal_statement as verify_renewal_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl RenewalStatementProgramImpl of super::IRenewalStatementProgram<ContractState> {
+        fn verify_renewal_statement(
+            ref self: ContractState, serialized_settlement_witness: Span<felt252>,
+        ) -> (felt252, felt252, felt252, felt252) {
+            verify_renewal_statement_impl(serialized_settlement_witness)
+        }
+    }
+}
+
+#[starknet::contract]
 pub mod AuctionProofProgram {
     use core::array::{Array, ArrayTrait, SpanTrait};
     use core::num::traits::Zero;
@@ -60,9 +84,13 @@ pub mod AuctionProofProgram {
     use starknet::syscalls::send_message_to_l1_syscall;
     use starknet::{ContractAddress, SyscallResultTrait, get_contract_address};
     use zylith_settlement_statement::{verify_admission_statement, verify_auction_result_statement};
-    use super::{ISettlementStatementProgramDispatcher, ISettlementStatementProgramDispatcherTrait};
+    use super::{
+        IRenewalStatementProgramDispatcher, IRenewalStatementProgramDispatcherTrait,
+        ISettlementStatementProgramDispatcher, ISettlementStatementProgramDispatcherTrait,
+    };
 
     const SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_settle_v1';
+    const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
     const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
     const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
     const SETTLEMENT_PROOF_MESSAGE_TO: felt252 = 0;
@@ -71,12 +99,19 @@ pub mod AuctionProofProgram {
     #[storage]
     struct Storage {
         settlement_statement_program: ContractAddress,
+        renewal_statement_program: ContractAddress,
     }
 
     #[constructor]
-    fn constructor(ref self: ContractState, settlement_statement_program: ContractAddress) {
+    fn constructor(
+        ref self: ContractState,
+        settlement_statement_program: ContractAddress,
+        renewal_statement_program: ContractAddress,
+    ) {
         assert(!settlement_statement_program.is_zero(), 'BAD_STMT_PROGRAM');
+        assert(!renewal_statement_program.is_zero(), 'BAD_RENEW_PROGRAM');
         self.settlement_statement_program.write(settlement_statement_program);
+        self.renewal_statement_program.write(renewal_statement_program);
     }
 
     #[abi(embed_v0)]
@@ -92,7 +127,27 @@ pub mod AuctionProofProgram {
             };
             let transcript_commitment = settlement_statement_program
                 .verify_settlement_statement(serialized_settlement_witness);
-            emit_settlement_proof_message(auction_verifier, transcript_commitment)
+            let renewal_statement_program = IRenewalStatementProgramDispatcher {
+                contract_address: self.renewal_statement_program.read(),
+            };
+            let (
+                renewal_transcript_commitment,
+                prior_renewal_root,
+                renewal_child_root,
+                new_renewal_root,
+            ) = renewal_statement_program.verify_renewal_statement(serialized_settlement_witness);
+            assert(renewal_transcript_commitment == transcript_commitment, 'RENEWAL_BINDING');
+            let settlement_message = emit_settlement_proof_message(
+                auction_verifier, transcript_commitment,
+            );
+            let renewal_message = emit_renewal_proof_message(
+                auction_verifier,
+                transcript_commitment,
+                prior_renewal_root,
+                renewal_child_root,
+                new_renewal_root,
+            );
+            poseidon_hash2(settlement_message, renewal_message)
         }
 
         fn compile_admission_proof(
@@ -141,6 +196,9 @@ pub mod AuctionProofProgram {
             let settlement_statement_program = ISettlementStatementProgramDispatcher {
                 contract_address: self.settlement_statement_program.read(),
             };
+            let renewal_statement_program = IRenewalStatementProgramDispatcher {
+                contract_address: self.renewal_statement_program.read(),
+            };
             let mut aggregate = poseidon_hash2(AGGREGATE_RETURN_DOMAIN, witness_count_felt);
             let mut cursor: usize = 0;
             loop {
@@ -150,10 +208,25 @@ pub mod AuctionProofProgram {
                 let witness = read_vector(serialized_settlement_witnesses, ref index);
                 let transcript_commitment = settlement_statement_program
                     .verify_settlement_statement(witness.span());
-                let proof_message = emit_settlement_proof_message(
+                let (
+                    renewal_transcript_commitment,
+                    prior_renewal_root,
+                    renewal_child_root,
+                    new_renewal_root,
+                ) = renewal_statement_program.verify_renewal_statement(witness.span());
+                assert(renewal_transcript_commitment == transcript_commitment, 'RENEWAL_BINDING');
+                let settlement_message = emit_settlement_proof_message(
                     auction_verifier, transcript_commitment,
                 );
-                aggregate = poseidon_hash2(aggregate, proof_message);
+                let renewal_message = emit_renewal_proof_message(
+                    auction_verifier,
+                    transcript_commitment,
+                    prior_renewal_root,
+                    renewal_child_root,
+                    new_renewal_root,
+                );
+                aggregate = poseidon_hash2(aggregate, settlement_message);
+                aggregate = poseidon_hash2(aggregate, renewal_message);
                 cursor += 1;
             }
             assert(index == serialized_settlement_witnesses.len(), 'TRAILING_AGG_INPUT');
@@ -184,6 +257,26 @@ pub mod AuctionProofProgram {
         send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
             .unwrap_syscall();
         settlement_proof_message_hash_from_statement(get_contract_address(), statement_message_hash)
+    }
+
+    fn emit_renewal_proof_message(
+        auction_verifier: ContractAddress,
+        transcript_commitment: felt252,
+        prior_renewal_root: felt252,
+        renewal_child_root: felt252,
+        new_renewal_root: felt252,
+    ) -> felt252 {
+        let statement_message_hash = native_renewal_message_hash(
+            auction_verifier,
+            transcript_commitment,
+            prior_renewal_root,
+            renewal_child_root,
+            new_renewal_root,
+        );
+        let payload = renewal_proof_payload(statement_message_hash);
+        send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
+            .unwrap_syscall();
+        renewal_proof_message_hash_from_statement(get_contract_address(), statement_message_hash)
     }
 
     fn emit_admission_proof_message(
@@ -249,6 +342,10 @@ pub mod AuctionProofProgram {
         array![SETTLEMENT_MESSAGE_DOMAIN, statement_message_hash]
     }
 
+    fn renewal_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![RENEWAL_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
     fn admission_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![ADMISSION_MESSAGE_DOMAIN, statement_message_hash]
     }
@@ -262,6 +359,15 @@ pub mod AuctionProofProgram {
     ) -> felt252 {
         let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
         let payload = settlement_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn renewal_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = renewal_proof_payload(statement_message_hash);
         payload.serialize(ref l1_message_data);
         poseidon_hash_span(l1_message_data.span())
     }
@@ -297,6 +403,21 @@ pub mod AuctionProofProgram {
             auction_verifier_address.into(),
         );
         state = poseidon_hash2(state, transcript_commitment);
+        state
+    }
+
+    fn native_renewal_message_hash(
+        auction_verifier_address: ContractAddress,
+        transcript_commitment: felt252,
+        prior_renewal_root: felt252,
+        renewal_child_root: felt252,
+        new_renewal_root: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(RENEWAL_MESSAGE_DOMAIN, auction_verifier_address.into());
+        state = poseidon_hash2(state, transcript_commitment);
+        state = poseidon_hash2(state, prior_renewal_root);
+        state = poseidon_hash2(state, renewal_child_root);
+        state = poseidon_hash2(state, new_renewal_root);
         state
     }
 
