@@ -32,6 +32,7 @@ const OUTPUT_RECOVERY_BUNDLE_DOMAIN: felt252 = 0x7a796c6974685f6f75745f62756e646
 const OUTPUT_RECOVERY_RECORD_DOMAIN: felt252 = 0x7a796c6974685f6f75745f7265635f7631;
 const DEPOSIT_NOTE_ROOT_DOMAIN: felt252 = 0x7a796c6974685f6465706f7369745f6e6f74655f726f6f745f7631;
 const NULLIFIER_SPARSE_TREE_DEPTH: usize = 64;
+const RENEWAL_SPARSE_TREE_DEPTH: usize = 128;
 const NULLIFIER_KEY_HIGH_BOUND: u128 = 0x10000000000000000000000000000000;
 const NULLIFIER_KEY_LOW_MODULUS: u128 = 0x10000000000000000;
 const TWO_POW_128: felt252 = 0x100000000000000000000000000000000;
@@ -484,6 +485,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
                     ref renewal_cancel_path_cursor,
                     renewal_cancel_sparse_path_values.span(),
                     renewal_cancel_sparse_path_directions.span(),
+                    RENEWAL_SPARSE_TREE_DEPTH,
                     nullifier_sparse_node_domain,
                 );
             running_renewal_root =
@@ -496,6 +498,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
                     ref renewal_child_path_cursor,
                     renewal_child_sparse_path_values.span(),
                     renewal_child_sparse_path_directions.span(),
+                    RENEWAL_SPARSE_TREE_DEPTH,
                     nullifier_sparse_leaf_domain,
                     nullifier_sparse_node_domain,
                 );
@@ -691,7 +694,9 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         assert(output_note_spend_authority == recipient_spend_authority, 'E');
         assert(output_note_withdraw_authority == recipient_withdraw_authority, 'E');
 
-        let order_fee_bps = fee_bps_for_order_type(order_type, taker_fee_bps_u128, maker_fee_bps_u128);
+        let order_fee_bps = fee_bps_for_order_type(
+            order_type, taker_fee_bps_u128, maker_fee_bps_u128,
+        );
         let expected_residual_amount = if side == ORDER_SIDE_BUY {
             assert(limit_price >= clearing_price_u128, 'E');
             assert(output_note_asset_id == base_asset_id, 'E');
@@ -3576,6 +3581,7 @@ fn assert_sparse_nullifier_updates(
                     path_cursor,
                     path_values,
                     path_directions,
+                    NULLIFIER_SPARSE_TREE_DEPTH,
                     sparse_leaf_domain,
                     sparse_node_domain,
                 );
@@ -3597,6 +3603,7 @@ fn assert_sparse_entry_insert(
     ref path_cursor: usize,
     path_values: Span<felt252>,
     path_directions: Span<felt252>,
+    tree_depth: usize,
     sparse_leaf_domain: felt252,
     sparse_node_domain: felt252,
 ) -> felt252 {
@@ -3612,7 +3619,7 @@ fn assert_sparse_entry_insert(
         assert(path_count == 0, 'E');
         poseidon_hash2(sparse_leaf_domain, entry)
     } else {
-        assert(path_count == NULLIFIER_SPARSE_TREE_DEPTH, 'E');
+        assert(path_count == tree_depth, 'E');
         sparse_insert_nullifier(
             prior_root,
             entry,
@@ -3621,6 +3628,7 @@ fn assert_sparse_entry_insert(
             path_cursor,
             path_values,
             path_directions,
+            tree_depth,
             sparse_leaf_domain,
             sparse_node_domain,
         )
@@ -3638,6 +3646,7 @@ fn assert_sparse_entry_absent(
     ref path_cursor: usize,
     path_values: Span<felt252>,
     path_directions: Span<felt252>,
+    tree_depth: usize,
     sparse_node_domain: felt252,
 ) -> felt252 {
     assert(entry != 0, 'E');
@@ -3652,12 +3661,12 @@ fn assert_sparse_entry_absent(
         assert(path_count == 0, 'E');
         return prior_root;
     }
-    assert(path_count == NULLIFIER_SPARSE_TREE_DEPTH, 'E');
+    assert(path_count == tree_depth, 'E');
     let mut reconstructed_low: felt252 = 0;
     let mut bit_weight: felt252 = 1;
     let mut empty_root = 0;
     let mut level = 0;
-    while level < NULLIFIER_SPARSE_TREE_DEPTH {
+    while level < tree_depth {
         let sibling = *path_values.at(path_cursor + level);
         let bit = *path_directions.at(path_cursor + level);
         assert(bit == 0 || bit == 1, 'E');
@@ -3670,7 +3679,12 @@ fn assert_sparse_entry_absent(
         }
         level += 1;
     }
-    assert(reconstructed_low == (key_low % NULLIFIER_KEY_LOW_MODULUS).into(), 'E');
+    let expected_low = if tree_depth == NULLIFIER_SPARSE_TREE_DEPTH {
+        (key_low % NULLIFIER_KEY_LOW_MODULUS).into()
+    } else {
+        key_low.into()
+    };
+    assert(reconstructed_low == expected_low, 'E');
     assert(empty_root == prior_root, 'E');
     path_cursor += path_count;
     prior_root
@@ -3684,6 +3698,7 @@ fn sparse_insert_nullifier(
     path_cursor: usize,
     path_values: Span<felt252>,
     path_directions: Span<felt252>,
+    tree_depth: usize,
     sparse_leaf_domain: felt252,
     sparse_node_domain: felt252,
 ) -> felt252 {
@@ -3692,7 +3707,7 @@ fn sparse_insert_nullifier(
     let mut empty_root = 0;
     let mut inserted_root = poseidon_hash2(sparse_leaf_domain, nullifier);
     let mut level = 0;
-    while level < NULLIFIER_SPARSE_TREE_DEPTH {
+    while level < tree_depth {
         let sibling = *path_values.at(path_cursor + level);
         let bit = *path_directions.at(path_cursor + level);
         assert(bit == 0 || bit == 1, 'E');
@@ -3707,7 +3722,12 @@ fn sparse_insert_nullifier(
         }
         level += 1;
     }
-    assert(reconstructed_low == (key_low % NULLIFIER_KEY_LOW_MODULUS).into(), 'E');
+    let expected_low = if tree_depth == NULLIFIER_SPARSE_TREE_DEPTH {
+        (key_low % NULLIFIER_KEY_LOW_MODULUS).into()
+    } else {
+        key_low.into()
+    };
+    assert(reconstructed_low == expected_low, 'E');
     assert(empty_root == prior_root, 'E');
     assert(nullifier == key_low.into() + key_high.into() * TWO_POW_128, 'E');
     inserted_root
