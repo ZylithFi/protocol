@@ -20,7 +20,9 @@ fn poseidon_hash2(x: felt252, y: felt252) -> felt252 {
 
 fn deploy_auction_proof_program(statement_program: ContractAddress) -> ContractAddress {
     let class = declare("AuctionProofProgram").unwrap().contract_class();
-    let calldata = array![statement_program.into()];
+    let calldata = array![
+        statement_program.into(), statement_program.into(), statement_program.into(),
+    ];
     let (address, _) = class.deploy(@calldata).unwrap_syscall();
     address
 }
@@ -47,9 +49,8 @@ fn settlement_message_hash_matches_native_payload_binding() {
     let auction_verifier = as_address(0x456);
     let transcript_commitment = 0x789;
 
-    let actual = proof_program.settlement_proof_message_hash(
-        auction_verifier, transcript_commitment,
-    );
+    let actual = proof_program
+        .settlement_proof_message_hash(auction_verifier, transcript_commitment);
     let expected = expected_settlement_proof_message_hash(
         proof_program_address, auction_verifier, transcript_commitment,
     );

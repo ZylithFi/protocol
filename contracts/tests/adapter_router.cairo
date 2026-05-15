@@ -36,6 +36,8 @@ const VIRTUAL_SNOS0: felt252 = 'VIRTUAL_SNOS0';
 const TEST_PROOF_PROGRAM_HASH: felt252 = 0x987654321;
 const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
 const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
+const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
+const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
 const RENEWAL_PARENT_CANCEL_DOMAIN: felt252 =
     0x26f84b60309c08d4030876815edb467f89f78e5a5f62823af4521f1be502ca3;
 const ROOT_ONLY_STATE_TRANSITION_DOMAIN: felt252 =
@@ -479,6 +481,34 @@ fn native_settlement_message_hash(
     state
 }
 
+fn native_nullifier_message_hash(
+    auction_verifier_address: ContractAddress,
+    transcript_commitment: felt252,
+    prior_nullifier_root: felt252,
+    consumed_nullifier_root: felt252,
+    new_nullifier_root: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(NULLIFIER_MESSAGE_DOMAIN, auction_verifier_address.into());
+    state = poseidon_hash2(state, transcript_commitment);
+    state = poseidon_hash2(state, prior_nullifier_root);
+    state = poseidon_hash2(state, consumed_nullifier_root);
+    poseidon_hash2(state, new_nullifier_root)
+}
+
+fn native_renewal_message_hash(
+    auction_verifier_address: ContractAddress,
+    transcript_commitment: felt252,
+    prior_renewal_root: felt252,
+    renewal_child_root: felt252,
+    new_renewal_root: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(RENEWAL_MESSAGE_DOMAIN, auction_verifier_address.into());
+    state = poseidon_hash2(state, transcript_commitment);
+    state = poseidon_hash2(state, prior_renewal_root);
+    state = poseidon_hash2(state, renewal_child_root);
+    poseidon_hash2(state, new_renewal_root)
+}
+
 fn native_auction_result_message_hash(
     auction_verifier_address: ContractAddress,
     batch_id: felt252,
@@ -525,6 +555,26 @@ fn auction_result_proof_message_hash(
     poseidon_hash_span(l1_message_data.span())
 }
 
+fn nullifier_proof_message_hash(
+    proof_program_address: ContractAddress, statement_message_hash: felt252,
+) -> felt252 {
+    let mut l1_message_data = array![proof_program_address.into(), 0];
+    l1_message_data.append(2);
+    l1_message_data.append(NULLIFIER_MESSAGE_DOMAIN);
+    l1_message_data.append(statement_message_hash);
+    poseidon_hash_span(l1_message_data.span())
+}
+
+fn renewal_proof_message_hash(
+    proof_program_address: ContractAddress, statement_message_hash: felt252,
+) -> felt252 {
+    let mut l1_message_data = array![proof_program_address.into(), 0];
+    l1_message_data.append(2);
+    l1_message_data.append(RENEWAL_MESSAGE_DOMAIN);
+    l1_message_data.append(statement_message_hash);
+    poseidon_hash_span(l1_message_data.span())
+}
+
 fn record_split_auction_proofs(
     auction_verifier: ContractAddress,
     verifier: IAuctionVerifierDispatcher,
@@ -559,6 +609,64 @@ fn record_split_auction_proofs(
     verifier
         .record_auction_result_with_proof_facts(
             batch_id, order_commitment_root, admission_root, transcript_commitment,
+        );
+    stop_cheat_caller_address(auction_verifier);
+}
+
+fn record_root_transition_proofs(
+    auction_verifier: ContractAddress,
+    verifier: IAuctionVerifierDispatcher,
+    settlement_account: ContractAddress,
+    batch_id: felt252,
+    transcript_commitment: felt252,
+    prior_nullifier_root: felt252,
+    consumed_nullifier_root: felt252,
+    new_nullifier_root: felt252,
+    prior_renewal_root: felt252,
+    renewal_child_root: felt252,
+    new_renewal_root: felt252,
+) {
+    let nullifier_statement = native_nullifier_message_hash(
+        auction_verifier,
+        transcript_commitment,
+        prior_nullifier_root,
+        consumed_nullifier_root,
+        new_nullifier_root,
+    );
+    let nullifier_proof_message = nullifier_proof_message_hash(
+        auction_verifier, nullifier_statement,
+    );
+    let nullifier_proof_facts = valid_proof_facts(99, nullifier_proof_message);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, nullifier_proof_facts.span(), CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    verifier
+        .record_nullifier_roots_with_proof_facts(
+            batch_id,
+            transcript_commitment,
+            prior_nullifier_root,
+            consumed_nullifier_root,
+            new_nullifier_root,
+        );
+
+    let renewal_statement = native_renewal_message_hash(
+        auction_verifier,
+        transcript_commitment,
+        prior_renewal_root,
+        renewal_child_root,
+        new_renewal_root,
+    );
+    let renewal_proof_message = renewal_proof_message_hash(auction_verifier, renewal_statement);
+    let renewal_proof_facts = valid_proof_facts(99, renewal_proof_message);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, renewal_proof_facts.span(), CheatSpan::TargetCalls(1));
+    verifier
+        .record_renewal_roots_with_proof_facts(
+            batch_id,
+            transcript_commitment,
+            prior_renewal_root,
+            renewal_child_root,
+            new_renewal_root,
         );
     stop_cheat_caller_address(auction_verifier);
 }
@@ -1462,6 +1570,19 @@ fn auction_verifier_updates_sparse_renewal_root_during_settlement() {
         0x334,
         transcript_commitment,
     );
+    record_root_transition_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        transcript_commitment,
+        0,
+        empty_nullifier_root,
+        0,
+        0,
+        renewal_child_root,
+        new_renewal_root,
+    );
     let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
     let proof_facts = valid_proof_facts(99, proof_message_hash);
 
@@ -1671,6 +1792,24 @@ fn auction_verifier_accepts_native_proof_facts() {
         0x335,
         transcript_commitment,
     );
+    let empty_nullifiers = array![];
+    let empty_nullifier_root = single_field_root(
+        CONSUMED_NULLIFIER_ROOT_DOMAIN, empty_nullifiers.span(),
+    );
+    let empty_renewal_root = empty_renewal_child_root();
+    record_root_transition_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        transcript_commitment,
+        0,
+        empty_nullifier_root,
+        0,
+        0,
+        empty_renewal_root,
+        0,
+    );
     let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
     let proof_facts = valid_proof_facts(99, proof_message_hash);
 
@@ -1693,10 +1832,6 @@ fn auction_verifier_accepts_native_proof_facts() {
     let (current_note_root, current_nullifier_root, current_renewal_root, current_fee_root) =
         verifier
         .current_settlement_roots();
-    let empty_nullifiers = array![];
-    let empty_nullifier_root = single_field_root(
-        CONSUMED_NULLIFIER_ROOT_DOMAIN, empty_nullifiers.span(),
-    );
     assert(current_note_root == root_only_state_transition(0, 0), 'BAD_CURRENT_NOTE');
     let _ = empty_nullifier_root;
     assert(current_nullifier_root == 0, 'BAD_CURRENT_NULL');
@@ -1749,6 +1884,24 @@ fn auction_verifier_accepts_split_auction_result_before_settlement() {
         order_commitment_root,
         0x336,
         transcript_commitment,
+    );
+    let empty_nullifiers = array![];
+    let empty_nullifier_root = single_field_root(
+        CONSUMED_NULLIFIER_ROOT_DOMAIN, empty_nullifiers.span(),
+    );
+    let empty_renewal_root = empty_renewal_child_root();
+    record_root_transition_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        transcript_commitment,
+        0,
+        empty_nullifier_root,
+        0,
+        0,
+        empty_renewal_root,
+        0,
     );
 
     let proof_artifact_commitment = native_settlement_message_hash(
@@ -1960,7 +2113,39 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
     );
     let messages = array![
         verifier.settlement_proof_message_hash(transcript_1),
+        nullifier_proof_message_hash(
+            auction_verifier,
+            native_nullifier_message_hash(
+                auction_verifier, transcript_1, 0, empty_nullifier_root, first_new_nullifier_root,
+            ),
+        ),
+        renewal_proof_message_hash(
+            auction_verifier,
+            native_renewal_message_hash(
+                auction_verifier, transcript_1, 0, empty_renewal_root, first_new_renewal_root,
+            ),
+        ),
         verifier.settlement_proof_message_hash(transcript_2),
+        nullifier_proof_message_hash(
+            auction_verifier,
+            native_nullifier_message_hash(
+                auction_verifier,
+                transcript_2,
+                first_new_nullifier_root,
+                empty_nullifier_root,
+                first_new_nullifier_root,
+            ),
+        ),
+        renewal_proof_message_hash(
+            auction_verifier,
+            native_renewal_message_hash(
+                auction_verifier,
+                transcript_2,
+                first_new_renewal_root,
+                empty_renewal_root,
+                second_new_renewal_root,
+            ),
+        ),
     ];
     let proof_facts = valid_aggregate_proof_facts(99, messages.span());
     let mut aggregate_inputs = array![2];
@@ -2095,6 +2280,19 @@ fn auction_verifier_accepts_root_only_nullifier_transition() {
         order_commitment_root,
         0x339,
         transcript_commitment,
+    );
+    record_root_transition_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        transcript_commitment,
+        0,
+        consumed_nullifier_root,
+        sparse_new_nullifier_root,
+        0,
+        empty_renewal_root,
+        0,
     );
     let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
     let proof_facts = valid_proof_facts(99, proof_message_hash);
@@ -2411,6 +2609,19 @@ fn auction_verifier_withdraws_merkle_proven_settlement_output() {
         0x111,
         0x33a,
         transcript_commitment,
+    );
+    record_root_transition_proofs(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        transcript_commitment,
+        0,
+        empty_nullifier_root,
+        0,
+        0,
+        empty_renewal_root,
+        0,
     );
     let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
     let proof_facts = valid_proof_facts(99, proof_message_hash);

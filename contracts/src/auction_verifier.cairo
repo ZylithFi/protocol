@@ -64,6 +64,22 @@ pub trait IAuctionVerifier<TContractState> {
         admission_root: felt252,
         transcript_commitment: felt252,
     );
+    fn record_nullifier_roots_with_proof_facts(
+        ref self: TContractState,
+        batch_id: felt252,
+        transcript_commitment: felt252,
+        prior_nullifier_root: felt252,
+        consumed_nullifier_root: felt252,
+        new_nullifier_root: felt252,
+    );
+    fn record_renewal_roots_with_proof_facts(
+        ref self: TContractState,
+        batch_id: felt252,
+        transcript_commitment: felt252,
+        prior_renewal_root: felt252,
+        renewal_child_root: felt252,
+        new_renewal_root: felt252,
+    );
     fn submit_settlement_with_proof_facts(
         ref self: TContractState,
         batch_id: felt252,
@@ -236,6 +252,16 @@ pub mod AuctionVerifier {
         output_note_roots: Map<felt252, felt252>,
         verified_admission_roots: Map<felt252, felt252>,
         verified_auction_transcripts: Map<felt252, felt252>,
+        verified_nullifier_roots_active: Map<felt252, bool>,
+        verified_nullifier_transcripts: Map<felt252, felt252>,
+        verified_prior_nullifier_roots: Map<felt252, felt252>,
+        verified_consumed_nullifier_roots: Map<felt252, felt252>,
+        verified_new_nullifier_roots: Map<felt252, felt252>,
+        verified_renewal_roots_active: Map<felt252, bool>,
+        verified_renewal_transcripts: Map<felt252, felt252>,
+        verified_prior_renewal_roots: Map<felt252, felt252>,
+        verified_renewal_child_roots: Map<felt252, felt252>,
+        verified_new_renewal_roots: Map<felt252, felt252>,
     }
 
     #[constructor]
@@ -537,6 +563,78 @@ pub mod AuctionVerifier {
             self.verified_auction_transcripts.write(batch_id, transcript_commitment);
         }
 
+        fn record_nullifier_roots_with_proof_facts(
+            ref self: ContractState,
+            batch_id: felt252,
+            transcript_commitment: felt252,
+            prior_nullifier_root: felt252,
+            consumed_nullifier_root: felt252,
+            new_nullifier_root: felt252,
+        ) {
+            assert_authorized_settlement_account(@self);
+            assert_not_paused(@self);
+            assert(batch_id != 0, 'BAD_BATCH');
+            assert(transcript_commitment != 0, 'BAD_TRANSCRIPT');
+            assert(
+                self.verified_auction_transcripts.read(batch_id) == transcript_commitment,
+                'AUCTION_RESULT_REQUIRED',
+            );
+            let expected_statement_message = native_nullifier_message_hash(
+                get_contract_address(),
+                transcript_commitment,
+                prior_nullifier_root,
+                consumed_nullifier_root,
+                new_nullifier_root,
+            );
+            let expected_messages = array![
+                nullifier_proof_message_hash_from_statement(
+                    self.proof_program.read(), expected_statement_message,
+                ),
+            ];
+            assert_valid_proof_facts_messages(@self, expected_messages.span());
+            self.verified_nullifier_roots_active.write(batch_id, true);
+            self.verified_nullifier_transcripts.write(batch_id, transcript_commitment);
+            self.verified_prior_nullifier_roots.write(batch_id, prior_nullifier_root);
+            self.verified_consumed_nullifier_roots.write(batch_id, consumed_nullifier_root);
+            self.verified_new_nullifier_roots.write(batch_id, new_nullifier_root);
+        }
+
+        fn record_renewal_roots_with_proof_facts(
+            ref self: ContractState,
+            batch_id: felt252,
+            transcript_commitment: felt252,
+            prior_renewal_root: felt252,
+            renewal_child_root: felt252,
+            new_renewal_root: felt252,
+        ) {
+            assert_authorized_settlement_account(@self);
+            assert_not_paused(@self);
+            assert(batch_id != 0, 'BAD_BATCH');
+            assert(transcript_commitment != 0, 'BAD_TRANSCRIPT');
+            assert(
+                self.verified_auction_transcripts.read(batch_id) == transcript_commitment,
+                'AUCTION_RESULT_REQUIRED',
+            );
+            let expected_statement_message = native_renewal_message_hash(
+                get_contract_address(),
+                transcript_commitment,
+                prior_renewal_root,
+                renewal_child_root,
+                new_renewal_root,
+            );
+            let expected_messages = array![
+                renewal_proof_message_hash_from_statement(
+                    self.proof_program.read(), expected_statement_message,
+                ),
+            ];
+            assert_valid_proof_facts_messages(@self, expected_messages.span());
+            self.verified_renewal_roots_active.write(batch_id, true);
+            self.verified_renewal_transcripts.write(batch_id, transcript_commitment);
+            self.verified_prior_renewal_roots.write(batch_id, prior_renewal_root);
+            self.verified_renewal_child_roots.write(batch_id, renewal_child_root);
+            self.verified_new_renewal_roots.write(batch_id, new_renewal_root);
+        }
+
         fn submit_settlement_with_proof_facts(
             ref self: ContractState,
             batch_id: felt252,
@@ -572,29 +670,43 @@ pub mod AuctionVerifier {
                 get_contract_address(), transcript_commitment,
             );
             assert(proof_artifact_commitment == expected_statement_message, 'PROOF_COMMITMENT');
+            assert(self.verified_nullifier_roots_active.read(batch_id), 'NULLIFIER_PROOF_REQUIRED');
+            assert(
+                self.verified_nullifier_transcripts.read(batch_id) == transcript_commitment,
+                'NULLIFIER_TRANSCRIPT',
+            );
+            assert(
+                self.verified_prior_nullifier_roots.read(batch_id) == prior_nullifier_root,
+                'PRIOR_NULLIFIER_ROOT',
+            );
+            assert(
+                self.verified_consumed_nullifier_roots.read(batch_id) == consumed_nullifier_root,
+                'CONSUMED_NULLIFIER_ROOT',
+            );
+            assert(
+                self.verified_new_nullifier_roots.read(batch_id) == new_nullifier_root,
+                'NEW_NULLIFIER_ROOT',
+            );
+            assert(self.verified_renewal_roots_active.read(batch_id), 'RENEWAL_PROOF_REQUIRED');
+            assert(
+                self.verified_renewal_transcripts.read(batch_id) == transcript_commitment,
+                'RENEWAL_TRANSCRIPT',
+            );
+            assert(
+                self.verified_prior_renewal_roots.read(batch_id) == prior_renewal_root,
+                'PRIOR_RENEWAL_ROOT',
+            );
+            assert(
+                self.verified_renewal_child_roots.read(batch_id) == renewal_child_root,
+                'RENEWAL_CHILD_ROOT',
+            );
+            assert(
+                self.verified_new_renewal_roots.read(batch_id) == new_renewal_root,
+                'NEW_RENEWAL_ROOT',
+            );
             let expected_messages = array![
                 settlement_proof_message_hash_from_statement(
                     self.proof_program.read(), expected_statement_message,
-                ),
-                nullifier_proof_message_hash_from_statement(
-                    self.proof_program.read(),
-                    native_nullifier_message_hash(
-                        get_contract_address(),
-                        transcript_commitment,
-                        prior_nullifier_root,
-                        consumed_nullifier_root,
-                        new_nullifier_root,
-                    ),
-                ),
-                renewal_proof_message_hash_from_statement(
-                    self.proof_program.read(),
-                    native_renewal_message_hash(
-                        get_contract_address(),
-                        transcript_commitment,
-                        prior_renewal_root,
-                        renewal_child_root,
-                        new_renewal_root,
-                    ),
                 ),
             ];
             assert_valid_proof_facts_messages(@self, expected_messages.span());

@@ -28,6 +28,16 @@ pub trait IAuctionProofProgram<TContractState> {
         auction_verifier: ContractAddress,
         serialized_settlement_witness: Span<felt252>,
     ) -> felt252;
+    fn compile_nullifier_proof(
+        ref self: TContractState,
+        auction_verifier: ContractAddress,
+        serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+    fn compile_renewal_proof(
+        ref self: TContractState,
+        auction_verifier: ContractAddress,
+        serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
     fn compile_admission_proof(
         ref self: TContractState,
         auction_verifier: ContractAddress,
@@ -157,44 +167,54 @@ pub mod AuctionProofProgram {
             };
             let transcript_commitment = settlement_statement_program
                 .verify_settlement_statement(serialized_settlement_witness);
+            emit_settlement_proof_message(auction_verifier, transcript_commitment)
+        }
+
+        fn compile_nullifier_proof(
+            ref self: ContractState,
+            auction_verifier: ContractAddress,
+            serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
             let nullifier_statement_program = INullifierStatementProgramDispatcher {
                 contract_address: self.nullifier_statement_program.read(),
             };
             let (
-                nullifier_transcript_commitment,
+                transcript_commitment,
                 prior_nullifier_root,
                 consumed_nullifier_root,
                 new_nullifier_root,
-            ) = nullifier_statement_program.verify_nullifier_statement(serialized_settlement_witness);
-            assert(nullifier_transcript_commitment == transcript_commitment, 'NULLIFIER_BINDING');
+            ) =
+                nullifier_statement_program
+                .verify_nullifier_statement(serialized_settlement_witness);
+            emit_nullifier_proof_message(
+                auction_verifier,
+                transcript_commitment,
+                prior_nullifier_root,
+                consumed_nullifier_root,
+                new_nullifier_root,
+            )
+        }
+
+        fn compile_renewal_proof(
+            ref self: ContractState,
+            auction_verifier: ContractAddress,
+            serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
             let renewal_statement_program = IRenewalStatementProgramDispatcher {
                 contract_address: self.renewal_statement_program.read(),
             };
-            let (
-                renewal_transcript_commitment,
-                prior_renewal_root,
-                renewal_child_root,
-                new_renewal_root,
-            ) = renewal_statement_program.verify_renewal_statement(serialized_settlement_witness);
-            assert(renewal_transcript_commitment == transcript_commitment, 'RENEWAL_BINDING');
-            let settlement_message = emit_settlement_proof_message(
-                auction_verifier, transcript_commitment,
-            );
-            let nullifier_message = emit_nullifier_proof_message(
-                auction_verifier,
-                transcript_commitment,
-                prior_nullifier_root,
-                consumed_nullifier_root,
-                new_nullifier_root,
-            );
-            let renewal_message = emit_renewal_proof_message(
+            let (transcript_commitment, prior_renewal_root, renewal_child_root, new_renewal_root) =
+                renewal_statement_program
+                .verify_renewal_statement(serialized_settlement_witness);
+            emit_renewal_proof_message(
                 auction_verifier,
                 transcript_commitment,
                 prior_renewal_root,
                 renewal_child_root,
                 new_renewal_root,
-            );
-            poseidon_hash2(poseidon_hash2(settlement_message, nullifier_message), renewal_message)
+            )
         }
 
         fn compile_admission_proof(
@@ -263,14 +283,20 @@ pub mod AuctionProofProgram {
                     prior_nullifier_root,
                     consumed_nullifier_root,
                     new_nullifier_root,
-                ) = nullifier_statement_program.verify_nullifier_statement(witness.span());
-                assert(nullifier_transcript_commitment == transcript_commitment, 'NULLIFIER_BINDING');
+                ) =
+                    nullifier_statement_program
+                    .verify_nullifier_statement(witness.span());
+                assert(
+                    nullifier_transcript_commitment == transcript_commitment, 'NULLIFIER_BINDING',
+                );
                 let (
                     renewal_transcript_commitment,
                     prior_renewal_root,
                     renewal_child_root,
                     new_renewal_root,
-                ) = renewal_statement_program.verify_renewal_statement(witness.span());
+                ) =
+                    renewal_statement_program
+                    .verify_renewal_statement(witness.span());
                 assert(renewal_transcript_commitment == transcript_commitment, 'RENEWAL_BINDING');
                 let settlement_message = emit_settlement_proof_message(
                     auction_verifier, transcript_commitment,
