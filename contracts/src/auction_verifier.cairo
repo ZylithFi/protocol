@@ -80,6 +80,19 @@ pub trait IAuctionVerifier<TContractState> {
         renewal_child_root: felt252,
         new_renewal_root: felt252,
     );
+    fn submit_note_consolidation_with_proof_facts(
+        ref self: TContractState,
+        consolidation_id: felt252,
+        proof_artifact_commitment: felt252,
+        output_bundle_ref: felt252,
+        prior_note_root: felt252,
+        prior_nullifier_root: felt252,
+        consumed_note_root: felt252,
+        consumed_nullifier_root: felt252,
+        output_note_root: felt252,
+        new_note_root: felt252,
+        new_nullifier_root: felt252,
+    );
     fn submit_settlement_with_proof_facts(
         ref self: TContractState,
         batch_id: felt252,
@@ -147,6 +160,9 @@ pub trait IAuctionVerifier<TContractState> {
     fn settlement_proof_message_hash(
         self: @TContractState, transcript_commitment: felt252,
     ) -> felt252;
+    fn note_consolidation_proof_message_hash(
+        self: @TContractState, consolidation_commitment: felt252,
+    ) -> felt252;
 }
 
 #[starknet::contract]
@@ -177,6 +193,7 @@ pub mod AuctionVerifier {
     const SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_settle_v1';
     const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
     const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
+    const NOTE_CONSOLIDATION_MESSAGE_DOMAIN: felt252 = 'zylith_consol_v1';
     const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
     const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
     const SETTLEMENT_PROOF_MESSAGE_TO: felt252 = 0;
@@ -208,6 +225,7 @@ pub mod AuctionVerifier {
         0x7a796c6974685f6465706f7369745f6e6f74655f726f6f745f7631;
     const NOTE_ROOT_TRANSITION_DEPOSIT: felt252 = 0;
     const NOTE_ROOT_TRANSITION_SETTLEMENT: felt252 = 1;
+    const NOTE_ROOT_TRANSITION_CONSOLIDATION: felt252 = 2;
     #[storage]
     struct Storage {
         admin: ContractAddress,
@@ -741,6 +759,72 @@ pub mod AuctionVerifier {
             );
         }
 
+        fn submit_note_consolidation_with_proof_facts(
+            ref self: ContractState,
+            consolidation_id: felt252,
+            proof_artifact_commitment: felt252,
+            output_bundle_ref: felt252,
+            prior_note_root: felt252,
+            prior_nullifier_root: felt252,
+            consumed_note_root: felt252,
+            consumed_nullifier_root: felt252,
+            output_note_root: felt252,
+            new_note_root: felt252,
+            new_nullifier_root: felt252,
+        ) {
+            assert_authorized_settlement_account(@self);
+            assert_not_paused(@self);
+            assert(consolidation_id != 0, 'BAD_CONSOLIDATION');
+            assert(output_bundle_ref != 0, 'BAD_OUTPUT_BUNDLE');
+            assert(consumed_note_root != 0, 'BAD_CONSUMED_NOTES');
+            assert(consumed_nullifier_root != 0, 'BAD_CONSUMED_NULLS');
+            assert(output_note_root != 0, 'BAD_OUTPUT_ROOT');
+            assert(prior_note_root == self.current_note_root.read(), 'NOTE_ROOT_STALE');
+            assert(prior_nullifier_root == self.current_nullifier_root.read(), 'NULLIFIER_ROOT_STALE');
+            assert(
+                new_note_root == state_transition_root(prior_note_root, output_note_root),
+                'NEW_NOTE_ROOT',
+            );
+            assert(new_nullifier_root != 0, 'NEW_NULLIFIER_ROOT');
+            let already_settled = self.settled_batches.read(consolidation_id);
+            assert(already_settled == false, 'CONSOLIDATION_SETTLED');
+
+            let consolidation_commitment = public_note_consolidation_commitment(
+                consolidation_id,
+                output_bundle_ref,
+                prior_note_root,
+                prior_nullifier_root,
+                consumed_note_root,
+                consumed_nullifier_root,
+                output_note_root,
+                new_note_root,
+                new_nullifier_root,
+            );
+            let expected_statement_message = native_note_consolidation_message_hash(
+                get_contract_address(), consolidation_commitment,
+            );
+            assert(proof_artifact_commitment == expected_statement_message, 'PROOF_COMMITMENT');
+            let expected_messages = array![
+                note_consolidation_proof_message_hash_from_statement(
+                    self.proof_program.read(), expected_statement_message,
+                ),
+            ];
+            assert_valid_proof_facts_messages(@self, expected_messages.span());
+
+            self.settled_batches.write(consolidation_id, true);
+            self.settled_at_unix_seconds.write(consolidation_id, current_block_timestamp());
+            self.output_note_roots.write(consolidation_id, output_note_root);
+            self.current_note_root.write(new_note_root);
+            self.current_nullifier_root.write(new_nullifier_root);
+            record_note_root_transition(
+                ref self,
+                NOTE_ROOT_TRANSITION_CONSOLIDATION,
+                consolidation_id,
+                output_note_root,
+                new_note_root,
+            );
+        }
+
         fn submit_aggregate_settlements_with_proof_facts(
             ref self: ContractState, settlement_inputs: Span<felt252>,
         ) {
@@ -918,6 +1002,19 @@ pub mod AuctionVerifier {
                 get_contract_address(), transcript_commitment,
             );
             settlement_proof_message_hash_from_statement(proof_program, statement_message_hash)
+        }
+
+        fn note_consolidation_proof_message_hash(
+            self: @ContractState, consolidation_commitment: felt252,
+        ) -> felt252 {
+            let proof_program = self.proof_program.read();
+            assert(!proof_program.is_zero(), 'PROOF_PROGRAM_UNSET');
+            let statement_message_hash = native_note_consolidation_message_hash(
+                get_contract_address(), consolidation_commitment,
+            );
+            note_consolidation_proof_message_hash_from_statement(
+                proof_program, statement_message_hash,
+            )
         }
     }
 
@@ -1225,6 +1322,10 @@ pub mod AuctionVerifier {
         array![RENEWAL_MESSAGE_DOMAIN, statement_message_hash]
     }
 
+    fn note_consolidation_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![NOTE_CONSOLIDATION_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
     fn admission_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![ADMISSION_MESSAGE_DOMAIN, statement_message_hash]
     }
@@ -1256,6 +1357,15 @@ pub mod AuctionVerifier {
     ) -> felt252 {
         let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
         let payload = renewal_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn note_consolidation_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = note_consolidation_proof_payload(statement_message_hash);
         payload.serialize(ref l1_message_data);
         poseidon_hash_span(l1_message_data.span())
     }
@@ -1321,6 +1431,16 @@ pub mod AuctionVerifier {
         state = poseidon_hash2(state, prior_renewal_root);
         state = poseidon_hash2(state, renewal_child_root);
         state = poseidon_hash2(state, new_renewal_root);
+        state
+    }
+
+    fn native_note_consolidation_message_hash(
+        auction_verifier_address: ContractAddress, consolidation_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            NOTE_CONSOLIDATION_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
+        state = poseidon_hash2(state, consolidation_commitment);
         state
     }
 
@@ -1522,6 +1642,31 @@ pub mod AuctionVerifier {
         state = poseidon_hash2(state, new_renewal_root);
         state = poseidon_hash2(state, new_fee_root);
 
+        state
+    }
+
+    fn public_note_consolidation_commitment(
+        consolidation_id: felt252,
+        output_bundle_ref: felt252,
+        prior_note_root: felt252,
+        prior_nullifier_root: felt252,
+        consumed_note_root: felt252,
+        consumed_nullifier_root: felt252,
+        output_note_root: felt252,
+        new_note_root: felt252,
+        new_nullifier_root: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            0x7a796c6974685f6e6f74655f636f6e736f6c5f7631, consolidation_id,
+        );
+        state = poseidon_hash2(state, output_bundle_ref);
+        state = poseidon_hash2(state, prior_note_root);
+        state = poseidon_hash2(state, prior_nullifier_root);
+        state = poseidon_hash2(state, consumed_note_root);
+        state = poseidon_hash2(state, consumed_nullifier_root);
+        state = poseidon_hash2(state, output_note_root);
+        state = poseidon_hash2(state, new_note_root);
+        state = poseidon_hash2(state, new_nullifier_root);
         state
     }
 

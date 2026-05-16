@@ -40,6 +40,7 @@ const NOTE_MEMBERSHIP_KIND_SETTLEMENT_OUTPUT: felt252 = 1;
 const STATEMENT_TYPE_SETTLEMENT: felt252 = 1;
 const STATEMENT_TYPE_ADMISSION: felt252 = 3;
 const STATEMENT_TYPE_AUCTION_RESULT: felt252 = 4;
+const STATEMENT_TYPE_NOTE_CONSOLIDATION: felt252 = 5;
 const ADMISSION_ROOT_DOMAIN: felt252 = 0x7a796c6974685f61646d69745f726f6f745f7631;
 const ADMISSION_LEAF_DOMAIN: felt252 = 0x7a796c6974685f61646d69745f6c6561665f7631;
 const MAX_ORDER_FUNDING_INPUTS: usize = 4;
@@ -1201,6 +1202,285 @@ pub fn verify_renewal_statement(data: Span<felt252>) -> (felt252, felt252, felt2
         assert(running_renewal_root == claimed_new_renewal_root, 'E');
     }
     (transcript_commitment, prior_renewal_root, renewal_child_root, claimed_new_renewal_root)
+}
+
+pub fn verify_note_consolidation_statement(data: Span<felt252>) -> felt252 {
+    let mut index: usize = 0;
+
+    let statement_type = read_next(data, ref index);
+    assert(statement_type == STATEMENT_TYPE_NOTE_CONSOLIDATION, 'E');
+    let note_commitment_domain = read_next(data, ref index);
+    let nullifier_domain = read_next(data, ref index);
+    let public_consolidation_domain = read_next(data, ref index);
+    let consolidation_id = read_next(data, ref index);
+    let consolidation_commitment = read_next(data, ref index);
+    let output_bundle_ref = read_next(data, ref index);
+    let prior_note_root = read_next(data, ref index);
+    let prior_nullifier_root = read_next(data, ref index);
+    let consumed_note_root_domain = read_next(data, ref index);
+    let consumed_nullifier_root_domain = read_next(data, ref index);
+    let output_note_root_domain = read_next(data, ref index);
+    let state_transition_root_domain = read_next(data, ref index);
+    let nullifier_sparse_leaf_domain = read_next(data, ref index);
+    let nullifier_sparse_node_domain = read_next(data, ref index);
+    assert(note_commitment_domain != 0, 'E');
+    assert(nullifier_domain != 0, 'E');
+    assert(public_consolidation_domain != 0, 'E');
+    assert(consolidation_id != 0, 'E');
+    assert(consolidation_commitment != 0, 'E');
+    assert(output_bundle_ref != 0, 'E');
+    assert(consumed_note_root_domain != 0, 'E');
+    assert(consumed_nullifier_root_domain != 0, 'E');
+    assert(output_note_root_domain != 0, 'E');
+    assert(state_transition_root_domain != 0, 'E');
+    assert(nullifier_sparse_leaf_domain != 0, 'E');
+    assert(nullifier_sparse_node_domain != 0, 'E');
+
+    let input_note_commitments = read_vector(data, ref index);
+    let input_asset_ids = read_vector(data, ref index);
+    let input_amounts = read_vector(data, ref index);
+    let input_owner_keys = read_vector(data, ref index);
+    let input_spend_authorities = read_vector(data, ref index);
+    let input_withdraw_authorities = read_vector(data, ref index);
+    let input_blindings = read_vector(data, ref index);
+    let input_nonces = read_vector(data, ref index);
+    let input_metadata_commitments = read_vector(data, ref index);
+    let input_nullifiers = read_vector(data, ref index);
+    let spend_authorization_r = read_next(data, ref index);
+    let spend_authorization_s = read_next(data, ref index);
+
+    let note_membership_kinds = read_vector(data, ref index);
+    let note_membership_prefix_roots = read_vector(data, ref index);
+    let note_membership_batch_roots = read_vector(data, ref index);
+    let note_membership_path_counts = read_vector(data, ref index);
+    let note_membership_path_values = read_vector(data, ref index);
+    let note_membership_path_directions = read_vector(data, ref index);
+    let note_membership_suffix_counts = read_vector(data, ref index);
+    let note_membership_suffix_roots = read_vector(data, ref index);
+
+    let nullifier_sparse_key_lows = read_vector(data, ref index);
+    let nullifier_sparse_key_highs = read_vector(data, ref index);
+    let nullifier_sparse_path_counts = read_vector(data, ref index);
+    let nullifier_sparse_path_values = read_vector(data, ref index);
+    let nullifier_sparse_path_directions = read_vector(data, ref index);
+
+    let output_note_commitments = read_vector(data, ref index);
+    let output_note_asset_ids = read_vector(data, ref index);
+    let output_note_amounts = read_vector(data, ref index);
+    let output_note_withdraw_authorities = read_vector(data, ref index);
+    let output_note_owner_keys = read_vector(data, ref index);
+    let output_note_spend_authorities = read_vector(data, ref index);
+    let output_note_blindings = read_vector(data, ref index);
+    let output_note_nonces = read_vector(data, ref index);
+    let output_note_metadata_commitments = read_vector(data, ref index);
+    let output_recovery_key_tags = read_vector(data, ref index);
+    let output_recovery_auth_tags = read_vector(data, ref index);
+    let output_recovery_ciphertext_fields = read_vector(data, ref index);
+    let output_recovery_dummy_commitments = read_vector(data, ref index);
+    let claimed_new_nullifier_root = read_next(data, ref index);
+    assert(index == data.len(), 'E');
+
+    assert(input_note_commitments.len() != 0, 'E');
+    assert(output_note_commitments.len() != 0, 'E');
+    assert_all_lengths_match(
+        input_note_commitments.len(),
+        array![
+            input_asset_ids.len().into(), input_amounts.len().into(), input_owner_keys.len().into(),
+            input_spend_authorities.len().into(), input_withdraw_authorities.len().into(),
+            input_blindings.len().into(), input_nonces.len().into(),
+            input_metadata_commitments.len().into(), input_nullifiers.len().into(),
+            note_membership_kinds.len().into(), note_membership_prefix_roots.len().into(),
+            note_membership_batch_roots.len().into(), note_membership_path_counts.len().into(),
+            note_membership_suffix_counts.len().into(), nullifier_sparse_key_lows.len().into(),
+            nullifier_sparse_key_highs.len().into(), nullifier_sparse_path_counts.len().into(),
+        ]
+            .span(),
+        'E',
+    );
+    assert(output_note_commitments.len() == output_note_asset_ids.len(), 'E');
+    assert(output_note_commitments.len() == output_note_amounts.len(), 'E');
+    assert(output_note_commitments.len() == output_note_withdraw_authorities.len(), 'E');
+    assert(output_note_commitments.len() == output_note_owner_keys.len(), 'E');
+    assert(output_note_commitments.len() == output_note_spend_authorities.len(), 'E');
+    assert(output_note_commitments.len() == output_note_blindings.len(), 'E');
+    assert(output_note_commitments.len() == output_note_nonces.len(), 'E');
+    assert(output_note_commitments.len() == output_note_metadata_commitments.len(), 'E');
+    assert(output_note_commitments.len() == output_recovery_key_tags.len(), 'E');
+    assert(output_note_commitments.len() == output_recovery_auth_tags.len(), 'E');
+    assert(
+        output_recovery_ciphertext_fields.len() == output_note_commitments.len()
+            * OUTPUT_RECOVERY_FIELD_COUNT,
+        'E',
+    );
+    assert(note_membership_path_values.len() == note_membership_path_directions.len(), 'E');
+    assert(nullifier_sparse_path_values.len() == nullifier_sparse_path_directions.len(), 'E');
+    assert(spend_authorization_r != 0, 'E');
+    assert(spend_authorization_s != 0, 'E');
+    assert_unique(input_note_commitments.span(), 'E');
+    assert_unique(input_nullifiers.span(), 'E');
+    assert_unique(output_note_commitments.span(), 'E');
+
+    let asset_id = *input_asset_ids.at(0);
+    let spend_authority = *input_spend_authorities.at(0);
+    assert(asset_id != 0, 'E');
+    assert(spend_authority != 0, 'E');
+    assert(
+        check_ecdsa_signature(
+            consolidation_commitment, spend_authority, spend_authorization_r, spend_authorization_s,
+        ),
+        'E',
+    );
+
+    let mut input_total: u128 = 0;
+    let mut membership_path_cursor = 0;
+    let mut membership_suffix_cursor = 0;
+    let mut input_index = 0;
+    while input_index < input_note_commitments.len() {
+        let input_commitment = *input_note_commitments.at(input_index);
+        let input_asset = *input_asset_ids.at(input_index);
+        let input_amount = *input_amounts.at(input_index);
+        let input_owner = *input_owner_keys.at(input_index);
+        let input_spend = *input_spend_authorities.at(input_index);
+        let input_withdraw = *input_withdraw_authorities.at(input_index);
+        let input_blinding = *input_blindings.at(input_index);
+        let input_nonce = *input_nonces.at(input_index);
+        let input_metadata = *input_metadata_commitments.at(input_index);
+        assert(input_asset == asset_id, 'E');
+        assert(input_spend == spend_authority, 'E');
+        assert(input_amount != 0, 'E');
+        assert(
+            note_commitment(
+                note_commitment_domain,
+                input_asset,
+                input_amount,
+                input_owner,
+                input_spend,
+                input_withdraw,
+                input_blinding,
+                input_nonce,
+                input_metadata,
+            ) == input_commitment,
+            'E',
+        );
+        assert(
+            note_nullifier(
+                nullifier_domain, input_commitment, input_blinding,
+            ) == *input_nullifiers.at(input_index),
+            'E',
+        );
+        assert_note_membership(
+            input_commitment,
+            input_asset,
+            input_amount,
+            input_withdraw,
+            prior_note_root,
+            *note_membership_kinds.at(input_index),
+            *note_membership_prefix_roots.at(input_index),
+            *note_membership_batch_roots.at(input_index),
+            *note_membership_path_counts.at(input_index),
+            ref membership_path_cursor,
+            note_membership_path_values.span(),
+            note_membership_path_directions.span(),
+            *note_membership_suffix_counts.at(input_index),
+            ref membership_suffix_cursor,
+            note_membership_suffix_roots.span(),
+            state_transition_root_domain,
+        );
+        input_total += input_amount.try_into().expect('E');
+        input_index += 1;
+    }
+    assert(membership_path_cursor == note_membership_path_values.len(), 'E');
+    assert(membership_path_cursor == note_membership_path_directions.len(), 'E');
+    assert(membership_suffix_cursor == note_membership_suffix_roots.len(), 'E');
+
+    let mut output_total: u128 = 0;
+    let mut output_index = 0;
+    while output_index < output_note_commitments.len() {
+        let output_asset = *output_note_asset_ids.at(output_index);
+        let output_amount = *output_note_amounts.at(output_index);
+        let output_withdraw = *output_note_withdraw_authorities.at(output_index);
+        assert(output_asset == asset_id, 'E');
+        assert(output_amount != 0, 'E');
+        assert(
+            note_commitment(
+                note_commitment_domain,
+                output_asset,
+                output_amount,
+                *output_note_owner_keys.at(output_index),
+                *output_note_spend_authorities.at(output_index),
+                output_withdraw,
+                *output_note_blindings.at(output_index),
+                *output_note_nonces.at(output_index),
+                *output_note_metadata_commitments.at(output_index),
+            ) == *output_note_commitments.at(output_index),
+            'E',
+        );
+        output_total += output_amount.try_into().expect('E');
+        output_index += 1;
+    }
+    assert(input_total == output_total, 'E');
+
+    let consumed_note_root = single_field_root(
+        consumed_note_root_domain, input_note_commitments.span(),
+    );
+    let consumed_nullifier_root = single_field_root(
+        consumed_nullifier_root_domain, input_nullifiers.span(),
+    );
+    let running_nullifier_root = assert_sparse_nullifier_updates(
+        prior_nullifier_root,
+        input_nullifiers.span(),
+        nullifier_sparse_key_lows.span(),
+        nullifier_sparse_key_highs.span(),
+        nullifier_sparse_path_counts.span(),
+        nullifier_sparse_path_values.span(),
+        nullifier_sparse_path_directions.span(),
+        nullifier_sparse_leaf_domain,
+        nullifier_sparse_node_domain,
+    );
+    assert(running_nullifier_root == claimed_new_nullifier_root, 'E');
+    let output_note_root = output_note_merkle_root(
+        output_bundle_ref,
+        output_note_commitments.span(),
+        output_note_asset_ids.span(),
+        output_note_amounts.span(),
+        output_note_withdraw_authorities.span(),
+    );
+    assert_output_recovery_bundle(
+        note_commitment_domain,
+        output_bundle_ref,
+        consolidation_id,
+        output_note_root,
+        output_note_commitments.span(),
+        output_note_asset_ids.span(),
+        output_note_amounts.span(),
+        output_note_withdraw_authorities.span(),
+        output_note_owner_keys.span(),
+        output_note_spend_authorities.span(),
+        output_note_blindings.span(),
+        output_note_nonces.span(),
+        output_note_metadata_commitments.span(),
+        output_recovery_key_tags.span(),
+        output_recovery_auth_tags.span(),
+        output_recovery_ciphertext_fields.span(),
+        output_recovery_dummy_commitments.span(),
+    );
+    let new_note_root = state_transition_root(
+        state_transition_root_domain, prior_note_root, output_note_root,
+    );
+    let recomputed_commitment = public_note_consolidation_commitment(
+        public_consolidation_domain,
+        consolidation_id,
+        output_bundle_ref,
+        prior_note_root,
+        prior_nullifier_root,
+        consumed_note_root,
+        consumed_nullifier_root,
+        output_note_root,
+        new_note_root,
+        claimed_new_nullifier_root,
+    );
+    assert(recomputed_commitment == consolidation_commitment, 'E');
+    consolidation_commitment
 }
 
 pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, felt252) {
@@ -4496,6 +4776,30 @@ fn public_settlement_commitment(
     state = poseidon_hash2(state, new_renewal_root);
     state = poseidon_hash2(state, new_fee_root);
 
+    state
+}
+
+fn public_note_consolidation_commitment(
+    seed: felt252,
+    consolidation_id: felt252,
+    output_bundle_ref: felt252,
+    prior_note_root: felt252,
+    prior_nullifier_root: felt252,
+    consumed_note_root: felt252,
+    consumed_nullifier_root: felt252,
+    output_note_root: felt252,
+    new_note_root: felt252,
+    new_nullifier_root: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(seed, consolidation_id);
+    state = poseidon_hash2(state, output_bundle_ref);
+    state = poseidon_hash2(state, prior_note_root);
+    state = poseidon_hash2(state, prior_nullifier_root);
+    state = poseidon_hash2(state, consumed_note_root);
+    state = poseidon_hash2(state, consumed_nullifier_root);
+    state = poseidon_hash2(state, output_note_root);
+    state = poseidon_hash2(state, new_note_root);
+    state = poseidon_hash2(state, new_nullifier_root);
     state
 }
 

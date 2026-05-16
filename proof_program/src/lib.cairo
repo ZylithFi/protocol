@@ -22,6 +22,13 @@ pub trait IRenewalStatementProgram<TContractState> {
 }
 
 #[starknet::interface]
+pub trait INoteConsolidationStatementProgram<TContractState> {
+    fn verify_note_consolidation_statement(
+        ref self: TContractState, serialized_note_consolidation_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
 pub trait IAuctionProofProgram<TContractState> {
     fn compile_settlement_proof(
         ref self: TContractState,
@@ -37,6 +44,11 @@ pub trait IAuctionProofProgram<TContractState> {
         ref self: TContractState,
         auction_verifier: ContractAddress,
         serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+    fn compile_note_consolidation_proof(
+        ref self: TContractState,
+        auction_verifier: ContractAddress,
+        serialized_note_consolidation_witness: Span<felt252>,
     ) -> felt252;
     fn compile_admission_proof(
         ref self: TContractState,
@@ -110,6 +122,23 @@ pub mod RenewalStatementProgram {
 }
 
 #[starknet::contract]
+pub mod NoteConsolidationStatementProgram {
+    use zylith_settlement_statement::verify_note_consolidation_statement as verify_note_consolidation_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl NoteConsolidationStatementProgramImpl of super::INoteConsolidationStatementProgram<ContractState> {
+        fn verify_note_consolidation_statement(
+            ref self: ContractState, serialized_note_consolidation_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_note_consolidation_statement_impl(serialized_note_consolidation_witness)
+        }
+    }
+}
+
+#[starknet::contract]
 pub mod AuctionProofProgram {
     use core::array::{Array, ArrayTrait, SpanTrait};
     use core::num::traits::Zero;
@@ -119,6 +148,8 @@ pub mod AuctionProofProgram {
     use starknet::{ContractAddress, SyscallResultTrait, get_contract_address};
     use zylith_settlement_statement::{verify_admission_statement, verify_auction_result_statement};
     use super::{
+        INoteConsolidationStatementProgramDispatcher,
+        INoteConsolidationStatementProgramDispatcherTrait,
         INullifierStatementProgramDispatcher, INullifierStatementProgramDispatcherTrait,
         IRenewalStatementProgramDispatcher, IRenewalStatementProgramDispatcherTrait,
         ISettlementStatementProgramDispatcher, ISettlementStatementProgramDispatcherTrait,
@@ -127,6 +158,7 @@ pub mod AuctionProofProgram {
     const SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_settle_v1';
     const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
     const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
+    const NOTE_CONSOLIDATION_MESSAGE_DOMAIN: felt252 = 'zylith_consol_v1';
     const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
     const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
     const SETTLEMENT_PROOF_MESSAGE_TO: felt252 = 0;
@@ -137,6 +169,7 @@ pub mod AuctionProofProgram {
         settlement_statement_program: ContractAddress,
         nullifier_statement_program: ContractAddress,
         renewal_statement_program: ContractAddress,
+        note_consolidation_statement_program: ContractAddress,
     }
 
     #[constructor]
@@ -145,13 +178,16 @@ pub mod AuctionProofProgram {
         settlement_statement_program: ContractAddress,
         nullifier_statement_program: ContractAddress,
         renewal_statement_program: ContractAddress,
+        note_consolidation_statement_program: ContractAddress,
     ) {
         assert(!settlement_statement_program.is_zero(), 'BAD_STMT_PROGRAM');
         assert(!nullifier_statement_program.is_zero(), 'BAD_NULL_PROGRAM');
         assert(!renewal_statement_program.is_zero(), 'BAD_RENEW_PROGRAM');
+        assert(!note_consolidation_statement_program.is_zero(), 'BAD_CONSOL_PROGRAM');
         self.settlement_statement_program.write(settlement_statement_program);
         self.nullifier_statement_program.write(nullifier_statement_program);
         self.renewal_statement_program.write(renewal_statement_program);
+        self.note_consolidation_statement_program.write(note_consolidation_statement_program);
     }
 
     #[abi(embed_v0)]
@@ -215,6 +251,20 @@ pub mod AuctionProofProgram {
                 renewal_child_root,
                 new_renewal_root,
             )
+        }
+
+        fn compile_note_consolidation_proof(
+            ref self: ContractState,
+            auction_verifier: ContractAddress,
+            serialized_note_consolidation_witness: Span<felt252>,
+        ) -> felt252 {
+            assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
+            let note_consolidation_statement_program = INoteConsolidationStatementProgramDispatcher {
+                contract_address: self.note_consolidation_statement_program.read(),
+            };
+            let consolidation_commitment = note_consolidation_statement_program
+                .verify_note_consolidation_statement(serialized_note_consolidation_witness);
+            emit_note_consolidation_proof_message(auction_verifier, consolidation_commitment)
         }
 
         fn compile_admission_proof(
@@ -390,6 +440,20 @@ pub mod AuctionProofProgram {
         renewal_proof_message_hash_from_statement(get_contract_address(), statement_message_hash)
     }
 
+    fn emit_note_consolidation_proof_message(
+        auction_verifier: ContractAddress, consolidation_commitment: felt252,
+    ) -> felt252 {
+        let statement_message_hash = native_note_consolidation_message_hash(
+            auction_verifier, consolidation_commitment,
+        );
+        let payload = note_consolidation_proof_payload(statement_message_hash);
+        send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
+            .unwrap_syscall();
+        note_consolidation_proof_message_hash_from_statement(
+            get_contract_address(), statement_message_hash,
+        )
+    }
+
     fn emit_admission_proof_message(
         auction_verifier: ContractAddress,
         batch_id: felt252,
@@ -461,6 +525,10 @@ pub mod AuctionProofProgram {
         array![RENEWAL_MESSAGE_DOMAIN, statement_message_hash]
     }
 
+    fn note_consolidation_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![NOTE_CONSOLIDATION_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
     fn admission_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![ADMISSION_MESSAGE_DOMAIN, statement_message_hash]
     }
@@ -492,6 +560,15 @@ pub mod AuctionProofProgram {
     ) -> felt252 {
         let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
         let payload = renewal_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn note_consolidation_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = note_consolidation_proof_payload(statement_message_hash);
         payload.serialize(ref l1_message_data);
         poseidon_hash_span(l1_message_data.span())
     }
@@ -557,6 +634,17 @@ pub mod AuctionProofProgram {
         state = poseidon_hash2(state, prior_renewal_root);
         state = poseidon_hash2(state, renewal_child_root);
         state = poseidon_hash2(state, new_renewal_root);
+        state
+    }
+
+    fn native_note_consolidation_message_hash(
+        auction_verifier_address: ContractAddress,
+        consolidation_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            NOTE_CONSOLIDATION_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
+        state = poseidon_hash2(state, consolidation_commitment);
         state
     }
 

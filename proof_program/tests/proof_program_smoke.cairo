@@ -22,6 +22,7 @@ fn deploy_auction_proof_program(statement_program: ContractAddress) -> ContractA
     let class = declare("AuctionProofProgram").unwrap().contract_class();
     let calldata = array![
         statement_program.into(), statement_program.into(), statement_program.into(),
+        statement_program.into(),
     ];
     let (address, _) = class.deploy(@calldata).unwrap_syscall();
     address

@@ -38,6 +38,8 @@ const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
 const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
 const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
 const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
+const NOTE_CONSOLIDATION_MESSAGE_DOMAIN: felt252 = 'zylith_consol_v1';
+const PUBLIC_NOTE_CONSOLIDATION_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f636f6e736f6c5f7631;
 const RENEWAL_PARENT_CANCEL_DOMAIN: felt252 =
     0x26f84b60309c08d4030876815edb467f89f78e5a5f62823af4521f1be502ca3;
 const ROOT_ONLY_STATE_TRANSITION_DOMAIN: felt252 =
@@ -509,6 +511,15 @@ fn native_renewal_message_hash(
     poseidon_hash2(state, new_renewal_root)
 }
 
+fn native_note_consolidation_message_hash(
+    auction_verifier_address: ContractAddress, consolidation_commitment: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(
+        NOTE_CONSOLIDATION_MESSAGE_DOMAIN, auction_verifier_address.into(),
+    );
+    poseidon_hash2(state, consolidation_commitment)
+}
+
 fn native_auction_result_message_hash(
     auction_verifier_address: ContractAddress,
     batch_id: felt252,
@@ -573,6 +584,38 @@ fn renewal_proof_message_hash(
     l1_message_data.append(RENEWAL_MESSAGE_DOMAIN);
     l1_message_data.append(statement_message_hash);
     poseidon_hash_span(l1_message_data.span())
+}
+
+fn note_consolidation_proof_message_hash(
+    proof_program_address: ContractAddress, statement_message_hash: felt252,
+) -> felt252 {
+    let mut l1_message_data = array![proof_program_address.into(), 0];
+    l1_message_data.append(2);
+    l1_message_data.append(NOTE_CONSOLIDATION_MESSAGE_DOMAIN);
+    l1_message_data.append(statement_message_hash);
+    poseidon_hash_span(l1_message_data.span())
+}
+
+fn public_note_consolidation_commitment(
+    consolidation_id: felt252,
+    output_bundle_ref: felt252,
+    prior_note_root: felt252,
+    prior_nullifier_root: felt252,
+    consumed_note_root: felt252,
+    consumed_nullifier_root: felt252,
+    output_note_root: felt252,
+    new_note_root: felt252,
+    new_nullifier_root: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(PUBLIC_NOTE_CONSOLIDATION_DOMAIN, consolidation_id);
+    state = poseidon_hash2(state, output_bundle_ref);
+    state = poseidon_hash2(state, prior_note_root);
+    state = poseidon_hash2(state, prior_nullifier_root);
+    state = poseidon_hash2(state, consumed_note_root);
+    state = poseidon_hash2(state, consumed_nullifier_root);
+    state = poseidon_hash2(state, output_note_root);
+    state = poseidon_hash2(state, new_note_root);
+    poseidon_hash2(state, new_nullifier_root)
 }
 
 fn record_split_auction_proofs(
@@ -2327,6 +2370,76 @@ fn auction_verifier_accepts_root_only_nullifier_transition() {
 
     let (_, current_nullifier_root, _, _) = verifier.current_settlement_roots();
     assert(current_nullifier_root == sparse_new_nullifier_root, 'BAD_NULLIFIER_ROOT');
+}
+
+#[test]
+fn auction_verifier_accepts_note_consolidation_proof_facts() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let consolidation_id = 0x779;
+    let output_bundle_ref = 0x999;
+    let prior_note_root = 0;
+    let prior_nullifier_root = 0;
+    let consumed_note_root = 0xabc;
+    let consumed_nullifier_root = 0xdef;
+    let output_note_root = 0x1234;
+    let new_note_root = root_only_state_transition(prior_note_root, output_note_root);
+    let new_nullifier_root = 0x5678;
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+
+    let consolidation_commitment = public_note_consolidation_commitment(
+        consolidation_id,
+        output_bundle_ref,
+        prior_note_root,
+        prior_nullifier_root,
+        consumed_note_root,
+        consumed_nullifier_root,
+        output_note_root,
+        new_note_root,
+        new_nullifier_root,
+    );
+    let proof_artifact_commitment = native_note_consolidation_message_hash(
+        auction_verifier, consolidation_commitment,
+    );
+    let proof_message_hash = note_consolidation_proof_message_hash(
+        auction_verifier, proof_artifact_commitment,
+    );
+    let proof_facts = valid_proof_facts(99, proof_message_hash);
+
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, proof_facts.span(), CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    verifier
+        .submit_note_consolidation_with_proof_facts(
+            consolidation_id,
+            proof_artifact_commitment,
+            output_bundle_ref,
+            prior_note_root,
+            prior_nullifier_root,
+            consumed_note_root,
+            consumed_nullifier_root,
+            output_note_root,
+            new_note_root,
+            new_nullifier_root,
+        );
+    stop_cheat_caller_address(auction_verifier);
+
+    assert(verifier.is_batch_settled(consolidation_id), 'CONSOL_NOT_SETTLED');
+    let (current_note_root, current_nullifier_root, _, _) = verifier.current_settlement_roots();
+    assert(current_note_root == new_note_root, 'BAD_CONSOL_NOTE_ROOT');
+    assert(current_nullifier_root == new_nullifier_root, 'BAD_CONSOL_NULL_ROOT');
+    let transition_id = verifier.note_root_transition_count() - 1;
+    let (kind, key, batch_root, transition_new_root) = verifier.note_root_transition(transition_id);
+    assert(kind == 2, 'BAD_CONSOL_KIND');
+    assert(key == consolidation_id, 'BAD_CONSOL_KEY');
+    assert(batch_root == output_note_root, 'BAD_CONSOL_BATCH_ROOT');
+    assert(transition_new_root == new_note_root, 'BAD_CONSOL_NEW_ROOT');
 }
 
 #[test]
