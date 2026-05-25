@@ -13,6 +13,7 @@ const ORDER_TYPE_HEARTBEAT_COVER: felt252 = 2;
 const TIF_CURRENT_BATCH_ONLY: felt252 = 0;
 const TIF_FILL_OR_KILL: felt252 = 1;
 const FEE_BPS_DENOMINATOR: u128 = 10000;
+const MIN_MAKER_CURVE_POINTS: usize = 3;
 const RENEWAL_CHILD_NULLIFIER_DOMAIN: felt252 =
     0x362b534b676bb36e394d08e276c8e64e65e3733e5d517a7eb6f438eafe54b61;
 const RENEWAL_PARENT_SECRET_DOMAIN: felt252 =
@@ -45,6 +46,20 @@ const ADMISSION_ROOT_DOMAIN: felt252 = 0x7a796c6974685f61646d69745f726f6f745f763
 const ADMISSION_LEAF_DOMAIN: felt252 = 0x7a796c6974685f61646d69745f6c6561665f7631;
 const MAX_ORDER_FUNDING_INPUTS: usize = 4;
 const MAX_MAKER_CURVE_POINTS: usize = 8;
+const PAIR_ID_STRK_USDC: felt252 =
+    0x116ee836b759d809a28dfcf84de04ce4d7ba6aca96741019ffcbbbbcaa8b29e;
+const PAIR_ID_ETH_USDC: felt252 =
+    0x2cbcdace0891f8e930c42d95e41029a4b97dbefe3c7ab4fc1624e094b2c8b5;
+const PAIR_ID_STRKBTC_USDC: felt252 =
+    0x3175bbc313ab68e1f07eba1058d265be29fbdf69c0ddb8caccbfd76d3e30879;
+const PAIR_ID_STRK_ETH: felt252 =
+    0x14b1e84d7d6fae29b9439cef188f5442d46c99d19dff91661595863d506e556;
+const PAIR_ID_STRK_STRKBTC: felt252 =
+    0x65011444e534a7ca8b4ee58eff07819342a4f35d51495af313aaffa482051a;
+const PAIR_ID_WBTC_STRKBTC: felt252 =
+    0x252c28489d75ea03408323cb9e3a5612c379ef971ba447b7a49f431ec9d2866;
+const PAIR_ID_USDC_USDT: felt252 =
+    0x28f97fdad77fbff0fc4c369dc3df554e9a0f782131015058ff3b0a8a2b22c22;
 const FUNDING_INPUT_SET_DOMAIN: felt252 = 0x7a796c6974685f66756e64696e675f7365745f7631;
 const FUNDING_NULLIFIER_SET_DOMAIN: felt252 = 0x7a796c6974685f66756e64696e675f6e756c6c5f7631;
 
@@ -475,6 +490,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         assert(order_type == ORDER_TYPE_LIMIT_BATCH || order_type == ORDER_TYPE_MAKER_CURVE, 'E');
         let (curve_total_amount, curve_capacity_at_price, curve_quote_funding_required) =
             assert_maker_curve(
+            pair_id,
             order_type,
             side,
             maker_curve_domain,
@@ -663,7 +679,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         assert(output_note_withdraw_authority == recipient_withdraw_authority, 'E');
 
         let order_fee_bps = fee_bps_for_order_type(
-            order_type, taker_fee_bps_u128, maker_fee_bps_u128,
+            order_type, parent_order_commitment, taker_fee_bps_u128, maker_fee_bps_u128,
         );
         let expected_residual_amount = if side == ORDER_SIDE_BUY {
             assert(limit_price >= clearing_price_u128, 'E');
@@ -761,6 +777,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         matched_fill_amounts.span(),
         matched_sides.span(),
         matched_order_types.span(),
+        matched_parent_order_commitments.span(),
         matched_funding_note_amounts.span(),
         matched_output_note_commitments.span(),
         matched_residual_note_flags.span(),
@@ -1666,6 +1683,7 @@ pub fn verify_auction_result_statement(
     let price_base_scale = settlement_price_base_scale(settlement_payload.span());
     let maker_curve_domain = settlement_maker_curve_domain(settlement_payload.span());
     let batch_id = settlement_batch_id(settlement_payload.span());
+    let pair_id = settlement_pair_id(settlement_payload.span());
     let matched_order_commitments = settlement_matched_order_commitments(settlement_payload.span());
     let matched_fill_amounts = settlement_matched_fill_amounts(settlement_payload.span());
     let clearing_price_u128 = felt_to_u128(clearing_price);
@@ -1729,6 +1747,7 @@ pub fn verify_auction_result_statement(
         'E',
     );
     assert_curve_commitments_for_summary(
+        pair_id,
         clearing_price_u128,
         price_base_scale_u128,
         sides.span(),
@@ -2057,6 +2076,7 @@ fn assert_auction_order_preimages(
         assert(recipient_residual_withdraw_authority != 0, 'E');
         let (curve_total_amount, _curve_capacity_at_price, curve_quote_funding_required) =
             assert_maker_curve(
+            pair_id,
             order_type,
             side,
             maker_curve_domain,
@@ -3022,6 +3042,7 @@ fn admission_summary_root(
 }
 
 fn assert_curve_commitments_for_summary(
+    pair_id: felt252,
     clearing_price: u128,
     price_base_scale: u128,
     sides: Span<felt252>,
@@ -3037,6 +3058,7 @@ fn assert_curve_commitments_for_summary(
     while index < maker_curve_commitments.len() {
         let point_count: usize = (*maker_curve_point_counts.at(index)).try_into().expect('E');
         let (_total, _eligible, _quote_required) = assert_maker_curve(
+            pair_id,
             *order_types.at(index),
             *sides.at(index),
             maker_curve_domain,
@@ -3973,6 +3995,7 @@ fn sum_curve_point_counts(counts: Span<felt252>) -> usize {
 }
 
 fn assert_maker_curve(
+    pair_id: felt252,
     order_type: felt252,
     side: felt252,
     maker_curve_domain: felt252,
@@ -3991,7 +4014,7 @@ fn assert_maker_curve(
     }
 
     assert(expected_commitment != 0, 'E');
-    assert(point_count != 0, 'E');
+    assert(point_count >= MIN_MAKER_CURVE_POINTS, 'E');
     assert(point_count <= MAX_MAKER_CURVE_POINTS, 'E');
     assert(cursor + point_count <= prices.len(), 'E');
     assert(cursor + point_count <= base_amounts.len(), 'E');
@@ -3999,6 +4022,7 @@ fn assert_maker_curve(
     let point_count_felt: felt252 = point_count.into();
     let mut recomputed_commitment = poseidon_hash2(maker_curve_domain, point_count_felt);
     let mut index = 0;
+    let mut first_price: u128 = 0;
     let mut previous_price: u128 = 0;
     let mut total_base_amount: u128 = 0;
     let mut eligible_base_amount: u128 = 0;
@@ -4012,6 +4036,10 @@ fn assert_maker_curve(
 
         let price = felt_to_u128(price_felt);
         let base_amount = felt_to_u128(base_amount_felt);
+        assert(base_amount >= maker_curve_min_band_base_amount(pair_id), 'E');
+        if index == 0 {
+            first_price = price;
+        }
         if index != 0 {
             assert(price > previous_price, 'E');
         }
@@ -4035,8 +4063,41 @@ fn assert_maker_curve(
         index += 1;
     }
 
+    assert(
+        previous_price * FEE_BPS_DENOMINATOR
+            >= first_price * (FEE_BPS_DENOMINATOR + maker_curve_min_spread_bps(pair_id)),
+        'E',
+    );
     assert(recomputed_commitment == expected_commitment, 'E');
     (total_base_amount, eligible_base_amount, quote_funding_required)
+}
+
+fn maker_curve_min_spread_bps(pair_id: felt252) -> u128 {
+    if pair_id == PAIR_ID_USDC_USDT {
+        return 5;
+    }
+    if pair_id == PAIR_ID_WBTC_STRKBTC {
+        return 10;
+    }
+    20
+}
+
+fn maker_curve_min_band_base_amount(pair_id: felt252) -> u128 {
+    if pair_id == PAIR_ID_ETH_USDC {
+        return 1000000000000000;
+    }
+    if pair_id == PAIR_ID_STRKBTC_USDC || pair_id == PAIR_ID_WBTC_STRKBTC {
+        return 100000;
+    }
+    if pair_id == PAIR_ID_USDC_USDT {
+        return 1000000;
+    }
+    if pair_id == PAIR_ID_STRK_USDC
+        || pair_id == PAIR_ID_STRK_ETH
+        || pair_id == PAIR_ID_STRK_STRKBTC {
+        return 1000000000000000000;
+    }
+    1
 }
 
 fn assert_public_output_present(
@@ -4070,6 +4131,7 @@ fn assert_netted_public_outputs(
     matched_fill_amounts: Span<felt252>,
     matched_sides: Span<felt252>,
     matched_order_types: Span<felt252>,
+    matched_parent_order_commitments: Span<felt252>,
     matched_funding_note_amounts: Span<felt252>,
     matched_output_note_commitments: Span<felt252>,
     matched_residual_note_flags: Span<felt252>,
@@ -4081,6 +4143,7 @@ fn assert_netted_public_outputs(
 ) {
     let _ = base_asset_id;
     let _ = quote_asset_id;
+    assert(matched_parent_order_commitments.len() == matched_output_note_commitments.len(), 'E');
     let mut output_index = 0;
     while output_index < output_note_commitments.len() {
         let public_commitment = *output_note_commitments.at(output_index);
@@ -4091,8 +4154,11 @@ fn assert_netted_public_outputs(
             let filled_amount = felt_to_u128(*matched_fill_amounts.at(order_index));
             let side = *matched_sides.at(order_index);
             let order_type = *matched_order_types.at(order_index);
+            let parent_order_commitment = *matched_parent_order_commitments.at(order_index);
             let funding_note_amount = felt_to_u128(*matched_funding_note_amounts.at(order_index));
-            let order_fee_bps = fee_bps_for_order_type(order_type, taker_fee_bps, maker_fee_bps);
+            let order_fee_bps = fee_bps_for_order_type(
+                order_type, parent_order_commitment, taker_fee_bps, maker_fee_bps,
+            );
             let primary_amount = if side == ORDER_SIDE_BUY {
                 let fee_amount = filled_amount * order_fee_bps / FEE_BPS_DENOMINATOR;
                 filled_amount - fee_amount
@@ -4568,14 +4634,16 @@ fn protocol_fee_root(
     poseidon_hash2(state, fee_count)
 }
 
-fn fee_bps_for_order_type(order_type: felt252, taker_fee_bps: u128, maker_fee_bps: u128) -> u128 {
+fn fee_bps_for_order_type(
+    order_type: felt252, parent_order_commitment: felt252, taker_fee_bps: u128, maker_fee_bps: u128,
+) -> u128 {
     if order_type == ORDER_TYPE_HEARTBEAT_COVER {
         return 0;
     }
-    if order_type == ORDER_TYPE_MAKER_CURVE {
+    if order_type == ORDER_TYPE_MAKER_CURVE && parent_order_commitment != 0 {
         return maker_fee_bps;
     }
-    assert(order_type == ORDER_TYPE_LIMIT_BATCH, 'E');
+    assert(order_type == ORDER_TYPE_LIMIT_BATCH || order_type == ORDER_TYPE_MAKER_CURVE, 'E');
     taker_fee_bps
 }
 
@@ -5011,6 +5079,8 @@ mod tests {
     use core::array::{Array, ArrayTrait};
     use super::{
         EMPTY_OUTPUT_NOTE_ROOT_DOMAIN, OUTPUT_RECOVERY_BUNDLE_DOMAIN, STATEMENT_TYPE_SETTLEMENT,
+        PAIR_ID_ETH_USDC, PAIR_ID_STRK_USDC, PAIR_ID_USDC_USDT, PAIR_ID_WBTC_STRKBTC,
+        fee_bps_for_order_type, maker_curve_min_band_base_amount, maker_curve_min_spread_bps,
         poseidon_hash2, protocol_fee_root, public_settlement_commitment, single_field_root,
         state_transition_root, verify_nullifier_statement, verify_renewal_statement,
         verify_settlement_statement,
@@ -5055,6 +5125,27 @@ mod tests {
         );
         let payload = empty_settlement_test_payload(transcript_commitment);
         assert(verify_settlement_statement(payload.span()) == transcript_commitment, 'E');
+    }
+
+    #[test]
+    fn maker_fee_requires_renewal_parent_commitment() {
+        assert(fee_bps_for_order_type(1, 0, 4, 0) == 4, 'E');
+        assert(fee_bps_for_order_type(1, 0x1234, 4, 0) == 0, 'E');
+        assert(fee_bps_for_order_type(0, 0, 4, 0) == 4, 'E');
+        assert(fee_bps_for_order_type(2, 0, 4, 0) == 0, 'E');
+    }
+
+    #[test]
+    fn maker_curve_thresholds_are_pair_specific() {
+        assert(maker_curve_min_spread_bps(PAIR_ID_USDC_USDT) == 5, 'E');
+        assert(maker_curve_min_spread_bps(PAIR_ID_WBTC_STRKBTC) == 10, 'E');
+        assert(maker_curve_min_spread_bps(PAIR_ID_STRK_USDC) == 20, 'E');
+
+        assert(maker_curve_min_band_base_amount(PAIR_ID_ETH_USDC) == 1000000000000000, 'E');
+        assert(maker_curve_min_band_base_amount(PAIR_ID_USDC_USDT) == 1000000, 'E');
+        assert(
+            maker_curve_min_band_base_amount(PAIR_ID_STRK_USDC) == 1000000000000000000, 'E',
+        );
     }
 
     #[test]
