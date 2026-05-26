@@ -10,6 +10,8 @@ const ORDER_SIDE_SELL: felt252 = 1;
 const ORDER_TYPE_LIMIT_BATCH: felt252 = 0;
 const ORDER_TYPE_MAKER_CURVE: felt252 = 1;
 const ORDER_TYPE_HEARTBEAT_COVER: felt252 = 2;
+const RELAY_MODE_SELF: felt252 = 0;
+const RELAY_MODE_ZYLITH: felt252 = 1;
 const TIF_CURRENT_BATCH_ONLY: felt252 = 0;
 const TIF_FILL_OR_KILL: felt252 = 1;
 const FEE_BPS_DENOMINATOR: u128 = 10000;
@@ -87,7 +89,9 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let price_base_scale = read_next(data, ref index);
     let taker_fee_bps = read_next(data, ref index);
     let maker_fee_bps = read_next(data, ref index);
+    let relay_fee_bps = read_next(data, ref index);
     let protocol_fee_recipient = read_next(data, ref index);
+    let relay_fee_recipient = read_next(data, ref index);
     let matched_order_count = read_next(data, ref index);
     let output_bundle_ref = read_next(data, ref index);
     let prior_note_root = read_next(data, ref index);
@@ -135,6 +139,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let matched_fill_amounts = read_vector(data, ref index);
     let matched_sides = read_vector(data, ref index);
     let matched_order_types = read_vector(data, ref index);
+    let matched_relay_modes = read_vector(data, ref index);
     let matched_maker_curve_commitments = read_vector(data, ref index);
     let matched_maker_curve_point_counts = read_vector(data, ref index);
     let matched_maker_curve_prices = read_vector(data, ref index);
@@ -239,9 +244,9 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         matched_order_commitments.len(),
         array![
             matched_fill_amounts.len().into(), matched_sides.len().into(),
-            matched_order_types.len().into(), matched_limit_prices.len().into(),
-            matched_order_amounts.len().into(), matched_min_fills.len().into(),
-            matched_maker_curve_commitments.len().into(),
+            matched_order_types.len().into(), matched_relay_modes.len().into(),
+            matched_limit_prices.len().into(), matched_order_amounts.len().into(),
+            matched_min_fills.len().into(), matched_maker_curve_commitments.len().into(),
             matched_maker_curve_point_counts.len().into(), matched_time_in_force.len().into(),
             matched_expiry_epochs.len().into(), matched_order_nonces.len().into(),
             matched_parent_order_commitments.len().into(),
@@ -362,14 +367,19 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let price_base_scale_u128 = felt_to_u128(price_base_scale);
     let taker_fee_bps_u128 = felt_to_u128(taker_fee_bps);
     let maker_fee_bps_u128 = felt_to_u128(maker_fee_bps);
+    let relay_fee_bps_u128 = felt_to_u128(relay_fee_bps);
     assert(taker_fee_bps_u128 <= FEE_BPS_DENOMINATOR, 'E');
     assert(maker_fee_bps_u128 <= FEE_BPS_DENOMINATOR, 'E');
+    assert(relay_fee_bps_u128 <= FEE_BPS_DENOMINATOR, 'E');
     assert(protocol_fee_recipient != 0, 'E');
+    assert(relay_fee_recipient != 0, 'E');
     let mut index_order = 0;
     let mut total_buy_base: u128 = 0;
     let mut total_sell_base: u128 = 0;
     let mut expected_base_fee: u128 = 0;
     let mut expected_quote_fee: u128 = 0;
+    let mut expected_base_relay_fee: u128 = 0;
+    let mut expected_quote_relay_fee: u128 = 0;
     let mut curve_cursor = 0;
     let mut renewal_cursor = 0;
     let mut note_membership_path_cursor = 0;
@@ -381,6 +391,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         let filled_amount_felt = *matched_fill_amounts.at(index_order);
         let side = *matched_sides.at(index_order);
         let order_type = *matched_order_types.at(index_order);
+        let relay_mode = *matched_relay_modes.at(index_order);
         let maker_curve_commitment = *matched_maker_curve_commitments.at(index_order);
         let maker_curve_point_count_felt = *matched_maker_curve_point_counts.at(index_order);
         let limit_price_felt = *matched_limit_prices.at(index_order);
@@ -470,6 +481,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             parent_cancel_authority,
             parent_authorization_secret,
         );
+        assert_relay_mode(relay_mode, order_type, parent_order_commitment);
         if parent_order_commitment != 0 {
             assert(renewal_cursor < renewal_child_nullifiers.len(), 'E');
             assert(
@@ -527,6 +539,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             batch_id,
             side,
             order_type,
+            relay_mode,
             maker_curve_commitment,
             limit_price_felt,
             order_amount_felt,
@@ -681,6 +694,9 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         let order_fee_bps = fee_bps_for_order_type(
             order_type, parent_order_commitment, taker_fee_bps_u128, maker_fee_bps_u128,
         );
+        let order_relay_fee_bps = relay_fee_bps_for_order(
+            relay_mode, order_type, parent_order_commitment, relay_fee_bps_u128,
+        );
         let expected_residual_amount = if side == ORDER_SIDE_BUY {
             assert(limit_price >= clearing_price_u128, 'E');
             assert(output_note_asset_id == base_asset_id, 'E');
@@ -690,8 +706,10 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             );
             assert(funding_note_amount >= spend_amount, 'E');
             let fee_amount = filled_amount * order_fee_bps / FEE_BPS_DENOMINATOR;
+            let relay_fee_amount = filled_amount * order_relay_fee_bps / FEE_BPS_DENOMINATOR;
             total_buy_base = total_buy_base + filled_amount;
             expected_base_fee = expected_base_fee + fee_amount;
+            expected_base_relay_fee = expected_base_relay_fee + relay_fee_amount;
             funding_note_amount - spend_amount
         } else {
             assert(side == ORDER_SIDE_SELL, 'E');
@@ -703,8 +721,10 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
                 filled_amount, clearing_price_u128, price_base_scale_u128,
             );
             let fee_amount = gross_quote * order_fee_bps / FEE_BPS_DENOMINATOR;
+            let relay_fee_amount = gross_quote * order_relay_fee_bps / FEE_BPS_DENOMINATOR;
             total_sell_base = total_sell_base + filled_amount;
             expected_quote_fee = expected_quote_fee + fee_amount;
+            expected_quote_relay_fee = expected_quote_relay_fee + relay_fee_amount;
             funding_note_amount - filled_amount
         };
 
@@ -777,6 +797,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         matched_fill_amounts.span(),
         matched_sides.span(),
         matched_order_types.span(),
+        matched_relay_modes.span(),
         matched_parent_order_commitments.span(),
         matched_funding_note_amounts.span(),
         matched_output_note_commitments.span(),
@@ -786,6 +807,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         output_note_amounts.span(),
         taker_fee_bps_u128,
         maker_fee_bps_u128,
+        relay_fee_bps_u128,
     );
 
     let consumed_note_root = single_field_root(
@@ -828,8 +850,11 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         base_asset_id,
         quote_asset_id,
         protocol_fee_recipient,
+        relay_fee_recipient,
         expected_base_fee,
         expected_quote_fee,
+        expected_base_relay_fee,
+        expected_quote_relay_fee,
     );
     let new_note_root = state_transition_root(
         state_transition_root_domain, prior_note_root, output_note_root,
@@ -857,7 +882,9 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         price_base_scale,
         taker_fee_bps,
         maker_fee_bps,
+        relay_fee_bps,
         protocol_fee_recipient,
+        relay_fee_recipient,
         output_bundle_ref,
         prior_note_root,
         prior_nullifier_root,
@@ -908,6 +935,8 @@ pub fn verify_nullifier_statement(data: Span<felt252>) -> (felt252, felt252, fel
     read_next(data, ref index);
     read_next(data, ref index);
     read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
     let prior_nullifier_root = read_next(data, ref index);
     read_next(data, ref index);
     read_next(data, ref index);
@@ -925,7 +954,7 @@ pub fn verify_nullifier_statement(data: Span<felt252>) -> (felt252, felt252, fel
     assert(nullifier_sparse_leaf_domain != 0, 'E');
     assert(nullifier_sparse_node_domain != 0, 'E');
 
-    skip_vectors(data, ref index, 59);
+    skip_vectors(data, ref index, 60);
     let consumed_note_commitments = read_vector(data, ref index);
     let consumed_nullifiers = read_vector(data, ref index);
     let nullifier_sparse_key_lows = read_vector(data, ref index);
@@ -999,6 +1028,8 @@ pub fn verify_renewal_statement(data: Span<felt252>) -> (felt252, felt252, felt2
     read_next(data, ref index);
     read_next(data, ref index);
     read_next(data, ref index);
+    read_next(data, ref index);
+    read_next(data, ref index);
     let prior_renewal_root = read_next(data, ref index);
     read_next(data, ref index);
     read_next(data, ref index);
@@ -1016,6 +1047,7 @@ pub fn verify_renewal_statement(data: Span<felt252>) -> (felt252, felt252, felt2
     assert(nullifier_sparse_node_domain != 0, 'E');
 
     let matched_order_commitments = read_vector(data, ref index);
+    read_vector(data, ref index);
     read_vector(data, ref index);
     read_vector(data, ref index);
     read_vector(data, ref index);
@@ -1523,6 +1555,7 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
     let order_commitments = read_vector(data, ref index);
     let sides = read_vector(data, ref index);
     let order_types = read_vector(data, ref index);
+    let relay_modes = read_vector(data, ref index);
     let maker_curve_commitments = read_vector(data, ref index);
     let maker_curve_point_counts = read_vector(data, ref index);
     let maker_curve_prices = read_vector(data, ref index);
@@ -1566,9 +1599,10 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
         order_commitments.len(),
         array![
             sides.len().into(), order_types.len().into(), maker_curve_commitments.len().into(),
-            maker_curve_point_counts.len().into(), limit_prices.len().into(),
-            order_amounts.len().into(), min_fills.len().into(), time_in_force.len().into(),
-            expiry_epochs.len().into(), order_nonces.len().into(), auditor_flags.len().into(),
+            relay_modes.len().into(), maker_curve_point_counts.len().into(),
+            limit_prices.len().into(), order_amounts.len().into(), min_fills.len().into(),
+            time_in_force.len().into(), expiry_epochs.len().into(), order_nonces.len().into(),
+            auditor_flags.len().into(),
             parent_order_commitments.len().into(), parent_child_indexes.len().into(),
             parent_secret_commitments.len().into(), parent_cancel_authorities.len().into(),
             parent_authorization_secrets.len().into(), funding_note_refs.len().into(),
@@ -1605,6 +1639,7 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
             order_commitments.span(),
             sides.span(),
             order_types.span(),
+            relay_modes.span(),
             maker_curve_commitments.span(),
             maker_curve_point_counts.span(),
             maker_curve_prices.span(),
@@ -1658,6 +1693,7 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
         order_commitments.span(),
         sides.span(),
         order_types.span(),
+        relay_modes.span(),
         maker_curve_commitments.span(),
         limit_prices.span(),
         order_amounts.span(),
@@ -1694,6 +1730,7 @@ pub fn verify_auction_result_statement(
     let order_commitments = read_vector(data, ref index);
     let sides = read_vector(data, ref index);
     let order_types = read_vector(data, ref index);
+    let relay_modes = read_vector(data, ref index);
     let maker_curve_commitments = read_vector(data, ref index);
     let maker_curve_point_counts = read_vector(data, ref index);
     let maker_curve_prices = read_vector(data, ref index);
@@ -1717,10 +1754,11 @@ pub fn verify_auction_result_statement(
     assert_all_lengths_match(
         order_commitments.len(),
         array![
-            sides.len().into(), order_types.len().into(), maker_curve_commitments.len().into(),
-            maker_curve_point_counts.len().into(), limit_prices.len().into(),
-            order_amounts.len().into(), min_fills.len().into(), time_in_force.len().into(),
-            funding_note_amounts.len().into(), funding_note_owner_keys.len().into(),
+            sides.len().into(), order_types.len().into(), relay_modes.len().into(),
+            maker_curve_commitments.len().into(), maker_curve_point_counts.len().into(),
+            limit_prices.len().into(), order_amounts.len().into(), min_fills.len().into(),
+            time_in_force.len().into(), funding_note_amounts.len().into(),
+            funding_note_owner_keys.len().into(),
             allocation_fill_amounts.len().into(),
         ]
             .span(),
@@ -1736,6 +1774,7 @@ pub fn verify_auction_result_statement(
             order_commitments.span(),
             sides.span(),
             order_types.span(),
+            relay_modes.span(),
             maker_curve_commitments.span(),
             limit_prices.span(),
             order_amounts.span(),
@@ -1944,16 +1983,16 @@ fn settlement_quote_asset_id(settlement_payload: Span<felt252>) -> felt252 {
 }
 
 fn settlement_matched_order_commitments(settlement_payload: Span<felt252>) -> Array<felt252> {
-    assert(settlement_payload.len() > 34, 'E');
+    assert(settlement_payload.len() > 36, 'E');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'E');
-    let mut index: usize = 34;
+    let mut index: usize = 36;
     read_vector(settlement_payload, ref index)
 }
 
 fn settlement_matched_fill_amounts(settlement_payload: Span<felt252>) -> Array<felt252> {
-    assert(settlement_payload.len() > 34, 'E');
+    assert(settlement_payload.len() > 36, 'E');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'E');
-    let mut index: usize = 34;
+    let mut index: usize = 36;
     let _matched_order_commitments = read_vector(settlement_payload, ref index);
     read_vector(settlement_payload, ref index)
 }
@@ -1964,6 +2003,7 @@ fn assert_auction_order_preimages(
     order_commitments: Span<felt252>,
     sides: Span<felt252>,
     order_types: Span<felt252>,
+    relay_modes: Span<felt252>,
     maker_curve_commitments: Span<felt252>,
     maker_curve_point_counts: Span<felt252>,
     maker_curve_prices: Span<felt252>,
@@ -2018,6 +2058,7 @@ fn assert_auction_order_preimages(
         let order_commitment = *order_commitments.at(index);
         let side = *sides.at(index);
         let order_type = *order_types.at(index);
+        let relay_mode = *relay_modes.at(index);
         let limit_price = *limit_prices.at(index);
         let order_amount = *order_amounts.at(index);
         let min_fill = *min_fills.at(index);
@@ -2069,6 +2110,7 @@ fn assert_auction_order_preimages(
             parent_cancel_authority,
             parent_authorization_secret,
         );
+        assert_relay_mode(relay_mode, order_type, parent_order_commitment);
         assert(auditor_view_allowed == 0 || auditor_view_allowed == 1, 'E');
         assert(recipient_owner_key != 0, 'E');
         assert(recipient_spend_authority != 0, 'E');
@@ -2130,6 +2172,7 @@ fn assert_auction_order_preimages(
             batch_id,
             side,
             order_type,
+            relay_mode,
             *maker_curve_commitments.at(index),
             limit_price,
             order_amount,
@@ -2985,6 +3028,7 @@ fn admission_summary_leaf(
     order_commitment: felt252,
     side: felt252,
     order_type: felt252,
+    relay_mode: felt252,
     maker_curve_commitment: felt252,
     limit_price: felt252,
     amount: felt252,
@@ -2996,6 +3040,7 @@ fn admission_summary_leaf(
     let mut state = poseidon_hash2(ADMISSION_LEAF_DOMAIN, order_commitment);
     state = poseidon_hash2(state, side);
     state = poseidon_hash2(state, order_type);
+    state = poseidon_hash2(state, relay_mode);
     state = poseidon_hash2(state, maker_curve_commitment);
     state = poseidon_hash2(state, limit_price);
     state = poseidon_hash2(state, amount);
@@ -3009,6 +3054,7 @@ fn admission_summary_root(
     order_commitments: Span<felt252>,
     sides: Span<felt252>,
     order_types: Span<felt252>,
+    relay_modes: Span<felt252>,
     maker_curve_commitments: Span<felt252>,
     limit_prices: Span<felt252>,
     order_amounts: Span<felt252>,
@@ -3027,6 +3073,7 @@ fn admission_summary_root(
                     *order_commitments.at(index),
                     *sides.at(index),
                     *order_types.at(index),
+                    *relay_modes.at(index),
                     *maker_curve_commitments.at(index),
                     *limit_prices.at(index),
                     *order_amounts.at(index),
@@ -4131,6 +4178,7 @@ fn assert_netted_public_outputs(
     matched_fill_amounts: Span<felt252>,
     matched_sides: Span<felt252>,
     matched_order_types: Span<felt252>,
+    matched_relay_modes: Span<felt252>,
     matched_parent_order_commitments: Span<felt252>,
     matched_funding_note_amounts: Span<felt252>,
     matched_output_note_commitments: Span<felt252>,
@@ -4140,10 +4188,12 @@ fn assert_netted_public_outputs(
     output_note_amounts: Span<felt252>,
     taker_fee_bps: u128,
     maker_fee_bps: u128,
+    relay_fee_bps: u128,
 ) {
     let _ = base_asset_id;
     let _ = quote_asset_id;
     assert(matched_parent_order_commitments.len() == matched_output_note_commitments.len(), 'E');
+    assert(matched_relay_modes.len() == matched_output_note_commitments.len(), 'E');
     let mut output_index = 0;
     while output_index < output_note_commitments.len() {
         let public_commitment = *output_note_commitments.at(output_index);
@@ -4154,20 +4204,25 @@ fn assert_netted_public_outputs(
             let filled_amount = felt_to_u128(*matched_fill_amounts.at(order_index));
             let side = *matched_sides.at(order_index);
             let order_type = *matched_order_types.at(order_index);
+            let relay_mode = *matched_relay_modes.at(order_index);
             let parent_order_commitment = *matched_parent_order_commitments.at(order_index);
             let funding_note_amount = felt_to_u128(*matched_funding_note_amounts.at(order_index));
             let order_fee_bps = fee_bps_for_order_type(
                 order_type, parent_order_commitment, taker_fee_bps, maker_fee_bps,
             );
+            let order_relay_fee_bps = relay_fee_bps_for_order(
+                relay_mode, order_type, parent_order_commitment, relay_fee_bps,
+            );
+            let total_fee_bps = order_fee_bps + order_relay_fee_bps;
             let primary_amount = if side == ORDER_SIDE_BUY {
-                let fee_amount = filled_amount * order_fee_bps / FEE_BPS_DENOMINATOR;
+                let fee_amount = filled_amount * total_fee_bps / FEE_BPS_DENOMINATOR;
                 filled_amount - fee_amount
             } else {
                 assert(side == ORDER_SIDE_SELL, 'E');
                 let gross_quote = quote_amount_for_base_amount(
                     filled_amount, clearing_price, price_base_scale,
                 );
-                let fee_amount = gross_quote * order_fee_bps / FEE_BPS_DENOMINATOR;
+                let fee_amount = gross_quote * total_fee_bps / FEE_BPS_DENOMINATOR;
                 gross_quote - fee_amount
             };
             if *matched_output_note_commitments.at(order_index) == public_commitment {
@@ -4614,8 +4669,11 @@ fn protocol_fee_root(
     base_asset_id: felt252,
     quote_asset_id: felt252,
     protocol_fee_recipient: felt252,
+    relay_fee_recipient: felt252,
     base_fee_amount: u128,
     quote_fee_amount: u128,
+    base_relay_fee_amount: u128,
+    quote_relay_fee_amount: u128,
 ) -> felt252 {
     let mut state = domain;
     let mut fee_count: felt252 = 0;
@@ -4629,6 +4687,18 @@ fn protocol_fee_root(
         state = poseidon_hash2(state, quote_asset_id);
         state = poseidon_hash2(state, protocol_fee_recipient);
         state = poseidon_hash2(state, quote_fee_amount.into());
+        fee_count += 1;
+    }
+    if base_relay_fee_amount != 0 {
+        state = poseidon_hash2(state, base_asset_id);
+        state = poseidon_hash2(state, relay_fee_recipient);
+        state = poseidon_hash2(state, base_relay_fee_amount.into());
+        fee_count += 1;
+    }
+    if quote_relay_fee_amount != 0 {
+        state = poseidon_hash2(state, quote_asset_id);
+        state = poseidon_hash2(state, relay_fee_recipient);
+        state = poseidon_hash2(state, quote_relay_fee_amount.into());
         fee_count += 1;
     }
     poseidon_hash2(state, fee_count)
@@ -4645,6 +4715,29 @@ fn fee_bps_for_order_type(
     }
     assert(order_type == ORDER_TYPE_LIMIT_BATCH || order_type == ORDER_TYPE_MAKER_CURVE, 'E');
     taker_fee_bps
+}
+
+fn assert_relay_mode(
+    relay_mode: felt252, order_type: felt252, parent_order_commitment: felt252,
+) {
+    assert(relay_mode == RELAY_MODE_SELF || relay_mode == RELAY_MODE_ZYLITH, 'E');
+    if relay_mode == RELAY_MODE_ZYLITH {
+        assert(order_type == ORDER_TYPE_MAKER_CURVE, 'E');
+        assert(parent_order_commitment != 0, 'E');
+    }
+}
+
+fn relay_fee_bps_for_order(
+    relay_mode: felt252,
+    order_type: felt252,
+    parent_order_commitment: felt252,
+    relay_fee_bps: u128,
+) -> u128 {
+    assert_relay_mode(relay_mode, order_type, parent_order_commitment);
+    if relay_mode == RELAY_MODE_ZYLITH {
+        return relay_fee_bps;
+    }
+    0
 }
 
 fn poseidon_hash2(x: felt252, y: felt252) -> felt252 {
@@ -4683,6 +4776,7 @@ fn order_intent_commitment(
     batch_id: felt252,
     side: felt252,
     order_type: felt252,
+    relay_mode: felt252,
     maker_curve_commitment: felt252,
     limit_price: felt252,
     amount: felt252,
@@ -4707,7 +4801,8 @@ fn order_intent_commitment(
     let with_batch = poseidon_hash2(with_pair, batch_id);
     let with_side = poseidon_hash2(with_batch, side);
     let with_order_type = poseidon_hash2(with_side, order_type);
-    let with_curve = poseidon_hash2(with_order_type, maker_curve_commitment);
+    let with_relay_mode = poseidon_hash2(with_order_type, relay_mode);
+    let with_curve = poseidon_hash2(with_relay_mode, maker_curve_commitment);
     let with_limit = poseidon_hash2(with_curve, limit_price);
     let with_amount = poseidon_hash2(with_limit, amount);
     let with_min_fill = poseidon_hash2(with_amount, min_fill);
@@ -4803,7 +4898,9 @@ fn public_settlement_commitment(
     price_base_scale: felt252,
     taker_fee_bps: felt252,
     maker_fee_bps: felt252,
+    relay_fee_bps: felt252,
     protocol_fee_recipient: felt252,
+    relay_fee_recipient: felt252,
     output_bundle_ref: felt252,
     prior_note_root: felt252,
     prior_nullifier_root: felt252,
@@ -4828,7 +4925,9 @@ fn public_settlement_commitment(
     state = poseidon_hash2(state, price_base_scale);
     state = poseidon_hash2(state, taker_fee_bps);
     state = poseidon_hash2(state, maker_fee_bps);
+    state = poseidon_hash2(state, relay_fee_bps);
     state = poseidon_hash2(state, protocol_fee_recipient);
+    state = poseidon_hash2(state, relay_fee_recipient);
     state = poseidon_hash2(state, output_bundle_ref);
     state = poseidon_hash2(state, prior_note_root);
     state = poseidon_hash2(state, prior_nullifier_root);
@@ -5081,9 +5180,9 @@ mod tests {
         EMPTY_OUTPUT_NOTE_ROOT_DOMAIN, OUTPUT_RECOVERY_BUNDLE_DOMAIN, STATEMENT_TYPE_SETTLEMENT,
         PAIR_ID_ETH_USDC, PAIR_ID_STRK_USDC, PAIR_ID_USDC_USDT, PAIR_ID_WBTC_STRKBTC,
         fee_bps_for_order_type, maker_curve_min_band_base_amount, maker_curve_min_spread_bps,
-        poseidon_hash2, protocol_fee_root, public_settlement_commitment, single_field_root,
-        state_transition_root, verify_nullifier_statement, verify_renewal_statement,
-        verify_settlement_statement,
+        poseidon_hash2, protocol_fee_root, public_settlement_commitment, relay_fee_bps_for_order,
+        single_field_root, state_transition_root, verify_nullifier_statement,
+        verify_renewal_statement, verify_settlement_statement,
     };
 
     #[test]
@@ -5093,7 +5192,7 @@ mod tests {
         let consumed_note_root = single_field_root(0x3001, array![].span());
         let consumed_nullifier_root = single_field_root(0x3002, array![].span());
         let renewal_child_root = single_field_root(0x3003, array![].span());
-        let fee_root = protocol_fee_root(0x3005, 0x2006, 0x2007, 0x4010, 0, 0);
+        let fee_root = protocol_fee_root(0x3005, 0x2006, 0x2007, 0x4010, 0x4020, 0, 0, 0, 0);
         let new_note_root = state_transition_root(0x3006, 0, output_note_root);
         let new_fee_root = state_transition_root(0x3006, 0, fee_root);
         let transcript_commitment = public_settlement_commitment(
@@ -5107,7 +5206,9 @@ mod tests {
             1,
             4,
             0,
+            0,
             0x4010,
+            0x4020,
             output_bundle_ref,
             0,
             0,
@@ -5133,6 +5234,32 @@ mod tests {
         assert(fee_bps_for_order_type(1, 0x1234, 4, 0) == 0, 'E');
         assert(fee_bps_for_order_type(0, 0, 4, 0) == 4, 'E');
         assert(fee_bps_for_order_type(2, 0, 4, 0) == 0, 'E');
+    }
+
+    #[test]
+    fn relay_fee_requires_zylith_relay_maker_child() {
+        assert(relay_fee_bps_for_order(0, 1, 0x1234, 2) == 0, 'E');
+        assert(relay_fee_bps_for_order(1, 1, 0x1234, 2) == 2, 'E');
+    }
+
+    #[test]
+    fn fee_root_separates_protocol_and_relay_rows() {
+        let root = protocol_fee_root(0x3005, 0x2006, 0x2007, 0x4010, 0x4020, 10, 20, 30, 40);
+        let mut expected = 0x3005;
+        expected = poseidon_hash2(expected, 0x2006);
+        expected = poseidon_hash2(expected, 0x4010);
+        expected = poseidon_hash2(expected, 10);
+        expected = poseidon_hash2(expected, 0x2007);
+        expected = poseidon_hash2(expected, 0x4010);
+        expected = poseidon_hash2(expected, 20);
+        expected = poseidon_hash2(expected, 0x2006);
+        expected = poseidon_hash2(expected, 0x4020);
+        expected = poseidon_hash2(expected, 30);
+        expected = poseidon_hash2(expected, 0x2007);
+        expected = poseidon_hash2(expected, 0x4020);
+        expected = poseidon_hash2(expected, 40);
+        expected = poseidon_hash2(expected, 4);
+        assert(root == expected, 'E');
     }
 
     #[test]
@@ -5162,7 +5289,7 @@ mod tests {
         let consumed_note_root = single_field_root(0x3001, array![].span());
         let consumed_nullifier_root = single_field_root(0x3002, array![].span());
         let renewal_child_root = single_field_root(0x3003, array![].span());
-        let fee_root = protocol_fee_root(0x3005, 0x2006, 0x2007, 0x4010, 0, 0);
+        let fee_root = protocol_fee_root(0x3005, 0x2006, 0x2007, 0x4010, 0x4020, 0, 0, 0, 0);
         let new_note_root = state_transition_root(0x3006, 0, output_note_root);
         let new_fee_root = state_transition_root(0x3006, 0, fee_root);
         let transcript_commitment = public_settlement_commitment(
@@ -5176,7 +5303,9 @@ mod tests {
             1,
             4,
             0,
+            0,
             0x4010,
+            0x4020,
             output_bundle_ref,
             0,
             0,
@@ -5208,7 +5337,7 @@ mod tests {
         let consumed_note_root = single_field_root(0x3001, array![].span());
         let consumed_nullifier_root = single_field_root(0x3002, array![].span());
         let renewal_child_root = single_field_root(0x3003, array![].span());
-        let fee_root = protocol_fee_root(0x3005, 0x2006, 0x2007, 0x4010, 0, 0);
+        let fee_root = protocol_fee_root(0x3005, 0x2006, 0x2007, 0x4010, 0x4020, 0, 0, 0, 0);
         let new_note_root = state_transition_root(0x3006, 0, output_note_root);
         let new_fee_root = state_transition_root(0x3006, 0, fee_root);
         let transcript_commitment = public_settlement_commitment(
@@ -5222,7 +5351,9 @@ mod tests {
             1,
             4,
             0,
+            0,
             0x4010,
+            0x4020,
             output_bundle_ref,
             0,
             0,
@@ -5251,10 +5382,10 @@ mod tests {
         let mut payload = array![
             STATEMENT_TYPE_SETTLEMENT, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 0x2001,
             0x2002, 0x2003, 0x2004, 0x2005, transcript_commitment, 0x2006, 0x2007, 0, 1, 4,
-            0, 0x4010, 0, poseidon_hash2(OUTPUT_RECOVERY_BUNDLE_DOMAIN, 0), 0, 0, 0, 0, 0x3001,
-            0x3002, 0x3003, 0x3004, 0x3005, 0x3006, 0x3007, 0x3008,
+            0, 0, 0x4010, 0x4020, 0, poseidon_hash2(OUTPUT_RECOVERY_BUNDLE_DOMAIN, 0), 0, 0,
+            0, 0, 0x3001, 0x3002, 0x3003, 0x3004, 0x3005, 0x3006, 0x3007, 0x3008,
         ];
-        append_empty_test_vectors(ref payload, 101);
+        append_empty_test_vectors(ref payload, 102);
         payload
     }
 

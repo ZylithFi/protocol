@@ -63,8 +63,11 @@ const WRONG_CHAIN_ID: felt252 = 'SN_MAIN';
 const TEST_PRICE_BASE_SCALE: u128 = 1;
 const TEST_TAKER_FEE_BPS: u128 = 4;
 const TEST_MAKER_FEE_BPS: u128 = 0;
+const TEST_RELAY_FEE_BPS: u128 = 2;
 const TEST_PROTOCOL_FEE_RECIPIENT: felt252 =
     0x02478731e01081aa57abe958afa8c29dfa83032c10d647a63b0394c23beb6192;
+const TEST_RELAY_FEE_RECIPIENT: felt252 =
+    0x02c79e77ef9014bbed5e612f86f8e011b05450aa9b7821d97c281cb2ac6d29a;
 
 fn deploy_commitment_registry(admin: ContractAddress) -> ContractAddress {
     let class = declare("CommitmentRegistry").unwrap().contract_class();
@@ -123,10 +126,19 @@ fn deploy_auction_verifier(
     start_cheat_caller_address(verifier_address, admin);
     verifier.set_proof_program(verifier_address, TEST_PROOF_PROGRAM_HASH);
     verifier.set_protocol_fee_recipient(TEST_PROTOCOL_FEE_RECIPIENT);
-    verifier.set_pair_fee_config(0x888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS);
-    verifier.set_pair_fee_config(0x889, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS);
-    verifier.set_pair_fee_config(0x1888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS);
-    verifier.set_pair_fee_config(0x2888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS);
+    verifier.set_relay_fee_recipient(TEST_RELAY_FEE_RECIPIENT);
+    verifier.set_pair_fee_config(
+        0x888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS,
+    );
+    verifier.set_pair_fee_config(
+        0x889, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS,
+    );
+    verifier.set_pair_fee_config(
+        0x1888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS,
+    );
+    verifier.set_pair_fee_config(
+        0x2888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS,
+    );
     stop_cheat_caller_address(verifier_address);
     verifier_address
 }
@@ -222,7 +234,7 @@ fn auction_verifier_rejects_fee_config_above_protocol_cap() {
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
     start_cheat_caller_address(auction_verifier, admin);
-    verifier.set_pair_fee_config(0x888, 101, 0);
+    verifier.set_pair_fee_config(0x888, 101, 0, 0);
 }
 
 #[test]
@@ -233,7 +245,7 @@ fn auction_verifier_rejects_direct_pair_fee_reconfiguration() {
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
     start_cheat_caller_address(auction_verifier, admin);
-    verifier.set_pair_fee_config(0x888, 5, 0);
+    verifier.set_pair_fee_config(0x888, 5, 0, TEST_RELAY_FEE_BPS);
 }
 
 #[test]
@@ -245,7 +257,7 @@ fn auction_verifier_rejects_early_pair_fee_execution() {
 
     start_cheat_caller_address(auction_verifier, admin);
     cheat_block_timestamp(auction_verifier, 1_000, CheatSpan::TargetCalls(1));
-    verifier.propose_pair_fee_config(0x888, 5, 0);
+    verifier.propose_pair_fee_config(0x888, 5, 0, TEST_RELAY_FEE_BPS);
     cheat_block_timestamp(auction_verifier, 87_399, CheatSpan::TargetCalls(1));
     verifier.execute_pair_fee_config(0x888);
 }
@@ -258,12 +270,14 @@ fn auction_verifier_timelocks_pair_fee_reconfiguration() {
 
     start_cheat_caller_address(auction_verifier, admin);
     cheat_block_timestamp(auction_verifier, 1_000, CheatSpan::TargetCalls(1));
-    verifier.propose_pair_fee_config(0x888, 5, 0);
+    verifier.propose_pair_fee_config(0x888, 5, 0, TEST_RELAY_FEE_BPS);
     stop_cheat_caller_address(auction_verifier);
 
-    let (pending_taker, pending_maker, eta, active) = verifier.pending_pair_fee_config(0x888);
+    let (pending_taker, pending_maker, pending_relay, eta, active) = verifier
+        .pending_pair_fee_config(0x888);
     assert(pending_taker == 5, 'BAD_PENDING_TAKER');
     assert(pending_maker == 0, 'BAD_PENDING_MAKER');
+    assert(pending_relay == TEST_RELAY_FEE_BPS, 'BAD_PENDING_RELAY');
     assert(eta == 87_400, 'BAD_PAIR_FEE_ETA');
     assert(active, 'PAIR_FEE_NOT_PENDING');
 
@@ -272,11 +286,12 @@ fn auction_verifier_timelocks_pair_fee_reconfiguration() {
     verifier.execute_pair_fee_config(0x888);
     stop_cheat_caller_address(auction_verifier);
 
-    let (taker, maker, configured) = verifier.pair_fee_config(0x888);
+    let (taker, maker, relay, configured) = verifier.pair_fee_config(0x888);
     assert(taker == 5, 'BAD_TAKER');
     assert(maker == 0, 'BAD_MAKER');
+    assert(relay == TEST_RELAY_FEE_BPS, 'BAD_RELAY');
     assert(configured, 'PAIR_FEE_UNSET');
-    let (_pending_taker, _pending_maker, _eta, active_after) = verifier
+    let (_pending_taker, _pending_maker, _pending_relay, _eta, active_after) = verifier
         .pending_pair_fee_config(0x888);
     assert(!active_after, 'PAIR_FEE_STILL_PENDING');
 }
@@ -844,7 +859,9 @@ fn root_only_public_settlement_commitment(
     state = poseidon_hash2(state, TEST_PRICE_BASE_SCALE.into());
     state = poseidon_hash2(state, TEST_TAKER_FEE_BPS.into());
     state = poseidon_hash2(state, TEST_MAKER_FEE_BPS.into());
+    state = poseidon_hash2(state, TEST_RELAY_FEE_BPS.into());
     state = poseidon_hash2(state, TEST_PROTOCOL_FEE_RECIPIENT);
+    state = poseidon_hash2(state, TEST_RELAY_FEE_RECIPIENT);
     state = poseidon_hash2(state, output_bundle_ref);
     state = poseidon_hash2(state, prior_note_root);
     state = poseidon_hash2(state, prior_nullifier_root);
@@ -888,6 +905,7 @@ fn submit_root_settlement(
     let bound_fee_root = normalized_fee_root(fee_root);
     let bound_new_fee_root = normalized_new_fee_root(prior_fee_root, fee_root, new_fee_root);
     let fee_asset_ids: Array<felt252> = array![];
+    let fee_recipients: Array<felt252> = array![];
     let fee_amounts: Array<u128> = array![];
     verifier
         .submit_settlement_with_proof_facts(
@@ -900,7 +918,9 @@ fn submit_root_settlement(
             TEST_PRICE_BASE_SCALE,
             TEST_TAKER_FEE_BPS,
             TEST_MAKER_FEE_BPS,
+            TEST_RELAY_FEE_BPS,
             TEST_PROTOCOL_FEE_RECIPIENT,
+            TEST_RELAY_FEE_RECIPIENT,
             output_bundle_ref,
             prior_note_root,
             prior_nullifier_root,
@@ -916,6 +936,7 @@ fn submit_root_settlement(
             new_renewal_root,
             bound_new_fee_root,
             fee_asset_ids.span(),
+            fee_recipients.span(),
             fee_amounts.span(),
         );
 }
@@ -996,7 +1017,9 @@ fn append_root_settlement_input(
     inputs.append(TEST_PRICE_BASE_SCALE.into());
     inputs.append(TEST_TAKER_FEE_BPS.into());
     inputs.append(TEST_MAKER_FEE_BPS.into());
+    inputs.append(TEST_RELAY_FEE_BPS.into());
     inputs.append(TEST_PROTOCOL_FEE_RECIPIENT);
+    inputs.append(TEST_RELAY_FEE_RECIPIENT);
     inputs.append(output_bundle_ref);
     inputs.append(prior_note_root);
     inputs.append(prior_nullifier_root);
@@ -1011,6 +1034,7 @@ fn append_root_settlement_input(
     inputs.append(new_nullifier_root);
     inputs.append(new_renewal_root);
     inputs.append(bound_new_fee_root);
+    inputs.append(0);
     inputs.append(0);
     inputs.append(0);
 }

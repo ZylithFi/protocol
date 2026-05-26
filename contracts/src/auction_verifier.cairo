@@ -32,11 +32,22 @@ pub trait IAuctionVerifier<TContractState> {
     fn set_protocol_fee_recipient(ref self: TContractState, recipient: felt252);
     fn propose_protocol_fee_recipient(ref self: TContractState, recipient: felt252);
     fn execute_protocol_fee_recipient(ref self: TContractState);
+    fn set_relay_fee_recipient(ref self: TContractState, recipient: felt252);
+    fn propose_relay_fee_recipient(ref self: TContractState, recipient: felt252);
+    fn execute_relay_fee_recipient(ref self: TContractState);
     fn set_pair_fee_config(
-        ref self: TContractState, pair_id: felt252, taker_fee_bps: u128, maker_fee_bps: u128,
+        ref self: TContractState,
+        pair_id: felt252,
+        taker_fee_bps: u128,
+        maker_fee_bps: u128,
+        relay_fee_bps: u128,
     );
     fn propose_pair_fee_config(
-        ref self: TContractState, pair_id: felt252, taker_fee_bps: u128, maker_fee_bps: u128,
+        ref self: TContractState,
+        pair_id: felt252,
+        taker_fee_bps: u128,
+        maker_fee_bps: u128,
+        relay_fee_bps: u128,
     );
     fn execute_pair_fee_config(ref self: TContractState, pair_id: felt252);
     fn cancel_renewal_parent_marker(
@@ -104,7 +115,9 @@ pub trait IAuctionVerifier<TContractState> {
         price_base_scale: u128,
         taker_fee_bps: u128,
         maker_fee_bps: u128,
+        relay_fee_bps: u128,
         protocol_fee_recipient: felt252,
+        relay_fee_recipient: felt252,
         output_bundle_ref: felt252,
         prior_note_root: felt252,
         prior_nullifier_root: felt252,
@@ -120,6 +133,7 @@ pub trait IAuctionVerifier<TContractState> {
         new_renewal_root: felt252,
         new_fee_root: felt252,
         fee_asset_ids: Span<felt252>,
+        fee_recipients: Span<felt252>,
         fee_amounts: Span<u128>,
     );
     fn submit_aggregate_settlements_with_proof_facts(
@@ -142,8 +156,10 @@ pub trait IAuctionVerifier<TContractState> {
     fn verified_admission_root(self: @TContractState, batch_id: felt252) -> felt252;
     fn verified_auction_transcript(self: @TContractState, batch_id: felt252) -> felt252;
     fn current_settlement_roots(self: @TContractState) -> (felt252, felt252, felt252, felt252);
-    fn pair_fee_config(self: @TContractState, pair_id: felt252) -> (u128, u128, bool);
-    fn pending_pair_fee_config(self: @TContractState, pair_id: felt252) -> (u128, u128, u64, bool);
+    fn pair_fee_config(self: @TContractState, pair_id: felt252) -> (u128, u128, u128, bool);
+    fn pending_pair_fee_config(
+        self: @TContractState, pair_id: felt252,
+    ) -> (u128, u128, u128, u64, bool);
     fn admin_address(self: @TContractState) -> ContractAddress;
     fn pending_admin_address(self: @TContractState) -> ContractAddress;
     fn admin_transfer_pending(self: @TContractState) -> bool;
@@ -152,6 +168,8 @@ pub trait IAuctionVerifier<TContractState> {
     fn proof_program_is_locked(self: @TContractState) -> bool;
     fn protocol_fee_recipient(self: @TContractState) -> felt252;
     fn pending_protocol_fee_recipient(self: @TContractState) -> (felt252, u64, bool);
+    fn relay_fee_recipient(self: @TContractState) -> felt252;
+    fn pending_relay_fee_recipient(self: @TContractState) -> (felt252, u64, bool);
     fn fee_ledger_address(self: @TContractState) -> ContractAddress;
     fn note_root_transition_count(self: @TContractState) -> u64;
     fn note_root_transition(
@@ -246,11 +264,17 @@ pub mod AuctionVerifier {
         pending_protocol_fee_recipient: felt252,
         pending_protocol_fee_recipient_eta: u64,
         pending_protocol_fee_recipient_active: bool,
+        relay_fee_recipient: felt252,
+        pending_relay_fee_recipient: felt252,
+        pending_relay_fee_recipient_eta: u64,
+        pending_relay_fee_recipient_active: bool,
         pair_taker_fee_bps: Map<felt252, u128>,
         pair_maker_fee_bps: Map<felt252, u128>,
+        pair_relay_fee_bps: Map<felt252, u128>,
         pair_fee_configured: Map<felt252, bool>,
         pending_pair_taker_fee_bps: Map<felt252, u128>,
         pending_pair_maker_fee_bps: Map<felt252, u128>,
+        pending_pair_relay_fee_bps: Map<felt252, u128>,
         pending_pair_fee_config_eta: Map<felt252, u64>,
         pending_pair_fee_config_active: Map<felt252, bool>,
         deposit_note_root_registrar: ContractAddress,
@@ -411,29 +435,72 @@ pub mod AuctionVerifier {
             self.pending_protocol_fee_recipient.write(0);
         }
 
+        fn set_relay_fee_recipient(ref self: ContractState, recipient: felt252) {
+            assert_admin(@self);
+            assert(recipient != 0, 'BAD_RELAY_RECIPIENT');
+            assert(self.relay_fee_recipient.read() == 0, 'RELAY_RECIP_TIMELOCK');
+            self.relay_fee_recipient.write(recipient);
+        }
+
+        fn propose_relay_fee_recipient(ref self: ContractState, recipient: felt252) {
+            assert_admin(@self);
+            assert(recipient != 0, 'BAD_RELAY_RECIPIENT');
+            assert(self.relay_fee_recipient.read() != 0, 'RELAY_RECIP_UNSET');
+            self.pending_relay_fee_recipient.write(recipient);
+            self
+                .pending_relay_fee_recipient_eta
+                .write(current_block_timestamp() + FEE_RECIPIENT_TIMELOCK_SECONDS);
+            self.pending_relay_fee_recipient_active.write(true);
+        }
+
+        fn execute_relay_fee_recipient(ref self: ContractState) {
+            assert_admin(@self);
+            assert(self.pending_relay_fee_recipient_active.read(), 'NO_RELAY_RECIP_PENDING');
+            let eta = self.pending_relay_fee_recipient_eta.read();
+            assert(current_block_timestamp() >= eta, 'RELAY_RECIP_TIMELOCK');
+            let recipient = self.pending_relay_fee_recipient.read();
+            assert(recipient != 0, 'BAD_RELAY_RECIPIENT');
+            self.relay_fee_recipient.write(recipient);
+            self.pending_relay_fee_recipient_active.write(false);
+            self.pending_relay_fee_recipient_eta.write(0);
+            self.pending_relay_fee_recipient.write(0);
+        }
+
         fn set_pair_fee_config(
-            ref self: ContractState, pair_id: felt252, taker_fee_bps: u128, maker_fee_bps: u128,
+            ref self: ContractState,
+            pair_id: felt252,
+            taker_fee_bps: u128,
+            maker_fee_bps: u128,
+            relay_fee_bps: u128,
         ) {
             assert_admin(@self);
             assert(pair_id != 0, 'BAD_PAIR');
             assert(taker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_TAKER_FEE');
             assert(maker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_MAKER_FEE');
+            assert(relay_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_RELAY_FEE');
             assert(!self.pair_fee_configured.read(pair_id), 'PAIR_FEE_TIMELOCK');
             self.pair_taker_fee_bps.write(pair_id, taker_fee_bps);
             self.pair_maker_fee_bps.write(pair_id, maker_fee_bps);
+            self.pair_relay_fee_bps.write(pair_id, relay_fee_bps);
             self.pair_fee_configured.write(pair_id, true);
         }
 
         fn propose_pair_fee_config(
-            ref self: ContractState, pair_id: felt252, taker_fee_bps: u128, maker_fee_bps: u128,
+            ref self: ContractState,
+            pair_id: felt252,
+            taker_fee_bps: u128,
+            maker_fee_bps: u128,
+            relay_fee_bps: u128,
         ) {
             assert_admin(@self);
             assert(pair_id != 0, 'BAD_PAIR');
             assert(self.pair_fee_configured.read(pair_id), 'PAIR_FEE_UNSET');
             assert(taker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_TAKER_FEE');
             assert(maker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_MAKER_FEE');
+            assert(relay_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_RELAY_FEE');
             self.pending_pair_taker_fee_bps.write(pair_id, taker_fee_bps);
             self.pending_pair_maker_fee_bps.write(pair_id, maker_fee_bps);
+            self.pending_pair_relay_fee_bps.write(pair_id, relay_fee_bps);
             self
                 .pending_pair_fee_config_eta
                 .write(pair_id, current_block_timestamp() + PAIR_FEE_TIMELOCK_SECONDS);
@@ -448,11 +515,13 @@ pub mod AuctionVerifier {
             assert(current_block_timestamp() >= eta, 'PAIR_FEE_TIMELOCK');
             self.pair_taker_fee_bps.write(pair_id, self.pending_pair_taker_fee_bps.read(pair_id));
             self.pair_maker_fee_bps.write(pair_id, self.pending_pair_maker_fee_bps.read(pair_id));
+            self.pair_relay_fee_bps.write(pair_id, self.pending_pair_relay_fee_bps.read(pair_id));
             self.pair_fee_configured.write(pair_id, true);
             self.pending_pair_fee_config_active.write(pair_id, false);
             self.pending_pair_fee_config_eta.write(pair_id, 0);
             self.pending_pair_taker_fee_bps.write(pair_id, 0);
             self.pending_pair_maker_fee_bps.write(pair_id, 0);
+            self.pending_pair_relay_fee_bps.write(pair_id, 0);
         }
 
         fn cancel_renewal_parent_marker(
@@ -664,7 +733,9 @@ pub mod AuctionVerifier {
             price_base_scale: u128,
             taker_fee_bps: u128,
             maker_fee_bps: u128,
+            relay_fee_bps: u128,
             protocol_fee_recipient: felt252,
+            relay_fee_recipient: felt252,
             output_bundle_ref: felt252,
             prior_note_root: felt252,
             prior_nullifier_root: felt252,
@@ -680,6 +751,7 @@ pub mod AuctionVerifier {
             new_renewal_root: felt252,
             new_fee_root: felt252,
             fee_asset_ids: Span<felt252>,
+            fee_recipients: Span<felt252>,
             fee_amounts: Span<u128>,
         ) {
             assert_authorized_settlement_account(@self);
@@ -739,7 +811,9 @@ pub mod AuctionVerifier {
                 price_base_scale,
                 taker_fee_bps,
                 maker_fee_bps,
+                relay_fee_bps,
                 protocol_fee_recipient,
+                relay_fee_recipient,
                 output_bundle_ref,
                 prior_note_root,
                 prior_nullifier_root,
@@ -755,6 +829,7 @@ pub mod AuctionVerifier {
                 new_renewal_root,
                 new_fee_root,
                 fee_asset_ids,
+                fee_recipients,
                 fee_amounts,
             );
         }
@@ -916,20 +991,22 @@ pub mod AuctionVerifier {
             )
         }
 
-        fn pair_fee_config(self: @ContractState, pair_id: felt252) -> (u128, u128, bool) {
+        fn pair_fee_config(self: @ContractState, pair_id: felt252) -> (u128, u128, u128, bool) {
             (
                 self.pair_taker_fee_bps.read(pair_id),
                 self.pair_maker_fee_bps.read(pair_id),
+                self.pair_relay_fee_bps.read(pair_id),
                 self.pair_fee_configured.read(pair_id),
             )
         }
 
         fn pending_pair_fee_config(
             self: @ContractState, pair_id: felt252,
-        ) -> (u128, u128, u64, bool) {
+        ) -> (u128, u128, u128, u64, bool) {
             (
                 self.pending_pair_taker_fee_bps.read(pair_id),
                 self.pending_pair_maker_fee_bps.read(pair_id),
+                self.pending_pair_relay_fee_bps.read(pair_id),
                 self.pending_pair_fee_config_eta.read(pair_id),
                 self.pending_pair_fee_config_active.read(pair_id),
             )
@@ -968,6 +1045,18 @@ pub mod AuctionVerifier {
                 self.pending_protocol_fee_recipient.read(),
                 self.pending_protocol_fee_recipient_eta.read(),
                 self.pending_protocol_fee_recipient_active.read(),
+            )
+        }
+
+        fn relay_fee_recipient(self: @ContractState) -> felt252 {
+            self.relay_fee_recipient.read()
+        }
+
+        fn pending_relay_fee_recipient(self: @ContractState) -> (felt252, u64, bool) {
+            (
+                self.pending_relay_fee_recipient.read(),
+                self.pending_relay_fee_recipient_eta.read(),
+                self.pending_relay_fee_recipient_active.read(),
             )
         }
 
@@ -1155,6 +1244,8 @@ pub mod AuctionVerifier {
             read_next_u128(data, ref index);
             read_next_u128(data, ref index);
             read_next_u128(data, ref index);
+            read_next_u128(data, ref index);
+            read_next(data, ref index);
             read_next(data, ref index);
             read_next(data, ref index);
             read_next(data, ref index);
@@ -1170,6 +1261,7 @@ pub mod AuctionVerifier {
             let new_nullifier_root = read_next(data, ref index);
             let new_renewal_root = read_next(data, ref index);
             read_next(data, ref index);
+            skip_span(data, ref index);
             skip_span(data, ref index);
             skip_span(data, ref index);
 
@@ -1235,7 +1327,9 @@ pub mod AuctionVerifier {
             let price_base_scale = read_next_u128(data, ref index);
             let taker_fee_bps = read_next_u128(data, ref index);
             let maker_fee_bps = read_next_u128(data, ref index);
+            let relay_fee_bps = read_next_u128(data, ref index);
             let protocol_fee_recipient = read_next(data, ref index);
+            let relay_fee_recipient = read_next(data, ref index);
             let output_bundle_ref = read_next(data, ref index);
             let prior_note_root = read_next(data, ref index);
             let prior_nullifier_root = read_next(data, ref index);
@@ -1251,6 +1345,7 @@ pub mod AuctionVerifier {
             let new_renewal_root = read_next(data, ref index);
             let new_fee_root = read_next(data, ref index);
             let fee_asset_ids = read_felt_array(data, ref index);
+            let fee_recipients = read_felt_array(data, ref index);
             let fee_amounts = read_u128_array(data, ref index);
 
             let statement_message = native_settlement_message_hash(
@@ -1267,7 +1362,9 @@ pub mod AuctionVerifier {
                 price_base_scale,
                 taker_fee_bps,
                 maker_fee_bps,
+                relay_fee_bps,
                 protocol_fee_recipient,
+                relay_fee_recipient,
                 output_bundle_ref,
                 prior_note_root,
                 prior_nullifier_root,
@@ -1283,6 +1380,7 @@ pub mod AuctionVerifier {
                 new_renewal_root,
                 new_fee_root,
                 fee_asset_ids.span(),
+                fee_recipients.span(),
                 fee_amounts.span(),
             );
             cursor += 1;
@@ -1484,7 +1582,9 @@ pub mod AuctionVerifier {
         price_base_scale: u128,
         taker_fee_bps: u128,
         maker_fee_bps: u128,
+        relay_fee_bps: u128,
         protocol_fee_recipient: felt252,
+        relay_fee_recipient: felt252,
         output_bundle_ref: felt252,
         prior_note_root: felt252,
         prior_nullifier_root: felt252,
@@ -1500,6 +1600,7 @@ pub mod AuctionVerifier {
         new_renewal_root: felt252,
         new_fee_root: felt252,
         fee_asset_ids: Span<felt252>,
+        fee_recipients: Span<felt252>,
         fee_amounts: Span<u128>,
     ) {
         let already_settled = self.settled_batches.read(batch_id);
@@ -1511,7 +1612,10 @@ pub mod AuctionVerifier {
         assert(price_base_scale != 0, 'BAD_PRICE_SCALE');
         assert(taker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_TAKER_FEE');
         assert(maker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_MAKER_FEE');
+        assert(relay_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_RELAY_FEE');
         assert(protocol_fee_recipient != 0, 'BAD_FEE_RECIPIENT');
+        assert(relay_fee_recipient != 0, 'BAD_RELAY_RECIPIENT');
+        assert(fee_asset_ids.len() == fee_recipients.len(), 'BAD_FEE_LENGTH');
         assert(fee_asset_ids.len() == fee_amounts.len(), 'BAD_FEE_LENGTH');
         assert(
             new_note_root == state_transition_root(prior_note_root, output_note_root),
@@ -1532,10 +1636,16 @@ pub mod AuctionVerifier {
             'ENC_SET_BINDING',
         );
         assert_pair_fee_config(
-            @self, batch.pair_id, taker_fee_bps, maker_fee_bps, protocol_fee_recipient,
+            @self,
+            batch.pair_id,
+            taker_fee_bps,
+            maker_fee_bps,
+            relay_fee_bps,
+            protocol_fee_recipient,
+            relay_fee_recipient,
         );
         assert(
-            fee_entries_root(fee_asset_ids, protocol_fee_recipient, fee_amounts) == fee_root,
+            fee_entries_root(fee_asset_ids, fee_recipients, fee_amounts) == fee_root,
             'FEE_ROOT_BINDING',
         );
 
@@ -1549,7 +1659,9 @@ pub mod AuctionVerifier {
             price_base_scale,
             taker_fee_bps,
             maker_fee_bps,
+            relay_fee_bps,
             protocol_fee_recipient,
+            relay_fee_recipient,
             output_bundle_ref,
             prior_note_root,
             prior_nullifier_root,
@@ -1583,7 +1695,7 @@ pub mod AuctionVerifier {
         self.current_nullifier_root.write(new_nullifier_root);
         self.current_renewal_root.write(new_renewal_root);
         self.current_fee_root.write(new_fee_root);
-        accrue_protocol_fees(@self, fee_asset_ids, protocol_fee_recipient, fee_amounts);
+        accrue_protocol_fees(@self, fee_asset_ids, fee_recipients, fee_amounts);
         record_note_root_transition(
             ref self, NOTE_ROOT_TRANSITION_SETTLEMENT, batch_id, output_note_root, new_note_root,
         );
@@ -1599,7 +1711,9 @@ pub mod AuctionVerifier {
         price_base_scale: u128,
         taker_fee_bps: u128,
         maker_fee_bps: u128,
+        relay_fee_bps: u128,
         protocol_fee_recipient: felt252,
+        relay_fee_recipient: felt252,
         output_bundle_ref: felt252,
         prior_note_root: felt252,
         prior_nullifier_root: felt252,
@@ -1626,7 +1740,9 @@ pub mod AuctionVerifier {
         state = poseidon_hash2(state, price_base_scale.into());
         state = poseidon_hash2(state, taker_fee_bps.into());
         state = poseidon_hash2(state, maker_fee_bps.into());
+        state = poseidon_hash2(state, relay_fee_bps.into());
         state = poseidon_hash2(state, protocol_fee_recipient);
+        state = poseidon_hash2(state, relay_fee_recipient);
         state = poseidon_hash2(state, output_bundle_ref);
         state = poseidon_hash2(state, prior_note_root);
         state = poseidon_hash2(state, prior_nullifier_root);
@@ -1679,20 +1795,25 @@ pub mod AuctionVerifier {
         pair_id: felt252,
         taker_fee_bps: u128,
         maker_fee_bps: u128,
+        relay_fee_bps: u128,
         protocol_fee_recipient: felt252,
+        relay_fee_recipient: felt252,
     ) {
         assert(self.pair_fee_configured.read(pair_id), 'PAIR_FEE_UNSET');
         assert(self.pair_taker_fee_bps.read(pair_id) == taker_fee_bps, 'TAKER_FEE_BINDING');
         assert(self.pair_maker_fee_bps.read(pair_id) == maker_fee_bps, 'MAKER_FEE_BINDING');
+        assert(self.pair_relay_fee_bps.read(pair_id) == relay_fee_bps, 'RELAY_FEE_BINDING');
         assert(
             self.protocol_fee_recipient.read() == protocol_fee_recipient, 'FEE_RECIPIENT_BINDING',
         );
+        assert(self.relay_fee_recipient.read() == relay_fee_recipient, 'RELAY_RECIP_BINDING');
     }
 
     fn fee_entries_root(
-        asset_ids: Span<felt252>, protocol_fee_recipient: felt252, amounts: Span<u128>,
+        asset_ids: Span<felt252>, recipients: Span<felt252>, amounts: Span<u128>,
     ) -> felt252 {
         let len = asset_ids.len();
+        assert(recipients.len() == len, 'BAD_FEE_LENGTH');
         assert(amounts.len() == len, 'BAD_FEE_LENGTH');
         let mut state = FEE_ROOT_DOMAIN;
         let mut index = 0;
@@ -1701,12 +1822,13 @@ pub mod AuctionVerifier {
                 break;
             }
             let asset_id = *asset_ids.at(index);
+            let recipient = *recipients.at(index);
             let amount = *amounts.at(index);
             assert(asset_id != 0, 'BAD_FEE_ASSET');
-            assert(protocol_fee_recipient != 0, 'BAD_FEE_RECIPIENT');
+            assert(recipient != 0, 'BAD_FEE_RECIPIENT');
             assert(amount > 0, 'BAD_FEE_AMOUNT');
             state = poseidon_hash2(state, asset_id);
-            state = poseidon_hash2(state, protocol_fee_recipient);
+            state = poseidon_hash2(state, recipient);
             state = poseidon_hash2(state, amount.into());
             index += 1;
         }
@@ -1716,27 +1838,19 @@ pub mod AuctionVerifier {
     fn accrue_protocol_fees(
         self: @ContractState,
         asset_ids: Span<felt252>,
-        protocol_fee_recipient: felt252,
+        recipients: Span<felt252>,
         amounts: Span<u128>,
     ) {
         let len = asset_ids.len();
         if len == 0 {
             return;
         }
+        assert(recipients.len() == len, 'BAD_FEE_LENGTH');
         assert(amounts.len() == len, 'BAD_FEE_LENGTH');
         let fee_ledger_address = self.fee_ledger.read();
         assert(!fee_ledger_address.is_zero(), 'FEE_LEDGER_UNSET');
-        let mut recipients = array![];
-        let mut index = 0;
-        loop {
-            if index == len {
-                break;
-            }
-            recipients.append(protocol_fee_recipient);
-            index += 1;
-        }
         let ledger = IFeeLedgerDispatcher { contract_address: fee_ledger_address };
-        ledger.accrue_fees(asset_ids, recipients.span(), amounts);
+        ledger.accrue_fees(asset_ids, recipients, amounts);
     }
 
     fn single_field_root(domain: felt252, values: Span<felt252>) -> felt252 {
