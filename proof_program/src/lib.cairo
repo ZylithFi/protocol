@@ -129,7 +129,9 @@ pub mod NoteConsolidationStatementProgram {
     struct Storage {}
 
     #[abi(embed_v0)]
-    impl NoteConsolidationStatementProgramImpl of super::INoteConsolidationStatementProgram<ContractState> {
+    impl NoteConsolidationStatementProgramImpl of super::INoteConsolidationStatementProgram<
+        ContractState,
+    > {
         fn verify_note_consolidation_statement(
             ref self: ContractState, serialized_note_consolidation_witness: Span<felt252>,
         ) -> felt252 {
@@ -149,10 +151,10 @@ pub mod AuctionProofProgram {
     use zylith_settlement_statement::{verify_admission_statement, verify_auction_result_statement};
     use super::{
         INoteConsolidationStatementProgramDispatcher,
-        INoteConsolidationStatementProgramDispatcherTrait,
-        INullifierStatementProgramDispatcher, INullifierStatementProgramDispatcherTrait,
-        IRenewalStatementProgramDispatcher, IRenewalStatementProgramDispatcherTrait,
-        ISettlementStatementProgramDispatcher, ISettlementStatementProgramDispatcherTrait,
+        INoteConsolidationStatementProgramDispatcherTrait, INullifierStatementProgramDispatcher,
+        INullifierStatementProgramDispatcherTrait, IRenewalStatementProgramDispatcher,
+        IRenewalStatementProgramDispatcherTrait, ISettlementStatementProgramDispatcher,
+        ISettlementStatementProgramDispatcherTrait,
     };
 
     const SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_settle_v1';
@@ -259,7 +261,8 @@ pub mod AuctionProofProgram {
             serialized_note_consolidation_witness: Span<felt252>,
         ) -> felt252 {
             assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
-            let note_consolidation_statement_program = INoteConsolidationStatementProgramDispatcher {
+            let note_consolidation_statement_program =
+                INoteConsolidationStatementProgramDispatcher {
                 contract_address: self.note_consolidation_statement_program.read(),
             };
             let consolidation_commitment = note_consolidation_statement_program
@@ -638,8 +641,7 @@ pub mod AuctionProofProgram {
     }
 
     fn native_note_consolidation_message_hash(
-        auction_verifier_address: ContractAddress,
-        consolidation_commitment: felt252,
+        auction_verifier_address: ContractAddress, consolidation_commitment: felt252,
     ) -> felt252 {
         let mut state = poseidon_hash2(
             NOTE_CONSOLIDATION_MESSAGE_DOMAIN, auction_verifier_address.into(),

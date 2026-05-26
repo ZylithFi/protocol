@@ -1,7 +1,7 @@
 use core::array::Array;
 use super::{
-    verify_admission_statement, verify_auction_result_statement, verify_note_consolidation_statement,
-    verify_settlement_statement,
+    verify_admission_statement, verify_auction_result_statement,
+    verify_note_consolidation_statement, verify_settlement_statement,
 };
 
 const STATEMENT_TYPE_SETTLEMENT: felt252 = 1;
@@ -19,7 +19,9 @@ pub fn main(input: Array<felt252>) -> felt252 {
         admission_root
     } else if statement_type == STATEMENT_TYPE_AUCTION_RESULT {
         let (_batch_id, _order_commitment_root, _admission_root, transcript_commitment) =
-            verify_auction_result_statement(data);
+            verify_auction_result_statement(
+            data,
+        );
         transcript_commitment
     } else if statement_type == STATEMENT_TYPE_NOTE_CONSOLIDATION {
         verify_note_consolidation_statement(data)
