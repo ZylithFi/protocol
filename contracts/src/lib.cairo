@@ -4,5 +4,6 @@ pub mod commitment_registry;
 pub mod erc20;
 pub mod fee_ledger;
 pub mod privacy_deposit_bridge;
+pub mod privacy_proof_signer;
 pub mod shielded_asset_adapter;
 pub mod types;

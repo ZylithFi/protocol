@@ -10,6 +10,7 @@ use snforge_std::{
     stop_cheat_caller_address,
 };
 use starknet::{ContractAddress, SyscallResultTrait};
+use starknet::account::Call;
 use zylith_protocol::auction_verifier::{
     IAuctionVerifierDispatcher, IAuctionVerifierDispatcherTrait, ProofFacts,
 };
@@ -21,6 +22,9 @@ use zylith_protocol::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
 use zylith_protocol::fee_ledger::{IFeeLedgerDispatcher, IFeeLedgerDispatcherTrait};
 use zylith_protocol::privacy_deposit_bridge::{
     IPrivacyDepositBridgeDispatcher, IPrivacyDepositBridgeDispatcherTrait,
+};
+use zylith_protocol::privacy_proof_signer::{
+    IPrivacyProofSignerDispatcher, IPrivacyProofSignerDispatcherTrait,
 };
 use zylith_protocol::shielded_asset_adapter::{
     IShieldedAssetAdapterDispatcher, IShieldedAssetAdapterDispatcherTrait,
@@ -111,6 +115,13 @@ fn deploy_privacy_deposit_bridge(
 ) -> ContractAddress {
     let class = declare("PrivacyDepositBridge").unwrap().contract_class();
     let calldata = array![commitment_registry.into(), shielded_asset_adapter.into(), PRIVACY_POOL];
+    let (address, _) = class.deploy(@calldata).unwrap_syscall();
+    address
+}
+
+fn deploy_privacy_proof_signer(signer_public_key: felt252) -> ContractAddress {
+    let class = declare("PrivacyProofSigner").unwrap().contract_class();
+    let calldata = array![signer_public_key];
     let (address, _) = class.deploy(@calldata).unwrap_syscall();
     address
 }
@@ -1536,6 +1547,63 @@ fn privacy_deposit_bridge_rejects_non_privacy_pool_callers() {
 
     start_cheat_caller_address(privacy_deposit_bridge, wrong_caller);
     bridge.privacy_invoke(ASSET_ID, 750, 11, NOTE_COMMITMENT, withdraw_authority);
+}
+
+#[test]
+fn privacy_proof_signer_validates_sdk_proof_signatures() {
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let proof_signer = deploy_privacy_proof_signer(key_pair.public_key);
+    let signer = IPrivacyProofSignerDispatcher { contract_address: proof_signer };
+    let message = 0x123456;
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, message).unwrap();
+    let signature = array![r, s];
+
+    assert(signer.signer_public_key() == key_pair.public_key, 'BAD_SIGNER_KEY');
+    assert(signer.is_valid_signature(message, signature) != 0, 'BAD_SDK_SIGNATURE');
+}
+
+#[test]
+fn privacy_proof_signer_relays_single_token_approval() {
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let proof_signer = deploy_privacy_proof_signer(key_pair.public_key);
+    let spender = as_address(0x456);
+    let token_address = deploy_mock_erc20();
+    let token = IERC20Dispatcher { contract_address: token_address };
+    let signer = IPrivacyProofSignerDispatcher { contract_address: proof_signer };
+    let calldata = array![spender.into(), 100, 0];
+    let calls = array![
+        Call { to: token_address, selector: selector!("approve"), calldata: calldata.span() },
+    ];
+    let nonce = 0x777;
+
+    cheat_chain_id(proof_signer, TEST_CHAIN_ID, CheatSpan::TargetCalls(2));
+    let relay_message = signer.relay_message_hash(calls.span(), nonce);
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, relay_message).unwrap();
+    signer.execute_from_relayer(calls.span(), nonce, r, s);
+
+    assert(token.allowance(proof_signer, spender) == as_u256(100), 'BAD_RELAY_APPROVAL');
+    assert(signer.relay_nonce_used(nonce), 'RELAY_NONCE_UNUSED');
+}
+
+#[test]
+#[should_panic]
+fn privacy_proof_signer_rejects_replayed_relay_nonce() {
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let proof_signer = deploy_privacy_proof_signer(key_pair.public_key);
+    let spender = as_address(0x456);
+    let token_address = deploy_mock_erc20();
+    let signer = IPrivacyProofSignerDispatcher { contract_address: proof_signer };
+    let calldata = array![spender.into(), 100, 0];
+    let calls = array![
+        Call { to: token_address, selector: selector!("approve"), calldata: calldata.span() },
+    ];
+    let nonce = 0x777;
+
+    cheat_chain_id(proof_signer, TEST_CHAIN_ID, CheatSpan::TargetCalls(3));
+    let relay_message = signer.relay_message_hash(calls.span(), nonce);
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, relay_message).unwrap();
+    signer.execute_from_relayer(calls.span(), nonce, r, s);
+    signer.execute_from_relayer(calls.span(), nonce, r, s);
 }
 
 #[test]
