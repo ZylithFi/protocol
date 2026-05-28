@@ -2669,7 +2669,8 @@ fn assert_best_clearing_price(
     funding_note_amounts: Span<felt252>,
 ) {
     let mut best_initialized = 0;
-    let mut best_price: u128 = 0;
+    let mut best_low_price: u128 = 0;
+    let mut best_high_price: u128 = 0;
     let mut best_matched: u128 = 0;
     let mut best_imbalance: u128 = 0;
     let mut order_index = 0;
@@ -2709,18 +2710,24 @@ fn assert_best_clearing_price(
                         );
                         let update = should_update_best(
                             best_initialized,
-                            candidate,
                             matched,
                             imbalance,
-                            best_price,
                             best_matched,
                             best_imbalance,
                         );
                         if update == 1 {
                             best_initialized = 1;
-                            best_price = candidate;
+                            best_low_price = candidate;
+                            best_high_price = candidate;
                             best_matched = matched;
                             best_imbalance = imbalance;
+                        } else if matched == best_matched && imbalance == best_imbalance {
+                            if candidate < best_low_price {
+                                best_low_price = candidate;
+                            }
+                            if candidate > best_high_price {
+                                best_high_price = candidate;
+                            }
                         }
                     }
                     point_index += 1;
@@ -2751,18 +2758,24 @@ fn assert_best_clearing_price(
                     );
                     let update = should_update_best(
                         best_initialized,
-                        candidate,
                         matched,
                         imbalance,
-                        best_price,
                         best_matched,
                         best_imbalance,
                     );
                     if update == 1 {
                         best_initialized = 1;
-                        best_price = candidate;
+                        best_low_price = candidate;
+                        best_high_price = candidate;
                         best_matched = matched;
                         best_imbalance = imbalance;
+                    } else if matched == best_matched && imbalance == best_imbalance {
+                        if candidate < best_low_price {
+                            best_low_price = candidate;
+                        }
+                        if candidate > best_high_price {
+                            best_high_price = candidate;
+                        }
                     }
                 }
             }
@@ -2771,7 +2784,11 @@ fn assert_best_clearing_price(
     }
 
     assert(best_initialized == 1, 'E');
-    assert(clearing_price == best_price, 'E');
+    if best_matched == 0 {
+        assert(clearing_price == best_low_price, 'E');
+    } else {
+        assert(clearing_price == midpoint_u128(best_low_price, best_high_price), 'E');
+    }
 }
 
 fn assert_no_executable_auction(
@@ -3615,10 +3632,8 @@ fn distinct_filled_owner_count(
 
 fn should_update_best(
     best_initialized: felt252,
-    candidate: u128,
     matched: u128,
     imbalance: u128,
-    best_price: u128,
     best_matched: u128,
     best_imbalance: u128,
 ) -> felt252 {
@@ -3632,13 +3647,12 @@ fn should_update_best(
         if imbalance < best_imbalance {
             return 1;
         }
-        if imbalance == best_imbalance {
-            if candidate < best_price {
-                return 1;
-            }
-        }
     }
     0
+}
+
+fn midpoint_u128(low: u128, high: u128) -> u128 {
+    (low / 2) + (high / 2) + (((low % 2) + (high % 2)) / 2)
 }
 
 fn assert_all_zero(values: Span<felt252>, message: felt252) {
