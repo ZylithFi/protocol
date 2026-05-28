@@ -19,6 +19,16 @@ pub trait IShieldedAssetAdapter<TContractState> {
         note_commitment: felt252,
         withdraw_authority: felt252,
     );
+    fn register_erc20_deposit_batch(
+        ref self: TContractState,
+        owner: starknet::ContractAddress,
+        asset_id: felt252,
+        total_amount: u128,
+        amounts: Span<u128>,
+        deposit_nonces: Span<u64>,
+        note_commitments: Span<felt252>,
+        withdraw_authorities: Span<felt252>,
+    );
     fn withdraw_to_l2(
         ref self: TContractState,
         note_commitment: felt252,
@@ -195,6 +205,91 @@ pub mod ShieldedAssetAdapter {
             self.deposit_amounts.write(deposit_id, amount);
             self.deposit_nonces.write(deposit_id, deposit_nonce);
             self.deposit_count.write(deposit_id + 1);
+        }
+
+        fn register_erc20_deposit_batch(
+            ref self: ContractState,
+            owner: ContractAddress,
+            asset_id: felt252,
+            total_amount: u128,
+            amounts: Span<u128>,
+            deposit_nonces: Span<u64>,
+            note_commitments: Span<felt252>,
+            withdraw_authorities: Span<felt252>,
+        ) {
+            assert_deposit_registrar(@self);
+            assert(total_amount > 0, 'BAD_AMOUNT');
+            let token_address = self.asset_tokens.read(asset_id);
+            assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
+
+            let len = amounts.len();
+            assert(len > 0, 'EMPTY_BATCH');
+            assert(len <= 16, 'TOO_MANY_NOTES');
+            assert(deposit_nonces.len() == len, 'BAD_BATCH_LENGTH');
+            assert(note_commitments.len() == len, 'BAD_BATCH_LENGTH');
+            assert(withdraw_authorities.len() == len, 'BAD_BATCH_LENGTH');
+
+            let mut computed_total: u128 = 0;
+            let mut index = 0;
+            loop {
+                if index == len {
+                    break;
+                }
+                let amount = *amounts.at(index);
+                let note_commitment = *note_commitments.at(index);
+                let withdraw_authority = *withdraw_authorities.at(index);
+                assert(amount > 0, 'BAD_AMOUNT');
+                assert(note_commitment != 0, 'BAD_COMMITMENT');
+                assert(withdraw_authority != 0, 'BAD_AUTHORITY');
+                assert(self.note_live.read(note_commitment) == false, 'NOTE_EXISTS');
+
+                let mut duplicate_index = index + 1;
+                loop {
+                    if duplicate_index == len {
+                        break;
+                    }
+                    assert(
+                        note_commitment != *note_commitments.at(duplicate_index),
+                        'DUPLICATE_NOTE',
+                    );
+                    duplicate_index += 1;
+                };
+
+                computed_total = computed_total + amount;
+                index += 1;
+            };
+            assert(computed_total == total_amount, 'BAD_TOTAL_AMOUNT');
+
+            let token = IERC20Dispatcher { contract_address: token_address };
+            token.transfer_from(owner, get_contract_address(), as_u256(total_amount));
+
+            let current_balance = self.escrowed_balances.read(asset_id);
+            self.escrowed_balances.write(asset_id, current_balance + total_amount);
+
+            let mut write_index = 0;
+            loop {
+                if write_index == len {
+                    break;
+                }
+                let amount = *amounts.at(write_index);
+                let deposit_nonce = *deposit_nonces.at(write_index);
+                let note_commitment = *note_commitments.at(write_index);
+                let withdraw_authority = *withdraw_authorities.at(write_index);
+
+                self.note_live.write(note_commitment, true);
+                self.note_asset_ids.write(note_commitment, asset_id);
+                self.note_amounts.write(note_commitment, amount);
+                self.note_withdraw_authorities.write(note_commitment, withdraw_authority);
+
+                let deposit_id = self.deposit_count.read();
+                self.deposit_note_commitments.write(deposit_id, note_commitment);
+                self.deposit_asset_ids.write(deposit_id, asset_id);
+                self.deposit_amounts.write(deposit_id, amount);
+                self.deposit_nonces.write(deposit_id, deposit_nonce);
+                self.deposit_count.write(deposit_id + 1);
+
+                write_index += 1;
+            };
         }
 
         fn withdraw_to_l2(

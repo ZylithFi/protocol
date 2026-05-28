@@ -492,10 +492,29 @@ fn setup_adapter_with_deposited_note(
     stop_cheat_caller_address(shielded_asset_adapter);
 
     start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
-    bridge.privacy_invoke(ASSET_ID, 500, 7, note_commitment, withdraw_authority);
+    privacy_invoke_single(bridge, ASSET_ID, 500, 7, note_commitment, withdraw_authority);
     stop_cheat_caller_address(privacy_deposit_bridge);
 
     (token_address, shielded_asset_adapter, owner, privacy_deposit_bridge)
+}
+
+fn privacy_invoke_single(
+    bridge: IPrivacyDepositBridgeDispatcher,
+    asset_id: felt252,
+    amount: u128,
+    deposit_nonce: u64,
+    note_commitment: felt252,
+    withdraw_authority: felt252,
+) {
+    bridge
+        .privacy_invoke(
+            asset_id,
+            amount,
+            array![amount].span(),
+            array![deposit_nonce].span(),
+            array![note_commitment].span(),
+            array![withdraw_authority].span(),
+        );
 }
 
 fn native_settlement_message_hash(
@@ -1205,7 +1224,9 @@ fn fee_ledger_claims_accrued_fees_from_adapter_escrow() {
 
     token.mint(privacy_deposit_bridge, as_u256(100));
     start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
-    bridge.privacy_invoke(ASSET_ID, 100, 7, NOTE_COMMITMENT, withdraw_authority_public_key(0xabc));
+    privacy_invoke_single(
+        bridge, ASSET_ID, 100, 7, NOTE_COMMITMENT, withdraw_authority_public_key(0xabc),
+    );
     stop_cheat_caller_address(privacy_deposit_bridge);
 
     start_cheat_caller_address(fee_ledger, auction_verifier);
@@ -1358,7 +1379,9 @@ fn privacy_deposit_bridge_activates_verifier_note_root_when_configured() {
     stop_cheat_caller_address(shielded_asset_adapter);
 
     start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
-    bridge.privacy_invoke(ASSET_ID, 500, 7, NOTE_COMMITMENT, withdraw_authority_public_key(0x222));
+    privacy_invoke_single(
+        bridge, ASSET_ID, 500, 7, NOTE_COMMITMENT, withdraw_authority_public_key(0x222),
+    );
     stop_cheat_caller_address(privacy_deposit_bridge);
 
     let (current_note_root, current_nullifier_root, current_renewal_root, current_fee_root) =
@@ -1499,7 +1522,14 @@ fn privacy_deposit_bridge_registers_privacy_funded_execution_notes() {
 
     start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
     let returned_deposits = bridge
-        .privacy_invoke(ASSET_ID, 750, 11, NOTE_COMMITMENT, withdraw_authority);
+        .privacy_invoke(
+            ASSET_ID,
+            750,
+            array![750_u128].span(),
+            array![11_u64].span(),
+            array![NOTE_COMMITMENT].span(),
+            array![withdraw_authority].span(),
+        );
     stop_cheat_caller_address(privacy_deposit_bridge);
 
     assert(returned_deposits.len() == 0, 'BAD_INVOKE_RETURN');
@@ -1517,6 +1547,126 @@ fn privacy_deposit_bridge_registers_privacy_funded_execution_notes() {
     assert(current_nullifier_root == 0, 'BAD_NULLIFIER_ROOT');
     assert(current_renewal_root == 0, 'BAD_RENEWAL_ROOT');
     assert(current_fee_root == 0, 'BAD_FEE_ROOT');
+}
+
+#[test]
+fn privacy_deposit_bridge_registers_batched_privacy_funded_notes() {
+    let admin = as_address(0x111);
+    let first_withdraw_authority = withdraw_authority_public_key(0x222);
+    let second_withdraw_authority = withdraw_authority_public_key(0x333);
+    let second_note_commitment = NOTE_COMMITMENT + 1;
+    let token_address = deploy_mock_erc20();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let shielded_asset_adapter = deploy_shielded_asset_adapter(admin);
+    let privacy_deposit_bridge = deploy_privacy_deposit_bridge(
+        commitment_registry, shielded_asset_adapter,
+    );
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
+    authorize_privacy_deposit_bridge(
+        admin, commitment_registry, shielded_asset_adapter, privacy_deposit_bridge,
+    );
+
+    let token = IMockERC20Dispatcher { contract_address: token_address };
+    let registry = ICommitmentRegistryDispatcher { contract_address: commitment_registry };
+    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(commitment_registry, admin);
+    registry.set_auction_verifier(auction_verifier);
+    stop_cheat_caller_address(commitment_registry);
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_deposit_note_root_registrar(commitment_registry);
+    stop_cheat_caller_address(auction_verifier);
+
+    token.mint(privacy_deposit_bridge, as_u256(750));
+
+    start_cheat_caller_address(shielded_asset_adapter, admin);
+    adapter.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(shielded_asset_adapter);
+
+    start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
+    let returned_deposits = bridge
+        .privacy_invoke(
+            ASSET_ID,
+            750,
+            array![250_u128, 500_u128].span(),
+            array![11_u64, 12_u64].span(),
+            array![NOTE_COMMITMENT, second_note_commitment].span(),
+            array![first_withdraw_authority, second_withdraw_authority].span(),
+        );
+    stop_cheat_caller_address(privacy_deposit_bridge);
+
+    assert(returned_deposits.len() == 0, 'BAD_INVOKE_RETURN');
+    assert(registry.is_note_commitment_registered(NOTE_COMMITMENT), 'FIRST_NOT_REGISTERED');
+    assert(registry.is_note_commitment_registered(second_note_commitment), 'SECOND_NOT_REGISTERED');
+    assert(adapter.note_is_live(NOTE_COMMITMENT), 'FIRST_NOT_LIVE');
+    assert(adapter.note_is_live(second_note_commitment), 'SECOND_NOT_LIVE');
+    assert(adapter.note_amount(NOTE_COMMITMENT) == 250, 'BAD_FIRST_AMOUNT');
+    assert(adapter.note_amount(second_note_commitment) == 500, 'BAD_SECOND_AMOUNT');
+    assert(
+        adapter.note_withdraw_authority(NOTE_COMMITMENT) == first_withdraw_authority,
+        'BAD_FIRST_AUTHORITY',
+    );
+    assert(
+        adapter.note_withdraw_authority(second_note_commitment) == second_withdraw_authority,
+        'BAD_SECOND_AUTHORITY',
+    );
+    assert(adapter.escrowed_balance(ASSET_ID) == 750, 'BAD_ESCROW_BALANCE');
+    assert(adapter.deposit_count() == 2, 'BAD_DEPOSIT_COUNT');
+    assert(adapter.deposit_record(0).deposit_nonce == 11, 'BAD_FIRST_NONCE');
+    assert(adapter.deposit_record(1).deposit_nonce == 12, 'BAD_SECOND_NONCE');
+
+    let first_root = root_only_state_transition(0, deposit_note_root(NOTE_COMMITMENT));
+    let second_root = root_only_state_transition(
+        first_root, deposit_note_root(second_note_commitment),
+    );
+    let (current_note_root, current_nullifier_root, current_renewal_root, current_fee_root) =
+        verifier
+        .current_settlement_roots();
+    assert(current_note_root == second_root, 'BAD_BATCH_DEPOSIT_ROOT');
+    assert(current_nullifier_root == 0, 'BAD_NULLIFIER_ROOT');
+    assert(current_renewal_root == 0, 'BAD_RENEWAL_ROOT');
+    assert(current_fee_root == 0, 'BAD_FEE_ROOT');
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_duplicate_batch_commitments() {
+    let admin = as_address(0x111);
+    let withdraw_authority = withdraw_authority_public_key(0x222);
+    let token_address = deploy_mock_erc20();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let shielded_asset_adapter = deploy_shielded_asset_adapter(admin);
+    let privacy_deposit_bridge = deploy_privacy_deposit_bridge(
+        commitment_registry, shielded_asset_adapter,
+    );
+    authorize_privacy_deposit_bridge(
+        admin, commitment_registry, shielded_asset_adapter, privacy_deposit_bridge,
+    );
+
+    let token = IMockERC20Dispatcher { contract_address: token_address };
+    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
+
+    token.mint(privacy_deposit_bridge, as_u256(750));
+
+    start_cheat_caller_address(shielded_asset_adapter, admin);
+    adapter.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(shielded_asset_adapter);
+
+    start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
+    bridge
+        .privacy_invoke(
+            ASSET_ID,
+            750,
+            array![250_u128, 500_u128].span(),
+            array![11_u64, 12_u64].span(),
+            array![NOTE_COMMITMENT, NOTE_COMMITMENT].span(),
+            array![withdraw_authority, withdraw_authority].span(),
+        );
 }
 
 #[test]
@@ -1546,7 +1696,7 @@ fn privacy_deposit_bridge_rejects_non_privacy_pool_callers() {
     stop_cheat_caller_address(shielded_asset_adapter);
 
     start_cheat_caller_address(privacy_deposit_bridge, wrong_caller);
-    bridge.privacy_invoke(ASSET_ID, 750, 11, NOTE_COMMITMENT, withdraw_authority);
+    privacy_invoke_single(bridge, ASSET_ID, 750, 11, NOTE_COMMITMENT, withdraw_authority);
 }
 
 #[test]
@@ -3130,5 +3280,5 @@ fn privacy_deposit_bridge_rejects_zero_withdraw_authority() {
     stop_cheat_caller_address(shielded_asset_adapter);
 
     start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
-    bridge.privacy_invoke(ASSET_ID, 500, 7, NOTE_COMMITMENT, 0);
+    privacy_invoke_single(bridge, ASSET_ID, 500, 7, NOTE_COMMITMENT, 0);
 }
