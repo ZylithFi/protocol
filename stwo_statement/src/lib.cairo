@@ -383,6 +383,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let mut note_membership_path_cursor = 0;
     let mut note_membership_suffix_cursor = 0;
     let mut funding_input_cursor = 0;
+    let mut public_output_cursor = 0;
 
     while index_order < matched_order_commitments.len() {
         let order_commitment = *matched_order_commitments.at(index_order);
@@ -675,16 +676,6 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         );
         assert(output_note_commitment == recomputed_output_note_commitment, 'E');
 
-        assert_public_output_present(
-            output_note_commitment,
-            output_note_asset_id,
-            output_note_amount,
-            output_note_withdraw_authority,
-            output_note_commitments.span(),
-            output_note_asset_ids.span(),
-            output_note_amounts.span(),
-            output_note_withdraw_authorities.span(),
-        );
         assert(output_note_owner_key == recipient_owner_key, 'E');
         assert(output_note_spend_authority == recipient_spend_authority, 'E');
         assert(output_note_withdraw_authority == recipient_withdraw_authority, 'E');
@@ -695,7 +686,8 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         let order_relay_fee_bps = relay_fee_bps_for_order(
             relay_mode, order_type, parent_order_commitment, relay_fee_bps_u128,
         );
-        let expected_residual_amount = if side == ORDER_SIDE_BUY {
+        assert(order_fee_bps + order_relay_fee_bps <= FEE_BPS_DENOMINATOR, 'E');
+        let (expected_primary_amount, expected_residual_amount) = if side == ORDER_SIDE_BUY {
             assert(limit_price >= clearing_price_u128, 'E');
             assert(output_note_asset_id == base_asset_id, 'E');
 
@@ -708,7 +700,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             total_buy_base = total_buy_base + filled_amount;
             expected_base_fee = expected_base_fee + fee_amount;
             expected_base_relay_fee = expected_base_relay_fee + relay_fee_amount;
-            funding_note_amount - spend_amount
+            (filled_amount - fee_amount - relay_fee_amount, funding_note_amount - spend_amount)
         } else {
             assert(side == ORDER_SIDE_SELL, 'E');
             assert(limit_price <= clearing_price_u128, 'E');
@@ -723,8 +715,20 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
             total_sell_base = total_sell_base + filled_amount;
             expected_quote_fee = expected_quote_fee + fee_amount;
             expected_quote_relay_fee = expected_quote_relay_fee + relay_fee_amount;
-            funding_note_amount - filled_amount
+            (gross_quote - fee_amount - relay_fee_amount, funding_note_amount - filled_amount)
         };
+        assert(output_note_amount == expected_primary_amount, 'E');
+        assert_canonical_public_output(
+            ref public_output_cursor,
+            output_note_commitment,
+            output_note_asset_id,
+            output_note_amount,
+            output_note_withdraw_authority,
+            output_note_commitments.span(),
+            output_note_asset_ids.span(),
+            output_note_amounts.span(),
+            output_note_withdraw_authorities.span(),
+        );
 
         if expected_residual_amount == 0 {
             assert_absent_residual(
@@ -766,7 +770,9 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
                 residual_note_metadata_commitment,
             );
             assert(residual_note_commitment == recomputed_residual_note_commitment, 'E');
-            assert_public_output_present(
+            assert(felt_to_u128(residual_note_amount_felt) == expected_residual_amount, 'E');
+            assert_canonical_public_output(
+                ref public_output_cursor,
                 residual_note_commitment,
                 residual_note_asset_id,
                 felt_to_u128(residual_note_amount_felt),
@@ -785,28 +791,9 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     assert(note_membership_path_cursor == note_membership_path_values.len(), 'E');
     assert(note_membership_path_cursor == note_membership_path_directions.len(), 'E');
     assert(note_membership_suffix_cursor == note_membership_suffix_roots.len(), 'E');
+    assert(public_output_cursor == output_note_commitments.len(), 'E');
 
     assert(total_buy_base == total_sell_base, 'E');
-    assert_netted_public_outputs(
-        base_asset_id,
-        quote_asset_id,
-        clearing_price_u128,
-        price_base_scale_u128,
-        matched_fill_amounts.span(),
-        matched_sides.span(),
-        matched_order_types.span(),
-        matched_relay_modes.span(),
-        matched_parent_order_commitments.span(),
-        matched_funding_note_amounts.span(),
-        matched_output_note_commitments.span(),
-        matched_residual_note_flags.span(),
-        matched_residual_note_commitments.span(),
-        output_note_commitments.span(),
-        output_note_amounts.span(),
-        taker_fee_bps_u128,
-        maker_fee_bps_u128,
-        relay_fee_bps_u128,
-    );
 
     let consumed_note_root = single_field_root(
         consumed_note_root_domain, consumed_note_commitments.span(),
@@ -2709,11 +2696,7 @@ fn assert_best_clearing_price(
                             funding_note_amounts,
                         );
                         let update = should_update_best(
-                            best_initialized,
-                            matched,
-                            imbalance,
-                            best_matched,
-                            best_imbalance,
+                            best_initialized, matched, imbalance, best_matched, best_imbalance,
                         );
                         if update == 1 {
                             best_initialized = 1;
@@ -2757,11 +2740,7 @@ fn assert_best_clearing_price(
                         funding_note_amounts,
                     );
                     let update = should_update_best(
-                        best_initialized,
-                        matched,
-                        imbalance,
-                        best_matched,
-                        best_imbalance,
+                        best_initialized, matched, imbalance, best_matched, best_imbalance,
                     );
                     if update == 1 {
                         best_initialized = 1;
@@ -3041,6 +3020,9 @@ fn assert_privacy_gate_failure(
     min_maker_participants: felt252,
     max_maker_fill_bps: felt252,
 ) {
+    assert(min_batch_participants == 0, 'E');
+    assert(max_single_owner_fill_bps == 0, 'E');
+    assert(min_maker_participants == 0, 'E');
     let active_flags = stable_active_flags(
         clearing_price,
         price_base_scale,
@@ -3083,40 +3065,6 @@ fn assert_privacy_gate_failure(
         time_in_force,
         funding_note_amounts,
     );
-    let participant_count = distinct_filled_owner_count(
-        active_flags.span(),
-        clearing_price,
-        price_base_scale,
-        sides,
-        order_types,
-        maker_curve_point_counts,
-        maker_curve_prices,
-        maker_curve_base_amounts,
-        limit_prices,
-        order_amounts,
-        min_fills,
-        time_in_force,
-        funding_note_amounts,
-        funding_note_owner_keys,
-        0,
-    );
-    let maker_participant_count = distinct_filled_owner_count(
-        active_flags.span(),
-        clearing_price,
-        price_base_scale,
-        sides,
-        order_types,
-        maker_curve_point_counts,
-        maker_curve_prices,
-        maker_curve_base_amounts,
-        limit_prices,
-        order_amounts,
-        min_fills,
-        time_in_force,
-        funding_note_amounts,
-        funding_note_owner_keys,
-        1,
-    );
     let max_order_fill = max_order_fill_at_price(
         active_flags.span(),
         clearing_price,
@@ -3149,35 +3097,12 @@ fn assert_privacy_gate_failure(
         funding_note_amounts,
         1,
     );
-    let max_owner_fill = max_owner_fill_at_price(
-        active_flags.span(),
-        clearing_price,
-        price_base_scale,
-        sides,
-        order_types,
-        maker_curve_point_counts,
-        maker_curve_prices,
-        maker_curve_base_amounts,
-        limit_prices,
-        order_amounts,
-        min_fills,
-        time_in_force,
-        funding_note_amounts,
-        funding_note_owner_keys,
-    );
 
     let mut failed = 0;
     if min_batch_base_liquidity != 0 {
         let threshold = felt_to_u128(min_batch_base_liquidity);
         if matched_volume > 0 {
             if matched_volume < threshold {
-                failed = 1;
-            }
-        }
-    }
-    if min_batch_participants != 0 {
-        if participant_count > 0 {
-            if participant_count < felt_to_u128(min_batch_participants) {
                 failed = 1;
             }
         }
@@ -3195,20 +3120,8 @@ fn assert_privacy_gate_failure(
                 failed = 1;
             }
         }
-        if max_single_owner_fill_bps != 0 {
-            if max_owner_fill * 10000 / matched_volume > felt_to_u128(max_single_owner_fill_bps) {
-                failed = 1;
-            }
-        }
         if max_maker_fill_bps != 0 {
             if max_maker_fill * 10000 / matched_volume > felt_to_u128(max_maker_fill_bps) {
-                failed = 1;
-            }
-        }
-    }
-    if min_maker_participants != 0 {
-        if maker_participant_count > 0 {
-            if maker_participant_count < felt_to_u128(min_maker_participants) {
                 failed = 1;
             }
         }
@@ -3238,6 +3151,9 @@ fn assert_privacy_gate_success(
     min_maker_participants: felt252,
     max_maker_fill_bps: felt252,
 ) {
+    assert(min_batch_participants == 0, 'E');
+    assert(max_single_owner_fill_bps == 0, 'E');
+    assert(min_maker_participants == 0, 'E');
     let active_flags = stable_active_flags(
         clearing_price,
         price_base_scale,
@@ -3280,40 +3196,6 @@ fn assert_privacy_gate_success(
         time_in_force,
         funding_note_amounts,
     );
-    let participant_count = distinct_filled_owner_count(
-        active_flags.span(),
-        clearing_price,
-        price_base_scale,
-        sides,
-        order_types,
-        maker_curve_point_counts,
-        maker_curve_prices,
-        maker_curve_base_amounts,
-        limit_prices,
-        order_amounts,
-        min_fills,
-        time_in_force,
-        funding_note_amounts,
-        funding_note_owner_keys,
-        0,
-    );
-    let maker_participant_count = distinct_filled_owner_count(
-        active_flags.span(),
-        clearing_price,
-        price_base_scale,
-        sides,
-        order_types,
-        maker_curve_point_counts,
-        maker_curve_prices,
-        maker_curve_base_amounts,
-        limit_prices,
-        order_amounts,
-        min_fills,
-        time_in_force,
-        funding_note_amounts,
-        funding_note_owner_keys,
-        1,
-    );
     let max_order_fill = max_order_fill_at_price(
         active_flags.span(),
         clearing_price,
@@ -3346,29 +3228,10 @@ fn assert_privacy_gate_success(
         funding_note_amounts,
         1,
     );
-    let max_owner_fill = max_owner_fill_at_price(
-        active_flags.span(),
-        clearing_price,
-        price_base_scale,
-        sides,
-        order_types,
-        maker_curve_point_counts,
-        maker_curve_prices,
-        maker_curve_base_amounts,
-        limit_prices,
-        order_amounts,
-        min_fills,
-        time_in_force,
-        funding_note_amounts,
-        funding_note_owner_keys,
-    );
 
     assert(matched_volume != 0, 'E');
     if min_batch_base_liquidity != 0 {
         assert(matched_volume >= felt_to_u128(min_batch_base_liquidity), 'E');
-    }
-    if min_batch_participants != 0 {
-        assert(participant_count >= felt_to_u128(min_batch_participants), 'E');
     }
     if min_eligible_orders != 0 {
         assert(eligible_count >= felt_to_u128(min_eligible_orders), 'E');
@@ -3378,16 +3241,8 @@ fn assert_privacy_gate_success(
             max_order_fill * 10000 / matched_volume <= felt_to_u128(max_single_order_fill_bps), 'E',
         );
     }
-    if max_single_owner_fill_bps != 0 {
-        assert(
-            max_owner_fill * 10000 / matched_volume <= felt_to_u128(max_single_owner_fill_bps), 'E',
-        );
-    }
     if max_maker_fill_bps != 0 {
         assert(max_maker_fill * 10000 / matched_volume <= felt_to_u128(max_maker_fill_bps), 'E');
-    }
-    if min_maker_participants != 0 {
-        assert(maker_participant_count >= felt_to_u128(min_maker_participants), 'E');
     }
 }
 
@@ -3482,152 +3337,6 @@ fn max_order_fill_at_price(
         index += 1;
     }
     max_fill
-}
-
-fn max_owner_fill_at_price(
-    active_flags: Span<felt252>,
-    clearing_price: u128,
-    price_base_scale: u128,
-    sides: Span<felt252>,
-    order_types: Span<felt252>,
-    maker_curve_point_counts: Span<felt252>,
-    maker_curve_prices: Span<felt252>,
-    maker_curve_base_amounts: Span<felt252>,
-    limit_prices: Span<felt252>,
-    order_amounts: Span<felt252>,
-    min_fills: Span<felt252>,
-    time_in_force: Span<felt252>,
-    funding_note_amounts: Span<felt252>,
-    funding_note_owner_keys: Span<felt252>,
-) -> u128 {
-    let mut max_fill: u128 = 0;
-    let mut index = 0;
-    while index < active_flags.len() {
-        let owner = *funding_note_owner_keys.at(index);
-        let mut owner_fill: u128 = 0;
-        let mut cursor = 0;
-        let mut curve_cursor = 0;
-        while cursor < active_flags.len() {
-            let point_count: usize = (*maker_curve_point_counts.at(cursor)).try_into().expect('E');
-            if *funding_note_owner_keys.at(cursor) == owner {
-                owner_fill = owner_fill
-                    + expected_fill_with_active_flags_and_cursor(
-                        cursor,
-                        curve_cursor,
-                        point_count,
-                        active_flags,
-                        clearing_price,
-                        price_base_scale,
-                        sides,
-                        order_types,
-                        maker_curve_point_counts,
-                        maker_curve_prices,
-                        maker_curve_base_amounts,
-                        limit_prices,
-                        order_amounts,
-                        min_fills,
-                        time_in_force,
-                        funding_note_amounts,
-                    );
-            }
-            curve_cursor += point_count;
-            cursor += 1;
-        }
-        if owner_fill > max_fill {
-            max_fill = owner_fill;
-        }
-        index += 1;
-    }
-    max_fill
-}
-
-fn distinct_filled_owner_count(
-    active_flags: Span<felt252>,
-    clearing_price: u128,
-    price_base_scale: u128,
-    sides: Span<felt252>,
-    order_types: Span<felt252>,
-    maker_curve_point_counts: Span<felt252>,
-    maker_curve_prices: Span<felt252>,
-    maker_curve_base_amounts: Span<felt252>,
-    limit_prices: Span<felt252>,
-    order_amounts: Span<felt252>,
-    min_fills: Span<felt252>,
-    time_in_force: Span<felt252>,
-    funding_note_amounts: Span<felt252>,
-    funding_note_owner_keys: Span<felt252>,
-    maker_only: felt252,
-) -> u128 {
-    let mut count: u128 = 0;
-    let mut index = 0;
-    let mut curve_cursor = 0;
-    while index < active_flags.len() {
-        let point_count: usize = (*maker_curve_point_counts.at(index)).try_into().expect('E');
-        if maker_only == 0 || *order_types.at(index) == ORDER_TYPE_MAKER_CURVE {
-            let fill = expected_fill_with_active_flags_and_cursor(
-                index,
-                curve_cursor,
-                point_count,
-                active_flags,
-                clearing_price,
-                price_base_scale,
-                sides,
-                order_types,
-                maker_curve_point_counts,
-                maker_curve_prices,
-                maker_curve_base_amounts,
-                limit_prices,
-                order_amounts,
-                min_fills,
-                time_in_force,
-                funding_note_amounts,
-            );
-            if fill > 0 {
-                let owner = *funding_note_owner_keys.at(index);
-                let mut seen = 0;
-                let mut cursor = 0;
-                let mut prior_curve_cursor = 0;
-                while cursor < index {
-                    let prior_point_count: usize = (*maker_curve_point_counts.at(cursor))
-                        .try_into()
-                        .expect('E');
-                    if *funding_note_owner_keys.at(cursor) == owner {
-                        if maker_only == 0 || *order_types.at(cursor) == ORDER_TYPE_MAKER_CURVE {
-                            let prior_fill = expected_fill_with_active_flags_and_cursor(
-                                cursor,
-                                prior_curve_cursor,
-                                prior_point_count,
-                                active_flags,
-                                clearing_price,
-                                price_base_scale,
-                                sides,
-                                order_types,
-                                maker_curve_point_counts,
-                                maker_curve_prices,
-                                maker_curve_base_amounts,
-                                limit_prices,
-                                order_amounts,
-                                min_fills,
-                                time_in_force,
-                                funding_note_amounts,
-                            );
-                            if prior_fill > 0 {
-                                seen = 1;
-                            }
-                        }
-                    }
-                    prior_curve_cursor += prior_point_count;
-                    cursor += 1;
-                }
-                if seen == 0 {
-                    count += 1;
-                }
-            }
-        }
-        curve_cursor += point_count;
-        index += 1;
-    }
-    count
 }
 
 fn should_update_best(
@@ -4044,7 +3753,8 @@ fn maker_curve_min_band_base_amount(pair_id: felt252) -> u128 {
     1
 }
 
-fn assert_public_output_present(
+fn assert_canonical_public_output(
+    ref output_cursor: usize,
     expected_commitment: felt252,
     expected_asset_id: felt252,
     expected_amount: u128,
@@ -4054,95 +3764,12 @@ fn assert_public_output_present(
     output_note_amounts: Span<felt252>,
     output_note_withdraw_authorities: Span<felt252>,
 ) {
-    let mut index = 0;
-    while index < output_note_commitments.len() {
-        if expected_commitment == *output_note_commitments.at(index) {
-            assert(expected_asset_id == *output_note_asset_ids.at(index), 'E');
-            assert(expected_amount == felt_to_u128(*output_note_amounts.at(index)), 'E');
-            assert(expected_withdraw_authority == *output_note_withdraw_authorities.at(index), 'E');
-            return;
-        }
-        index += 1;
-    }
-    assert(false, 'E');
-}
-
-fn assert_netted_public_outputs(
-    base_asset_id: felt252,
-    quote_asset_id: felt252,
-    clearing_price: u128,
-    price_base_scale: u128,
-    matched_fill_amounts: Span<felt252>,
-    matched_sides: Span<felt252>,
-    matched_order_types: Span<felt252>,
-    matched_relay_modes: Span<felt252>,
-    matched_parent_order_commitments: Span<felt252>,
-    matched_funding_note_amounts: Span<felt252>,
-    matched_output_note_commitments: Span<felt252>,
-    matched_residual_note_flags: Span<felt252>,
-    matched_residual_note_commitments: Span<felt252>,
-    output_note_commitments: Span<felt252>,
-    output_note_amounts: Span<felt252>,
-    taker_fee_bps: u128,
-    maker_fee_bps: u128,
-    relay_fee_bps: u128,
-) {
-    let _ = base_asset_id;
-    let _ = quote_asset_id;
-    assert(matched_parent_order_commitments.len() == matched_output_note_commitments.len(), 'E');
-    assert(matched_relay_modes.len() == matched_output_note_commitments.len(), 'E');
-    let mut output_index = 0;
-    while output_index < output_note_commitments.len() {
-        let public_commitment = *output_note_commitments.at(output_index);
-        let public_amount = felt_to_u128(*output_note_amounts.at(output_index));
-        let mut expected_amount: u128 = 0;
-        let mut order_index = 0;
-        while order_index < matched_output_note_commitments.len() {
-            let filled_amount = felt_to_u128(*matched_fill_amounts.at(order_index));
-            let side = *matched_sides.at(order_index);
-            let order_type = *matched_order_types.at(order_index);
-            let relay_mode = *matched_relay_modes.at(order_index);
-            let parent_order_commitment = *matched_parent_order_commitments.at(order_index);
-            let funding_note_amount = felt_to_u128(*matched_funding_note_amounts.at(order_index));
-            let order_fee_bps = fee_bps_for_order_type(
-                order_type, parent_order_commitment, taker_fee_bps, maker_fee_bps,
-            );
-            let order_relay_fee_bps = relay_fee_bps_for_order(
-                relay_mode, order_type, parent_order_commitment, relay_fee_bps,
-            );
-            let total_fee_bps = order_fee_bps + order_relay_fee_bps;
-            let primary_amount = if side == ORDER_SIDE_BUY {
-                let fee_amount = filled_amount * total_fee_bps / FEE_BPS_DENOMINATOR;
-                filled_amount - fee_amount
-            } else {
-                assert(side == ORDER_SIDE_SELL, 'E');
-                let gross_quote = quote_amount_for_base_amount(
-                    filled_amount, clearing_price, price_base_scale,
-                );
-                let fee_amount = gross_quote * total_fee_bps / FEE_BPS_DENOMINATOR;
-                gross_quote - fee_amount
-            };
-            if *matched_output_note_commitments.at(order_index) == public_commitment {
-                expected_amount = expected_amount + primary_amount;
-            }
-
-            let residual_amount = if side == ORDER_SIDE_BUY {
-                funding_note_amount
-                    - quote_amount_for_base_amount(filled_amount, clearing_price, price_base_scale)
-            } else {
-                funding_note_amount - filled_amount
-            };
-            if *matched_residual_note_flags.at(order_index) == 1 {
-                if *matched_residual_note_commitments.at(order_index) == public_commitment {
-                    expected_amount = expected_amount + residual_amount;
-                }
-            }
-            order_index += 1;
-        }
-        assert(expected_amount != 0, 'E');
-        assert(public_amount == expected_amount, 'E');
-        output_index += 1;
-    }
+    assert(output_cursor < output_note_commitments.len(), 'E');
+    assert(expected_commitment == *output_note_commitments.at(output_cursor), 'E');
+    assert(expected_asset_id == *output_note_asset_ids.at(output_cursor), 'E');
+    assert(expected_amount == felt_to_u128(*output_note_amounts.at(output_cursor)), 'E');
+    assert(expected_withdraw_authority == *output_note_withdraw_authorities.at(output_cursor), 'E');
+    output_cursor += 1;
 }
 
 fn assert_sparse_nullifier_updates(

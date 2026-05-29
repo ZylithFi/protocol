@@ -19,6 +19,7 @@ pub trait IAuctionVerifier<TContractState> {
     fn set_pause_guardian(ref self: TContractState, guardian: ContractAddress);
     fn pause(ref self: TContractState);
     fn unpause(ref self: TContractState);
+    fn lock_operational_config(ref self: TContractState);
     fn set_authorized_settlement_account(ref self: TContractState, account: ContractAddress);
     fn set_proof_program(
         ref self: TContractState, proof_program: ContractAddress, virtual_program_hash: felt252,
@@ -251,6 +252,7 @@ pub mod AuctionVerifier {
         admin_transfer_pending: bool,
         pause_guardian: ContractAddress,
         paused: bool,
+        operational_config_locked: bool,
         authorized_settlement_account: ContractAddress,
         proof_program: ContractAddress,
         proof_program_hash: felt252,
@@ -350,8 +352,14 @@ pub mod AuctionVerifier {
             self.paused.write(false);
         }
 
+        fn lock_operational_config(ref self: ContractState) {
+            assert_admin(@self);
+            self.operational_config_locked.write(true);
+        }
+
         fn set_authorized_settlement_account(ref self: ContractState, account: ContractAddress) {
             assert_admin(@self);
+            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
             assert(!account.is_zero(), 'BAD_SETTLEMENT_ACCOUNT');
             self.authorized_settlement_account.write(account);
         }
@@ -376,30 +384,35 @@ pub mod AuctionVerifier {
 
         fn set_proof_validity_blocks(ref self: ContractState, proof_validity_blocks: u64) {
             assert_admin(@self);
+            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
             assert(proof_validity_blocks > 0, 'BAD_PROOF_TTL');
             self.proof_validity_blocks.write(proof_validity_blocks);
         }
 
         fn set_shielded_asset_adapter(ref self: ContractState, adapter: ContractAddress) {
             assert_admin(@self);
+            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
             assert(!adapter.is_zero(), 'BAD_ADAPTER');
             self.shielded_asset_adapter.write(adapter);
         }
 
         fn set_deposit_note_root_registrar(ref self: ContractState, registrar: ContractAddress) {
             assert_admin(@self);
+            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
             assert(!registrar.is_zero(), 'BAD_DEPOSIT_REGISTRAR');
             self.deposit_note_root_registrar.write(registrar);
         }
 
         fn set_output_claim_delay_seconds(ref self: ContractState, delay_seconds: u64) {
             assert_admin(@self);
+            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
             assert(delay_seconds <= MAX_OUTPUT_CLAIM_DELAY_SECONDS, 'BAD_CLAIM_DELAY');
             self.output_claim_delay_seconds.write(delay_seconds);
         }
 
         fn set_fee_ledger(ref self: ContractState, ledger: ContractAddress) {
             assert_admin(@self);
+            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
             assert(!ledger.is_zero(), 'BAD_FEE_LEDGER');
             self.fee_ledger.write(ledger);
         }
