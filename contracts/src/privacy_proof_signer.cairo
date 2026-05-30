@@ -1,8 +1,9 @@
 #[starknet::interface]
 pub trait IPrivacyProofSigner<TContractState> {
     fn signer_public_key(self: @TContractState) -> felt252;
-    fn relay_message_hash(self: @TContractState, calls: Span<starknet::account::Call>, nonce: felt252)
-        -> felt252;
+    fn relay_message_hash(
+        self: @TContractState, calls: Span<starknet::account::Call>, nonce: felt252,
+    ) -> felt252;
     fn relay_nonce_used(self: @TContractState, nonce: felt252) -> bool;
     fn execute_from_relayer(
         ref self: TContractState,
@@ -11,8 +12,9 @@ pub trait IPrivacyProofSigner<TContractState> {
         signature_r: felt252,
         signature_s: felt252,
     );
-    fn is_valid_signature(self: @TContractState, hash: felt252, signature: Array<felt252>)
-        -> felt252;
+    fn is_valid_signature(
+        self: @TContractState, hash: felt252, signature: Array<felt252>,
+    ) -> felt252;
 }
 
 #[starknet::contract]
@@ -21,9 +23,9 @@ pub mod PrivacyProofSigner {
     use core::ecdsa::check_ecdsa_signature;
     use core::poseidon::hades_permutation;
     use starknet::account::Call;
-    use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
     use starknet::storage::{
-        Map, StorageMapReadAccess, StorageMapWriteAccess,
+        Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
+        StoragePointerWriteAccess,
     };
     use starknet::syscalls::call_contract_syscall;
     use starknet::{SyscallResultTrait, VALIDATED, get_contract_address, get_tx_info};
@@ -48,9 +50,7 @@ pub mod PrivacyProofSigner {
             self.signer_public_key.read()
         }
 
-        fn relay_message_hash(
-            self: @ContractState, calls: Span<Call>, nonce: felt252,
-        ) -> felt252 {
+        fn relay_message_hash(self: @ContractState, calls: Span<Call>, nonce: felt252) -> felt252 {
             relay_message_hash(calls, nonce)
         }
 
@@ -72,10 +72,7 @@ pub mod PrivacyProofSigner {
             let public_key = self.signer_public_key.read();
             assert(
                 check_ecdsa_signature(
-                    relay_message_hash(calls, nonce),
-                    public_key,
-                    signature_r,
-                    signature_s,
+                    relay_message_hash(calls, nonce), public_key, signature_r, signature_s,
                 ),
                 'BAD_RELAY_SIG',
             );
@@ -129,7 +126,7 @@ pub mod PrivacyProofSigner {
                 state = poseidon_hash2(state, *calldata.at(index));
                 index += 1;
             }
-        };
+        }
         state
     }
 

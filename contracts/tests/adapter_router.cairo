@@ -9,8 +9,8 @@ use snforge_std::{
     cheat_chain_id, cheat_proof_facts, declare, start_cheat_caller_address,
     stop_cheat_caller_address,
 };
-use starknet::{ContractAddress, SyscallResultTrait};
 use starknet::account::Call;
+use starknet::{ContractAddress, SyscallResultTrait};
 use zylith_protocol::auction_verifier::{
     IAuctionVerifierDispatcher, IAuctionVerifierDispatcherTrait, ProofFacts,
 };
@@ -72,6 +72,8 @@ const TEST_PROTOCOL_FEE_RECIPIENT: felt252 =
     0x02478731e01081aa57abe958afa8c29dfa83032c10d647a63b0394c23beb6192;
 const TEST_RELAY_FEE_RECIPIENT: felt252 =
     0x02c79e77ef9014bbed5e612f86f8e011b05450aa9b7821d97c281cb2ac6d29a;
+const TEST_BASE_ASSET_ID: felt252 = 0x5354524b;
+const TEST_QUOTE_ASSET_ID: felt252 = 0x55534443;
 
 fn deploy_commitment_registry(admin: ContractAddress) -> ContractAddress {
     let class = declare("CommitmentRegistry").unwrap().contract_class();
@@ -138,18 +140,12 @@ fn deploy_auction_verifier(
     verifier.set_proof_program(verifier_address, TEST_PROOF_PROGRAM_HASH);
     verifier.set_protocol_fee_recipient(TEST_PROTOCOL_FEE_RECIPIENT);
     verifier.set_relay_fee_recipient(TEST_RELAY_FEE_RECIPIENT);
-    verifier.set_pair_fee_config(
-        0x888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS,
-    );
-    verifier.set_pair_fee_config(
-        0x889, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS,
-    );
-    verifier.set_pair_fee_config(
-        0x1888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS,
-    );
-    verifier.set_pair_fee_config(
-        0x2888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS,
-    );
+    verifier.set_pair_fee_config(0x888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
+    verifier.set_pair_fee_config(0x889, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
+    verifier
+        .set_pair_fee_config(0x1888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
+    verifier
+        .set_pair_fee_config(0x2888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
     stop_cheat_caller_address(verifier_address);
     verifier_address
 }
@@ -934,9 +930,14 @@ fn submit_root_settlement(
 ) {
     let bound_fee_root = normalized_fee_root(fee_root);
     let bound_new_fee_root = normalized_new_fee_root(prior_fee_root, fee_root, new_fee_root);
-    let fee_asset_ids: Array<felt252> = array![];
-    let fee_recipients: Array<felt252> = array![];
-    let fee_amounts: Array<u128> = array![];
+    let fee_asset_ids: Array<felt252> = array![
+        TEST_BASE_ASSET_ID, TEST_QUOTE_ASSET_ID, TEST_BASE_ASSET_ID, TEST_QUOTE_ASSET_ID,
+    ];
+    let fee_recipients: Array<felt252> = array![
+        TEST_PROTOCOL_FEE_RECIPIENT, TEST_PROTOCOL_FEE_RECIPIENT, TEST_RELAY_FEE_RECIPIENT,
+        TEST_RELAY_FEE_RECIPIENT,
+    ];
+    let fee_amounts: Array<u128> = array![0, 0, 0, 0];
     verifier
         .submit_settlement_with_proof_facts(
             batch_id,

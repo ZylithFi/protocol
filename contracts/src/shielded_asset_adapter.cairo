@@ -249,15 +249,14 @@ pub mod ShieldedAssetAdapter {
                         break;
                     }
                     assert(
-                        note_commitment != *note_commitments.at(duplicate_index),
-                        'DUPLICATE_NOTE',
+                        note_commitment != *note_commitments.at(duplicate_index), 'DUPLICATE_NOTE',
                     );
                     duplicate_index += 1;
-                };
+                }
 
                 computed_total = computed_total + amount;
                 index += 1;
-            };
+            }
             assert(computed_total == total_amount, 'BAD_TOTAL_AMOUNT');
 
             let token = IERC20Dispatcher { contract_address: token_address };

@@ -213,7 +213,7 @@ pub mod PrivacyDepositBridge {
             assert(withdraw_authority != 0, 'BAD_AUTHORITY');
             computed_total = computed_total + amount;
             index += 1;
-        };
+        }
         assert(computed_total == total_amount, 'BAD_TOTAL_AMOUNT');
 
         let bridge = get_contract_address();

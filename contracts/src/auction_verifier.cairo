@@ -868,7 +868,9 @@ pub mod AuctionVerifier {
             assert(consumed_nullifier_root != 0, 'BAD_CONSUMED_NULLS');
             assert(output_note_root != 0, 'BAD_OUTPUT_ROOT');
             assert(prior_note_root == self.current_note_root.read(), 'NOTE_ROOT_STALE');
-            assert(prior_nullifier_root == self.current_nullifier_root.read(), 'NULLIFIER_ROOT_STALE');
+            assert(
+                prior_nullifier_root == self.current_nullifier_root.read(), 'NULLIFIER_ROOT_STALE',
+            );
             assert(
                 new_note_root == state_transition_root(prior_note_root, output_note_root),
                 'NEW_NOTE_ROOT',
@@ -1628,8 +1630,9 @@ pub mod AuctionVerifier {
         assert(relay_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_RELAY_FEE');
         assert(protocol_fee_recipient != 0, 'BAD_FEE_RECIPIENT');
         assert(relay_fee_recipient != 0, 'BAD_RELAY_RECIPIENT');
-        assert(fee_asset_ids.len() == fee_recipients.len(), 'BAD_FEE_LENGTH');
-        assert(fee_asset_ids.len() == fee_amounts.len(), 'BAD_FEE_LENGTH');
+        assert(fee_asset_ids.len() == 4, 'BAD_FEE_LENGTH');
+        assert(fee_recipients.len() == 4, 'BAD_FEE_LENGTH');
+        assert(fee_amounts.len() == 4, 'BAD_FEE_LENGTH');
         assert(
             new_note_root == state_transition_root(prior_note_root, output_note_root),
             'NEW_NOTE_ROOT',
@@ -1826,9 +1829,45 @@ pub mod AuctionVerifier {
         asset_ids: Span<felt252>, recipients: Span<felt252>, amounts: Span<u128>,
     ) -> felt252 {
         let len = asset_ids.len();
-        assert(recipients.len() == len, 'BAD_FEE_LENGTH');
-        assert(amounts.len() == len, 'BAD_FEE_LENGTH');
+        assert(len == 4, 'BAD_FEE_LENGTH');
+        assert(recipients.len() == 4, 'BAD_FEE_LENGTH');
+        assert(amounts.len() == 4, 'BAD_FEE_LENGTH');
         let mut state = FEE_ROOT_DOMAIN;
+        let mut index = 0;
+        let mut fee_count: felt252 = 0;
+        loop {
+            if index == len {
+                break;
+            }
+            let asset_id = *asset_ids.at(index);
+            let recipient = *recipients.at(index);
+            let amount = *amounts.at(index);
+            assert(asset_id != 0, 'BAD_FEE_ASSET');
+            assert(recipient != 0, 'BAD_FEE_RECIPIENT');
+            if amount != 0 {
+                state = poseidon_hash2(state, asset_id);
+                state = poseidon_hash2(state, recipient);
+                state = poseidon_hash2(state, amount.into());
+                fee_count += 1;
+            }
+            index += 1;
+        }
+        poseidon_hash2(state, fee_count)
+    }
+
+    fn accrue_protocol_fees(
+        self: @ContractState,
+        asset_ids: Span<felt252>,
+        recipients: Span<felt252>,
+        amounts: Span<u128>,
+    ) {
+        let len = asset_ids.len();
+        assert(len == 4, 'BAD_FEE_LENGTH');
+        assert(recipients.len() == 4, 'BAD_FEE_LENGTH');
+        assert(amounts.len() == 4, 'BAD_FEE_LENGTH');
+        let mut nonzero_asset_ids = array![];
+        let mut nonzero_recipients = array![];
+        let mut nonzero_amounts = array![];
         let mut index = 0;
         loop {
             if index == len {
@@ -1839,31 +1878,23 @@ pub mod AuctionVerifier {
             let amount = *amounts.at(index);
             assert(asset_id != 0, 'BAD_FEE_ASSET');
             assert(recipient != 0, 'BAD_FEE_RECIPIENT');
-            assert(amount > 0, 'BAD_FEE_AMOUNT');
-            state = poseidon_hash2(state, asset_id);
-            state = poseidon_hash2(state, recipient);
-            state = poseidon_hash2(state, amount.into());
+            if amount != 0 {
+                nonzero_asset_ids.append(asset_id);
+                nonzero_recipients.append(recipient);
+                nonzero_amounts.append(amount);
+            }
             index += 1;
         }
-        poseidon_hash2(state, len.into())
-    }
-
-    fn accrue_protocol_fees(
-        self: @ContractState,
-        asset_ids: Span<felt252>,
-        recipients: Span<felt252>,
-        amounts: Span<u128>,
-    ) {
-        let len = asset_ids.len();
-        if len == 0 {
+        if nonzero_asset_ids.len() == 0 {
             return;
         }
-        assert(recipients.len() == len, 'BAD_FEE_LENGTH');
-        assert(amounts.len() == len, 'BAD_FEE_LENGTH');
         let fee_ledger_address = self.fee_ledger.read();
         assert(!fee_ledger_address.is_zero(), 'FEE_LEDGER_UNSET');
         let ledger = IFeeLedgerDispatcher { contract_address: fee_ledger_address };
-        ledger.accrue_fees(asset_ids, recipients, amounts);
+        ledger
+            .accrue_fees(
+                nonzero_asset_ids.span(), nonzero_recipients.span(), nonzero_amounts.span(),
+            );
     }
 
     fn single_field_root(domain: felt252, values: Span<felt252>) -> felt252 {
