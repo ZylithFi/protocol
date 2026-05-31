@@ -791,6 +791,70 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     assert(note_membership_path_cursor == note_membership_path_values.len(), 'E');
     assert(note_membership_path_cursor == note_membership_path_directions.len(), 'E');
     assert(note_membership_suffix_cursor == note_membership_suffix_roots.len(), 'E');
+    assert_fee_output(
+        ref public_output_cursor,
+        note_commitment_domain,
+        base_asset_id,
+        expected_base_fee,
+        protocol_fee_recipient,
+        output_note_commitments.span(),
+        output_note_asset_ids.span(),
+        output_note_amounts.span(),
+        output_note_withdraw_authorities.span(),
+        output_note_owner_keys.span(),
+        output_note_spend_authorities.span(),
+        output_note_blindings.span(),
+        output_note_nonces.span(),
+        output_note_metadata_commitments.span(),
+    );
+    assert_fee_output(
+        ref public_output_cursor,
+        note_commitment_domain,
+        quote_asset_id,
+        expected_quote_fee,
+        protocol_fee_recipient,
+        output_note_commitments.span(),
+        output_note_asset_ids.span(),
+        output_note_amounts.span(),
+        output_note_withdraw_authorities.span(),
+        output_note_owner_keys.span(),
+        output_note_spend_authorities.span(),
+        output_note_blindings.span(),
+        output_note_nonces.span(),
+        output_note_metadata_commitments.span(),
+    );
+    assert_fee_output(
+        ref public_output_cursor,
+        note_commitment_domain,
+        base_asset_id,
+        expected_base_relay_fee,
+        relay_fee_recipient,
+        output_note_commitments.span(),
+        output_note_asset_ids.span(),
+        output_note_amounts.span(),
+        output_note_withdraw_authorities.span(),
+        output_note_owner_keys.span(),
+        output_note_spend_authorities.span(),
+        output_note_blindings.span(),
+        output_note_nonces.span(),
+        output_note_metadata_commitments.span(),
+    );
+    assert_fee_output(
+        ref public_output_cursor,
+        note_commitment_domain,
+        quote_asset_id,
+        expected_quote_relay_fee,
+        relay_fee_recipient,
+        output_note_commitments.span(),
+        output_note_asset_ids.span(),
+        output_note_amounts.span(),
+        output_note_withdraw_authorities.span(),
+        output_note_owner_keys.span(),
+        output_note_spend_authorities.span(),
+        output_note_blindings.span(),
+        output_note_nonces.span(),
+        output_note_metadata_commitments.span(),
+    );
     assert(public_output_cursor == output_note_commitments.len(), 'E');
 
     assert(total_buy_base == total_sell_base, 'E');
@@ -3770,6 +3834,60 @@ fn assert_canonical_public_output(
     assert(expected_amount == felt_to_u128(*output_note_amounts.at(output_cursor)), 'E');
     assert(expected_withdraw_authority == *output_note_withdraw_authorities.at(output_cursor), 'E');
     output_cursor += 1;
+}
+
+fn assert_fee_output(
+    ref output_cursor: usize,
+    note_commitment_domain: felt252,
+    expected_asset_id: felt252,
+    expected_amount: u128,
+    expected_withdraw_authority: felt252,
+    output_note_commitments: Span<felt252>,
+    output_note_asset_ids: Span<felt252>,
+    output_note_amounts: Span<felt252>,
+    output_note_withdraw_authorities: Span<felt252>,
+    output_note_owner_keys: Span<felt252>,
+    output_note_spend_authorities: Span<felt252>,
+    output_note_blindings: Span<felt252>,
+    output_note_nonces: Span<felt252>,
+    output_note_metadata_commitments: Span<felt252>,
+) {
+    if expected_amount == 0 {
+        return;
+    }
+    assert(output_cursor < output_note_commitments.len(), 'E');
+    let output_note_owner_key = *output_note_owner_keys.at(output_cursor);
+    let output_note_spend_authority = *output_note_spend_authorities.at(output_cursor);
+    let output_note_blinding = *output_note_blindings.at(output_cursor);
+    let output_note_nonce = *output_note_nonces.at(output_cursor);
+    let output_note_metadata_commitment = *output_note_metadata_commitments.at(output_cursor);
+    assert(output_note_owner_key != 0, 'E');
+    assert(output_note_spend_authority != 0, 'E');
+    assert(output_note_blinding != 0, 'E');
+    assert(output_note_nonce != 0, 'E');
+    assert(output_note_metadata_commitment != 0, 'E');
+    let recomputed_commitment = note_commitment(
+        note_commitment_domain,
+        expected_asset_id,
+        expected_amount.into(),
+        output_note_owner_key,
+        output_note_spend_authority,
+        expected_withdraw_authority,
+        output_note_blinding,
+        output_note_nonce,
+        output_note_metadata_commitment,
+    );
+    assert_canonical_public_output(
+        ref output_cursor,
+        recomputed_commitment,
+        expected_asset_id,
+        expected_amount,
+        expected_withdraw_authority,
+        output_note_commitments,
+        output_note_asset_ids,
+        output_note_amounts,
+        output_note_withdraw_authorities,
+    );
 }
 
 fn assert_sparse_nullifier_updates(

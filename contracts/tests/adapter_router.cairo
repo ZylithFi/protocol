@@ -930,14 +930,6 @@ fn submit_root_settlement(
 ) {
     let bound_fee_root = normalized_fee_root(fee_root);
     let bound_new_fee_root = normalized_new_fee_root(prior_fee_root, fee_root, new_fee_root);
-    let fee_asset_ids: Array<felt252> = array![
-        TEST_BASE_ASSET_ID, TEST_QUOTE_ASSET_ID, TEST_BASE_ASSET_ID, TEST_QUOTE_ASSET_ID,
-    ];
-    let fee_recipients: Array<felt252> = array![
-        TEST_PROTOCOL_FEE_RECIPIENT, TEST_PROTOCOL_FEE_RECIPIENT, TEST_RELAY_FEE_RECIPIENT,
-        TEST_RELAY_FEE_RECIPIENT,
-    ];
-    let fee_amounts: Array<u128> = array![0, 0, 0, 0];
     verifier
         .submit_settlement_with_proof_facts(
             batch_id,
@@ -966,9 +958,6 @@ fn submit_root_settlement(
             new_nullifier_root,
             new_renewal_root,
             bound_new_fee_root,
-            fee_asset_ids.span(),
-            fee_recipients.span(),
-            fee_amounts.span(),
         );
 }
 
@@ -1065,9 +1054,6 @@ fn append_root_settlement_input(
     inputs.append(new_nullifier_root);
     inputs.append(new_renewal_root);
     inputs.append(bound_new_fee_root);
-    inputs.append(0);
-    inputs.append(0);
-    inputs.append(0);
 }
 
 fn valid_proof_facts(base_block_number: u64, proof_message_hash: felt252) -> Array<felt252> {

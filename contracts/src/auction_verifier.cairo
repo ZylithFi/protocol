@@ -133,9 +133,6 @@ pub trait IAuctionVerifier<TContractState> {
         new_nullifier_root: felt252,
         new_renewal_root: felt252,
         new_fee_root: felt252,
-        fee_asset_ids: Span<felt252>,
-        fee_recipients: Span<felt252>,
-        fee_amounts: Span<u128>,
     );
     fn submit_aggregate_settlements_with_proof_facts(
         ref self: TContractState, settlement_inputs: Span<felt252>,
@@ -200,7 +197,6 @@ pub mod AuctionVerifier {
         ContractAddress, SyscallResultTrait, get_caller_address, get_contract_address, get_tx_info,
     };
     use zylith_protocol::batch_registry::{IBatchRegistryDispatcher, IBatchRegistryDispatcherTrait};
-    use zylith_protocol::fee_ledger::{IFeeLedgerDispatcher, IFeeLedgerDispatcherTrait};
     use zylith_protocol::shielded_asset_adapter::{
         IShieldedAssetAdapterDispatcher, IShieldedAssetAdapterDispatcherTrait,
     };
@@ -218,8 +214,6 @@ pub mod AuctionVerifier {
     const SETTLEMENT_PROOF_MESSAGE_TO: felt252 = 0;
     const ROOT_ONLY_STATE_TRANSITION_DOMAIN: felt252 =
         0x01f14f0555b0b80fd6af9553623a021c472d8c930dfcb5b204b35b26f0d2b1b2;
-    const FEE_ROOT_DOMAIN: felt252 =
-        0x079a9e0b9d4a6b4cac728c0e5f6298e37533fa1348f020f3575a78c5adf7d44b;
     const FEE_BPS_DENOMINATOR: u128 = 10000;
     const MAX_PAIR_FEE_BPS: u128 = 100;
     const PAIR_FEE_TIMELOCK_SECONDS: u64 = 86400;
@@ -763,9 +757,6 @@ pub mod AuctionVerifier {
             new_nullifier_root: felt252,
             new_renewal_root: felt252,
             new_fee_root: felt252,
-            fee_asset_ids: Span<felt252>,
-            fee_recipients: Span<felt252>,
-            fee_amounts: Span<u128>,
         ) {
             assert_authorized_settlement_account(@self);
             assert_not_paused(@self);
@@ -841,9 +832,6 @@ pub mod AuctionVerifier {
                 new_nullifier_root,
                 new_renewal_root,
                 new_fee_root,
-                fee_asset_ids,
-                fee_recipients,
-                fee_amounts,
             );
         }
 
@@ -1198,40 +1186,6 @@ pub mod AuctionVerifier {
         read_next(data, ref index).try_into().expect('BAD_U128')
     }
 
-    fn skip_span(data: Span<felt252>, ref index: usize) {
-        let len: usize = read_next(data, ref index).try_into().expect('BAD_SPAN_LEN');
-        index += len;
-        assert(index <= data.len(), 'INPUT_TOO_SHORT');
-    }
-
-    fn read_felt_array(data: Span<felt252>, ref index: usize) -> Array<felt252> {
-        let len: usize = read_next(data, ref index).try_into().expect('BAD_SPAN_LEN');
-        let mut values = array![];
-        let mut cursor = 0;
-        loop {
-            if cursor == len {
-                break;
-            }
-            values.append(read_next(data, ref index));
-            cursor += 1;
-        }
-        values
-    }
-
-    fn read_u128_array(data: Span<felt252>, ref index: usize) -> Array<u128> {
-        let len: usize = read_next(data, ref index).try_into().expect('BAD_SPAN_LEN');
-        let mut values = array![];
-        let mut cursor = 0;
-        loop {
-            if cursor == len {
-                break;
-            }
-            values.append(read_next_u128(data, ref index));
-            cursor += 1;
-        }
-        values
-    }
-
     fn aggregate_settlement_count(data: Span<felt252>) -> usize {
         let mut index: usize = 0;
         let count_felt = read_next(data, ref index);
@@ -1276,10 +1230,6 @@ pub mod AuctionVerifier {
             let new_nullifier_root = read_next(data, ref index);
             let new_renewal_root = read_next(data, ref index);
             read_next(data, ref index);
-            skip_span(data, ref index);
-            skip_span(data, ref index);
-            skip_span(data, ref index);
-
             let statement_message = native_settlement_message_hash(
                 get_contract_address(), transcript_commitment,
             );
@@ -1359,9 +1309,6 @@ pub mod AuctionVerifier {
             let new_nullifier_root = read_next(data, ref index);
             let new_renewal_root = read_next(data, ref index);
             let new_fee_root = read_next(data, ref index);
-            let fee_asset_ids = read_felt_array(data, ref index);
-            let fee_recipients = read_felt_array(data, ref index);
-            let fee_amounts = read_u128_array(data, ref index);
 
             let statement_message = native_settlement_message_hash(
                 get_contract_address(), transcript_commitment,
@@ -1394,9 +1341,6 @@ pub mod AuctionVerifier {
                 new_nullifier_root,
                 new_renewal_root,
                 new_fee_root,
-                fee_asset_ids.span(),
-                fee_recipients.span(),
-                fee_amounts.span(),
             );
             cursor += 1;
         }
@@ -1614,9 +1558,6 @@ pub mod AuctionVerifier {
         new_nullifier_root: felt252,
         new_renewal_root: felt252,
         new_fee_root: felt252,
-        fee_asset_ids: Span<felt252>,
-        fee_recipients: Span<felt252>,
-        fee_amounts: Span<u128>,
     ) {
         let already_settled = self.settled_batches.read(batch_id);
         assert(already_settled == false, 'BATCH_SETTLED');
@@ -1630,9 +1571,6 @@ pub mod AuctionVerifier {
         assert(relay_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_RELAY_FEE');
         assert(protocol_fee_recipient != 0, 'BAD_FEE_RECIPIENT');
         assert(relay_fee_recipient != 0, 'BAD_RELAY_RECIPIENT');
-        assert(fee_asset_ids.len() == 4, 'BAD_FEE_LENGTH');
-        assert(fee_recipients.len() == 4, 'BAD_FEE_LENGTH');
-        assert(fee_amounts.len() == 4, 'BAD_FEE_LENGTH');
         assert(
             new_note_root == state_transition_root(prior_note_root, output_note_root),
             'NEW_NOTE_ROOT',
@@ -1659,10 +1597,6 @@ pub mod AuctionVerifier {
             relay_fee_bps,
             protocol_fee_recipient,
             relay_fee_recipient,
-        );
-        assert(
-            fee_entries_root(fee_asset_ids, fee_recipients, fee_amounts) == fee_root,
-            'FEE_ROOT_BINDING',
         );
 
         let recomputed_commitment = public_settlement_commitment(
@@ -1711,7 +1645,6 @@ pub mod AuctionVerifier {
         self.current_nullifier_root.write(new_nullifier_root);
         self.current_renewal_root.write(new_renewal_root);
         self.current_fee_root.write(new_fee_root);
-        accrue_protocol_fees(@self, fee_asset_ids, fee_recipients, fee_amounts);
         record_note_root_transition(
             ref self, NOTE_ROOT_TRANSITION_SETTLEMENT, batch_id, output_note_root, new_note_root,
         );
@@ -1823,78 +1756,6 @@ pub mod AuctionVerifier {
             self.protocol_fee_recipient.read() == protocol_fee_recipient, 'FEE_RECIPIENT_BINDING',
         );
         assert(self.relay_fee_recipient.read() == relay_fee_recipient, 'RELAY_RECIP_BINDING');
-    }
-
-    fn fee_entries_root(
-        asset_ids: Span<felt252>, recipients: Span<felt252>, amounts: Span<u128>,
-    ) -> felt252 {
-        let len = asset_ids.len();
-        assert(len == 4, 'BAD_FEE_LENGTH');
-        assert(recipients.len() == 4, 'BAD_FEE_LENGTH');
-        assert(amounts.len() == 4, 'BAD_FEE_LENGTH');
-        let mut state = FEE_ROOT_DOMAIN;
-        let mut index = 0;
-        let mut fee_count: felt252 = 0;
-        loop {
-            if index == len {
-                break;
-            }
-            let asset_id = *asset_ids.at(index);
-            let recipient = *recipients.at(index);
-            let amount = *amounts.at(index);
-            assert(asset_id != 0, 'BAD_FEE_ASSET');
-            assert(recipient != 0, 'BAD_FEE_RECIPIENT');
-            if amount != 0 {
-                state = poseidon_hash2(state, asset_id);
-                state = poseidon_hash2(state, recipient);
-                state = poseidon_hash2(state, amount.into());
-                fee_count += 1;
-            }
-            index += 1;
-        }
-        poseidon_hash2(state, fee_count)
-    }
-
-    fn accrue_protocol_fees(
-        self: @ContractState,
-        asset_ids: Span<felt252>,
-        recipients: Span<felt252>,
-        amounts: Span<u128>,
-    ) {
-        let len = asset_ids.len();
-        assert(len == 4, 'BAD_FEE_LENGTH');
-        assert(recipients.len() == 4, 'BAD_FEE_LENGTH');
-        assert(amounts.len() == 4, 'BAD_FEE_LENGTH');
-        let mut nonzero_asset_ids = array![];
-        let mut nonzero_recipients = array![];
-        let mut nonzero_amounts = array![];
-        let mut index = 0;
-        loop {
-            if index == len {
-                break;
-            }
-            let asset_id = *asset_ids.at(index);
-            let recipient = *recipients.at(index);
-            let amount = *amounts.at(index);
-            assert(asset_id != 0, 'BAD_FEE_ASSET');
-            assert(recipient != 0, 'BAD_FEE_RECIPIENT');
-            if amount != 0 {
-                nonzero_asset_ids.append(asset_id);
-                nonzero_recipients.append(recipient);
-                nonzero_amounts.append(amount);
-            }
-            index += 1;
-        }
-        if nonzero_asset_ids.len() == 0 {
-            return;
-        }
-        let fee_ledger_address = self.fee_ledger.read();
-        assert(!fee_ledger_address.is_zero(), 'FEE_LEDGER_UNSET');
-        let ledger = IFeeLedgerDispatcher { contract_address: fee_ledger_address };
-        ledger
-            .accrue_fees(
-                nonzero_asset_ids.span(), nonzero_recipients.span(), nonzero_amounts.span(),
-            );
     }
 
     fn single_field_root(domain: felt252, values: Span<felt252>) -> felt252 {
