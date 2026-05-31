@@ -157,19 +157,28 @@ pub mod BatchRegistry {
             encrypted_order_set_commitment: felt252,
         ) {
             assert_batch_registrar(@self);
+            assert(false, 'FINAL_BATCH_ONLY');
             assert_batch_exists(@self, batch_id);
             assert(order_commitment_root != 0, 'BAD_ORDER_ROOT');
             assert(encrypted_order_set_commitment != 0, 'BAD_ENC_SET');
             let status = self.statuses.read(batch_id);
-            assert(status == BatchStatus::Open, 'BATCH_NOT_OPEN');
-            self.order_counts.write(batch_id, order_count);
-            self.order_commitment_roots.write(batch_id, order_commitment_root);
-            self.encrypted_order_set_commitments.write(batch_id, encrypted_order_set_commitment);
-            self.statuses.write(batch_id, BatchStatus::Prepared);
+            assert(status == BatchStatus::Prepared, 'BATCH_NOT_PREPARED');
+            assert(self.order_counts.read(batch_id) == order_count, 'ORDER_COUNT_MISMATCH');
+            assert(
+                self.order_commitment_roots.read(batch_id) == order_commitment_root,
+                'ORDER_ROOT_MISMATCH',
+            );
+            assert(
+                self
+                    .encrypted_order_set_commitments
+                    .read(batch_id) == encrypted_order_set_commitment,
+                'ENC_SET_MISMATCH',
+            );
         }
 
         fn increment_order_count(ref self: ContractState, batch_id: felt252, delta: u64) {
             assert_batch_registrar(@self);
+            assert(false, 'FINAL_BATCH_ONLY');
             assert_batch_exists(@self, batch_id);
             let status = self.statuses.read(batch_id);
             assert(status == BatchStatus::Open, 'BATCH_NOT_OPEN');

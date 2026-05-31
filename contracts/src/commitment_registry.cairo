@@ -1,4 +1,5 @@
 use starknet::ContractAddress;
+use zylith_protocol::types::DepositActivationRecord;
 
 #[starknet::interface]
 pub trait ICommitmentRegistry<TContractState> {
@@ -10,14 +11,21 @@ pub trait ICommitmentRegistry<TContractState> {
     fn register_order_commitments(
         ref self: TContractState, batch_id: felt252, commitments: Span<felt252>,
     );
-    fn register_note_commitments(
-        ref self: TContractState, batch_id: felt252, commitments: Span<felt252>,
+    fn register_funding_activation(
+        ref self: TContractState,
+        funding_commitment: felt252,
+        deposit_root: felt252,
+        encrypted_note_activation: felt252,
     );
-    fn register_deposit_note_commitment(ref self: TContractState, commitment: felt252);
     fn is_order_commitment_registered(self: @TContractState, commitment: felt252) -> bool;
-    fn is_note_commitment_registered(self: @TContractState, commitment: felt252) -> bool;
+    fn is_funding_commitment_registered(self: @TContractState, funding_commitment: felt252) -> bool;
     fn order_commitment_batch(self: @TContractState, commitment: felt252) -> felt252;
-    fn note_commitment_batch(self: @TContractState, commitment: felt252) -> felt252;
+    fn funding_activation_root(self: @TContractState, funding_commitment: felt252) -> felt252;
+    fn funding_activation_ciphertext(self: @TContractState, funding_commitment: felt252) -> felt252;
+    fn funding_activation_count(self: @TContractState) -> u64;
+    fn funding_activation_record(
+        self: @TContractState, activation_id: u64,
+    ) -> DepositActivationRecord;
     fn admin_address(self: @TContractState) -> ContractAddress;
     fn pending_admin_address(self: @TContractState) -> ContractAddress;
     fn admin_transfer_pending(self: @TContractState) -> bool;
@@ -37,6 +45,7 @@ pub mod CommitmentRegistry {
     use zylith_protocol::auction_verifier::{
         IAuctionVerifierDispatcher, IAuctionVerifierDispatcherTrait,
     };
+    use zylith_protocol::types::DepositActivationRecord;
 
     #[storage]
     struct Storage {
@@ -48,8 +57,11 @@ pub mod CommitmentRegistry {
         auction_verifier: ContractAddress,
         order_commitments: Map<felt252, bool>,
         order_commitment_batch_ids: Map<felt252, felt252>,
-        note_commitments: Map<felt252, bool>,
-        note_commitment_batch_ids: Map<felt252, felt252>,
+        funding_commitments: Map<felt252, bool>,
+        funding_activation_roots: Map<felt252, felt252>,
+        funding_activation_ciphertexts: Map<felt252, felt252>,
+        funding_activation_count: u64,
+        funding_activation_commitments_by_id: Map<u64, felt252>,
     }
 
     #[constructor]
@@ -116,56 +128,74 @@ pub mod CommitmentRegistry {
             };
         }
 
-        fn register_note_commitments(
-            ref self: ContractState, batch_id: felt252, commitments: Span<felt252>,
+        fn register_funding_activation(
+            ref self: ContractState,
+            funding_commitment: felt252,
+            deposit_root: felt252,
+            encrypted_note_activation: felt252,
         ) {
-            assert_auction_verifier(@self);
-            assert(batch_id != 0, 'BAD_BATCH_ID');
-            let mut index = 0;
-            let len = commitments.len();
-            loop {
-                if index == len {
-                    break;
-                }
-
-                let commitment = *commitments.at(index);
-                assert(commitment != 0, 'BAD_COMMITMENT');
-                let exists = self.note_commitments.read(commitment);
-                assert(exists == false, 'NOTE_EXISTS');
-                self.note_commitments.write(commitment, true);
-                self.note_commitment_batch_ids.write(commitment, batch_id);
-                index += 1;
-            };
-        }
-
-        fn register_deposit_note_commitment(ref self: ContractState, commitment: felt252) {
             assert_deposit_registrar(@self);
-            assert(commitment != 0, 'BAD_COMMITMENT');
-            let exists = self.note_commitments.read(commitment);
-            assert(exists == false, 'NOTE_EXISTS');
-            self.note_commitments.write(commitment, true);
-            self.note_commitment_batch_ids.write(commitment, 0);
+            assert(funding_commitment != 0, 'BAD_FUNDING');
+            assert(deposit_root != 0, 'BAD_DEPOSIT_ROOT');
+            assert(encrypted_note_activation != 0, 'BAD_ACTIVATION');
             let auction_verifier = self.auction_verifier.read();
-            if !auction_verifier.is_zero() {
-                let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
-                verifier.activate_deposit_note_root(commitment);
-            }
+            assert(!auction_verifier.is_zero(), 'AUCTION_VERIFIER_UNSET');
+            let exists = self.funding_commitments.read(funding_commitment);
+            assert(exists == false, 'FUNDING_EXISTS');
+            self.funding_commitments.write(funding_commitment, true);
+            self.funding_activation_roots.write(funding_commitment, deposit_root);
+            self
+                .funding_activation_ciphertexts
+                .write(funding_commitment, encrypted_note_activation);
+            let activation_id = self.funding_activation_count.read();
+            self.funding_activation_commitments_by_id.write(activation_id, funding_commitment);
+            self.funding_activation_count.write(activation_id + 1);
+            let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+            verifier.activate_deposit_root(funding_commitment, deposit_root);
         }
 
         fn is_order_commitment_registered(self: @ContractState, commitment: felt252) -> bool {
             self.order_commitments.read(commitment)
         }
 
-        fn is_note_commitment_registered(self: @ContractState, commitment: felt252) -> bool {
-            self.note_commitments.read(commitment)
+        fn is_funding_commitment_registered(
+            self: @ContractState, funding_commitment: felt252,
+        ) -> bool {
+            self.funding_commitments.read(funding_commitment)
         }
 
         fn order_commitment_batch(self: @ContractState, commitment: felt252) -> felt252 {
             self.order_commitment_batch_ids.read(commitment)
         }
 
-        fn note_commitment_batch(self: @ContractState, commitment: felt252) -> felt252 {
-            self.note_commitment_batch_ids.read(commitment)
+        fn funding_activation_root(self: @ContractState, funding_commitment: felt252) -> felt252 {
+            self.funding_activation_roots.read(funding_commitment)
+        }
+
+        fn funding_activation_ciphertext(
+            self: @ContractState, funding_commitment: felt252,
+        ) -> felt252 {
+            self.funding_activation_ciphertexts.read(funding_commitment)
+        }
+
+        fn funding_activation_count(self: @ContractState) -> u64 {
+            self.funding_activation_count.read()
+        }
+
+        fn funding_activation_record(
+            self: @ContractState, activation_id: u64,
+        ) -> DepositActivationRecord {
+            let count = self.funding_activation_count.read();
+            assert(activation_id < count, 'UNKNOWN_ACTIVATION');
+            let funding_commitment = self.funding_activation_commitments_by_id.read(activation_id);
+            DepositActivationRecord {
+                activation_id,
+                funding_commitment,
+                deposit_root: self.funding_activation_roots.read(funding_commitment),
+                encrypted_note_activation: self
+                    .funding_activation_ciphertexts
+                    .read(funding_commitment),
+            }
         }
 
         fn admin_address(self: @ContractState) -> ContractAddress {
@@ -199,10 +229,6 @@ pub mod CommitmentRegistry {
 
     fn assert_batch_registrar(self: @ContractState) {
         assert(get_caller_address() == self.batch_registrar.read(), 'UNAUTHORIZED');
-    }
-
-    fn assert_auction_verifier(self: @ContractState) {
-        assert(get_caller_address() == self.auction_verifier.read(), 'UNAUTHORIZED');
     }
 
     fn assert_deposit_registrar(self: @ContractState) {

@@ -1,46 +1,12 @@
-use zylith_protocol::types::{DepositRecord, WithdrawalRecord};
+use zylith_protocol::types::WithdrawalRecord;
 
 #[starknet::interface]
 pub trait IShieldedAssetAdapter<TContractState> {
     fn propose_admin(ref self: TContractState, new_admin: starknet::ContractAddress);
     fn accept_admin(ref self: TContractState);
-    fn set_privacy_deposit_bridge(ref self: TContractState, bridge: starknet::ContractAddress);
-    fn set_fee_ledger(ref self: TContractState, fee_ledger: starknet::ContractAddress);
     fn set_auction_verifier(ref self: TContractState, verifier: starknet::ContractAddress);
     fn register_supported_asset(
         ref self: TContractState, asset_id: felt252, token_address: starknet::ContractAddress,
-    );
-    fn register_erc20_deposit(
-        ref self: TContractState,
-        owner: starknet::ContractAddress,
-        asset_id: felt252,
-        amount: u128,
-        deposit_nonce: u64,
-        note_commitment: felt252,
-        withdraw_authority: felt252,
-    );
-    fn register_erc20_deposit_batch(
-        ref self: TContractState,
-        owner: starknet::ContractAddress,
-        asset_id: felt252,
-        total_amount: u128,
-        amounts: Span<u128>,
-        deposit_nonces: Span<u64>,
-        note_commitments: Span<felt252>,
-        withdraw_authorities: Span<felt252>,
-    );
-    fn withdraw_to_l2(
-        ref self: TContractState,
-        note_commitment: felt252,
-        withdraw_authorization_r: felt252,
-        withdraw_authorization_s: felt252,
-        recipient: starknet::ContractAddress,
-    ) -> (felt252, u128);
-    fn withdraw_fee(
-        ref self: TContractState,
-        asset_id: felt252,
-        amount: u128,
-        recipient: starknet::ContractAddress,
     );
     fn withdraw_verified_note(
         ref self: TContractState,
@@ -49,63 +15,39 @@ pub trait IShieldedAssetAdapter<TContractState> {
         note_commitment: felt252,
         recipient: starknet::ContractAddress,
     );
-    fn note_is_live(self: @TContractState, note_commitment: felt252) -> bool;
-    fn note_asset(self: @TContractState, note_commitment: felt252) -> felt252;
-    fn note_amount(self: @TContractState, note_commitment: felt252) -> u128;
-    fn note_withdraw_authority(self: @TContractState, note_commitment: felt252) -> felt252;
-    fn escrowed_balance(self: @TContractState, asset_id: felt252) -> u128;
     fn asset_token(self: @TContractState, asset_id: felt252) -> starknet::ContractAddress;
     fn is_asset_supported(self: @TContractState, asset_id: felt252) -> bool;
     fn withdrawal_recipient(
         self: @TContractState, note_commitment: felt252,
     ) -> starknet::ContractAddress;
-    fn deposit_count(self: @TContractState) -> u64;
-    fn deposit_record(self: @TContractState, deposit_id: u64) -> DepositRecord;
     fn withdrawal_count(self: @TContractState) -> u64;
     fn withdrawal_record(self: @TContractState, withdrawal_id: u64) -> WithdrawalRecord;
     fn admin_address(self: @TContractState) -> starknet::ContractAddress;
     fn pending_admin_address(self: @TContractState) -> starknet::ContractAddress;
     fn admin_transfer_pending(self: @TContractState) -> bool;
-    fn privacy_deposit_bridge_address(self: @TContractState) -> starknet::ContractAddress;
-    fn fee_ledger_address(self: @TContractState) -> starknet::ContractAddress;
     fn auction_verifier_address(self: @TContractState) -> starknet::ContractAddress;
 }
 
 #[starknet::contract]
 pub mod ShieldedAssetAdapter {
-    use core::ecdsa::check_ecdsa_signature;
     use core::integer::u256;
     use core::num::traits::Zero;
-    use core::poseidon::hades_permutation;
     use starknet::storage::{
         Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
         StoragePointerWriteAccess,
     };
     use starknet::{ContractAddress, get_caller_address, get_contract_address};
     use zylith_protocol::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
-    use zylith_protocol::types::{DepositRecord, WithdrawalRecord};
+    use zylith_protocol::types::WithdrawalRecord;
 
     #[storage]
     struct Storage {
         admin: ContractAddress,
         pending_admin: ContractAddress,
         admin_transfer_pending: bool,
-        privacy_deposit_bridge: ContractAddress,
-        fee_ledger: ContractAddress,
         auction_verifier: ContractAddress,
         asset_tokens: Map<felt252, ContractAddress>,
-        note_live: Map<felt252, bool>,
-        note_spent: Map<felt252, bool>,
-        note_asset_ids: Map<felt252, felt252>,
-        note_amounts: Map<felt252, u128>,
-        note_withdraw_authorities: Map<felt252, felt252>,
-        escrowed_balances: Map<felt252, u128>,
         withdrawal_recipients: Map<felt252, ContractAddress>,
-        deposit_count: u64,
-        deposit_note_commitments: Map<u64, felt252>,
-        deposit_asset_ids: Map<u64, felt252>,
-        deposit_amounts: Map<u64, u128>,
-        deposit_nonces: Map<u64, u64>,
         withdrawal_count: u64,
         withdrawal_note_commitments: Map<u64, felt252>,
         withdrawal_asset_ids: Map<u64, felt252>,
@@ -137,18 +79,6 @@ pub mod ShieldedAssetAdapter {
             self.admin_transfer_pending.write(false);
         }
 
-        fn set_privacy_deposit_bridge(ref self: ContractState, bridge: ContractAddress) {
-            assert_admin(@self);
-            assert(!bridge.is_zero(), 'BAD_PRIVACY_BRIDGE');
-            self.privacy_deposit_bridge.write(bridge);
-        }
-
-        fn set_fee_ledger(ref self: ContractState, fee_ledger: ContractAddress) {
-            assert_admin(@self);
-            assert(!fee_ledger.is_zero(), 'BAD_FEE_LEDGER');
-            self.fee_ledger.write(fee_ledger);
-        }
-
         fn set_auction_verifier(ref self: ContractState, verifier: ContractAddress) {
             assert_admin(@self);
             assert(!verifier.is_zero(), 'BAD_AUCTION_VERIFIER');
@@ -170,195 +100,6 @@ pub mod ShieldedAssetAdapter {
             }
         }
 
-        fn register_erc20_deposit(
-            ref self: ContractState,
-            owner: ContractAddress,
-            asset_id: felt252,
-            amount: u128,
-            deposit_nonce: u64,
-            note_commitment: felt252,
-            withdraw_authority: felt252,
-        ) {
-            assert_deposit_registrar(@self);
-            assert(amount > 0, 'BAD_AMOUNT');
-            assert(note_commitment != 0, 'BAD_COMMITMENT');
-            let token_address = self.asset_tokens.read(asset_id);
-            assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
-            assert(withdraw_authority != 0, 'BAD_AUTHORITY');
-
-            let exists = self.note_live.read(note_commitment);
-            assert(exists == false, 'NOTE_EXISTS');
-
-            let token = IERC20Dispatcher { contract_address: token_address };
-            token.transfer_from(owner, get_contract_address(), as_u256(amount));
-
-            self.note_live.write(note_commitment, true);
-            self.note_asset_ids.write(note_commitment, asset_id);
-            self.note_amounts.write(note_commitment, amount);
-            self.note_withdraw_authorities.write(note_commitment, withdraw_authority);
-            let current_balance = self.escrowed_balances.read(asset_id);
-            self.escrowed_balances.write(asset_id, current_balance + amount);
-
-            let deposit_id = self.deposit_count.read();
-            self.deposit_note_commitments.write(deposit_id, note_commitment);
-            self.deposit_asset_ids.write(deposit_id, asset_id);
-            self.deposit_amounts.write(deposit_id, amount);
-            self.deposit_nonces.write(deposit_id, deposit_nonce);
-            self.deposit_count.write(deposit_id + 1);
-        }
-
-        fn register_erc20_deposit_batch(
-            ref self: ContractState,
-            owner: ContractAddress,
-            asset_id: felt252,
-            total_amount: u128,
-            amounts: Span<u128>,
-            deposit_nonces: Span<u64>,
-            note_commitments: Span<felt252>,
-            withdraw_authorities: Span<felt252>,
-        ) {
-            assert_deposit_registrar(@self);
-            assert(total_amount > 0, 'BAD_AMOUNT');
-            let token_address = self.asset_tokens.read(asset_id);
-            assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
-
-            let len = amounts.len();
-            assert(len > 0, 'EMPTY_BATCH');
-            assert(len <= 16, 'TOO_MANY_NOTES');
-            assert(deposit_nonces.len() == len, 'BAD_BATCH_LENGTH');
-            assert(note_commitments.len() == len, 'BAD_BATCH_LENGTH');
-            assert(withdraw_authorities.len() == len, 'BAD_BATCH_LENGTH');
-
-            let mut computed_total: u128 = 0;
-            let mut index = 0;
-            loop {
-                if index == len {
-                    break;
-                }
-                let amount = *amounts.at(index);
-                let note_commitment = *note_commitments.at(index);
-                let withdraw_authority = *withdraw_authorities.at(index);
-                assert(amount > 0, 'BAD_AMOUNT');
-                assert(note_commitment != 0, 'BAD_COMMITMENT');
-                assert(withdraw_authority != 0, 'BAD_AUTHORITY');
-                assert(self.note_live.read(note_commitment) == false, 'NOTE_EXISTS');
-
-                let mut duplicate_index = index + 1;
-                loop {
-                    if duplicate_index == len {
-                        break;
-                    }
-                    assert(
-                        note_commitment != *note_commitments.at(duplicate_index), 'DUPLICATE_NOTE',
-                    );
-                    duplicate_index += 1;
-                }
-
-                computed_total = computed_total + amount;
-                index += 1;
-            }
-            assert(computed_total == total_amount, 'BAD_TOTAL_AMOUNT');
-
-            let token = IERC20Dispatcher { contract_address: token_address };
-            token.transfer_from(owner, get_contract_address(), as_u256(total_amount));
-
-            let current_balance = self.escrowed_balances.read(asset_id);
-            self.escrowed_balances.write(asset_id, current_balance + total_amount);
-
-            let mut write_index = 0;
-            loop {
-                if write_index == len {
-                    break;
-                }
-                let amount = *amounts.at(write_index);
-                let deposit_nonce = *deposit_nonces.at(write_index);
-                let note_commitment = *note_commitments.at(write_index);
-                let withdraw_authority = *withdraw_authorities.at(write_index);
-
-                self.note_live.write(note_commitment, true);
-                self.note_asset_ids.write(note_commitment, asset_id);
-                self.note_amounts.write(note_commitment, amount);
-                self.note_withdraw_authorities.write(note_commitment, withdraw_authority);
-
-                let deposit_id = self.deposit_count.read();
-                self.deposit_note_commitments.write(deposit_id, note_commitment);
-                self.deposit_asset_ids.write(deposit_id, asset_id);
-                self.deposit_amounts.write(deposit_id, amount);
-                self.deposit_nonces.write(deposit_id, deposit_nonce);
-                self.deposit_count.write(deposit_id + 1);
-
-                write_index += 1;
-            };
-        }
-
-        fn withdraw_to_l2(
-            ref self: ContractState,
-            note_commitment: felt252,
-            withdraw_authorization_r: felt252,
-            withdraw_authorization_s: felt252,
-            recipient: ContractAddress,
-        ) -> (felt252, u128) {
-            let registered = self.note_live.read(note_commitment);
-            let spent = self.note_spent.read(note_commitment);
-            assert(registered == true, 'UNKNOWN_WITHDRAW_NOTE');
-            assert(spent == false, 'UNKNOWN_WITHDRAW_NOTE');
-            assert(!recipient.is_zero(), 'BAD_RECIPIENT');
-            let withdraw_authority = self.note_withdraw_authorities.read(note_commitment);
-            assert(withdraw_authority != 0, 'UNKNOWN_AUTHORITY');
-            assert(withdraw_authorization_r != 0, 'BAD_WITHDRAW_SIG');
-            assert(withdraw_authorization_s != 0, 'BAD_WITHDRAW_SIG');
-            assert(
-                check_ecdsa_signature(
-                    withdrawal_message_hash(note_commitment, recipient),
-                    withdraw_authority,
-                    withdraw_authorization_r,
-                    withdraw_authorization_s,
-                ),
-                'UNAUTHORIZED_WITHDRAW',
-            );
-
-            let asset_id = self.note_asset_ids.read(note_commitment);
-            let token_address = self.asset_tokens.read(asset_id);
-            assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
-
-            let amount = self.note_amounts.read(note_commitment);
-            let current_balance = self.escrowed_balances.read(asset_id);
-            assert(current_balance >= amount, 'INSUFFICIENT_ESCROW');
-
-            self.note_spent.write(note_commitment, true);
-            self.withdrawal_recipients.write(note_commitment, recipient);
-            self.escrowed_balances.write(asset_id, current_balance - amount);
-
-            let withdrawal_id = self.withdrawal_count.read();
-            self.withdrawal_note_commitments.write(withdrawal_id, note_commitment);
-            self.withdrawal_asset_ids.write(withdrawal_id, asset_id);
-            self.withdrawal_amounts.write(withdrawal_id, amount);
-            self.withdrawal_recipients_by_id.write(withdrawal_id, recipient);
-            self.withdrawal_count.write(withdrawal_id + 1);
-
-            let token = IERC20Dispatcher { contract_address: token_address };
-            token.transfer(recipient, as_u256(amount));
-
-            (asset_id, amount)
-        }
-
-        fn withdraw_fee(
-            ref self: ContractState, asset_id: felt252, amount: u128, recipient: ContractAddress,
-        ) {
-            assert_fee_ledger(@self);
-            assert(asset_id != 0, 'BAD_ASSET');
-            assert(amount > 0, 'BAD_AMOUNT');
-            assert(!recipient.is_zero(), 'BAD_RECIPIENT');
-            let token_address = self.asset_tokens.read(asset_id);
-            assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
-            let current_balance = self.escrowed_balances.read(asset_id);
-            assert(current_balance >= amount, 'INSUFFICIENT_ESCROW');
-            self.escrowed_balances.write(asset_id, current_balance - amount);
-
-            let token = IERC20Dispatcher { contract_address: token_address };
-            token.transfer(recipient, as_u256(amount));
-        }
-
         fn withdraw_verified_note(
             ref self: ContractState,
             asset_id: felt252,
@@ -371,13 +112,11 @@ pub mod ShieldedAssetAdapter {
             assert(amount > 0, 'BAD_AMOUNT');
             assert(note_commitment != 0, 'BAD_COMMITMENT');
             assert(!recipient.is_zero(), 'BAD_RECIPIENT');
+            assert(self.withdrawal_recipients.read(note_commitment).is_zero(), 'NOTE_WITHDRAWN');
             let token_address = self.asset_tokens.read(asset_id);
             assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
-            let current_balance = self.escrowed_balances.read(asset_id);
-            assert(current_balance >= amount, 'INSUFFICIENT_ESCROW');
 
             self.withdrawal_recipients.write(note_commitment, recipient);
-            self.escrowed_balances.write(asset_id, current_balance - amount);
 
             let withdrawal_id = self.withdrawal_count.read();
             self.withdrawal_note_commitments.write(withdrawal_id, note_commitment);
@@ -387,27 +126,18 @@ pub mod ShieldedAssetAdapter {
             self.withdrawal_count.write(withdrawal_id + 1);
 
             let token = IERC20Dispatcher { contract_address: token_address };
+            let adapter_balance_before = checked_token_balance(token, get_contract_address());
+            let recipient_balance_before = checked_token_balance(token, recipient);
             token.transfer(recipient, as_u256(amount));
-        }
-
-        fn note_is_live(self: @ContractState, note_commitment: felt252) -> bool {
-            self.note_live.read(note_commitment) && !self.note_spent.read(note_commitment)
-        }
-
-        fn note_asset(self: @ContractState, note_commitment: felt252) -> felt252 {
-            self.note_asset_ids.read(note_commitment)
-        }
-
-        fn note_amount(self: @ContractState, note_commitment: felt252) -> u128 {
-            self.note_amounts.read(note_commitment)
-        }
-
-        fn note_withdraw_authority(self: @ContractState, note_commitment: felt252) -> felt252 {
-            self.note_withdraw_authorities.read(note_commitment)
-        }
-
-        fn escrowed_balance(self: @ContractState, asset_id: felt252) -> u128 {
-            self.escrowed_balances.read(asset_id)
+            let adapter_balance_after = checked_token_balance(token, get_contract_address());
+            let recipient_balance_after = checked_token_balance(token, recipient);
+            assert(
+                adapter_balance_before == adapter_balance_after + amount, 'TOKEN_TRANSFER_DELTA',
+            );
+            assert(
+                recipient_balance_after == recipient_balance_before + amount,
+                'TOKEN_TRANSFER_DELTA',
+            );
         }
 
         fn asset_token(self: @ContractState, asset_id: felt252) -> ContractAddress {
@@ -420,23 +150,6 @@ pub mod ShieldedAssetAdapter {
 
         fn withdrawal_recipient(self: @ContractState, note_commitment: felt252) -> ContractAddress {
             self.withdrawal_recipients.read(note_commitment)
-        }
-
-        fn deposit_count(self: @ContractState) -> u64 {
-            self.deposit_count.read()
-        }
-
-        fn deposit_record(self: @ContractState, deposit_id: u64) -> DepositRecord {
-            let count = self.deposit_count.read();
-            assert(deposit_id < count, 'UNKNOWN_DEPOSIT');
-
-            DepositRecord {
-                deposit_id,
-                asset_id: self.deposit_asset_ids.read(deposit_id),
-                amount: self.deposit_amounts.read(deposit_id),
-                deposit_nonce: self.deposit_nonces.read(deposit_id),
-                note_commitment: self.deposit_note_commitments.read(deposit_id),
-            }
         }
 
         fn withdrawal_count(self: @ContractState) -> u64 {
@@ -468,14 +181,6 @@ pub mod ShieldedAssetAdapter {
             self.admin_transfer_pending.read()
         }
 
-        fn privacy_deposit_bridge_address(self: @ContractState) -> ContractAddress {
-            self.privacy_deposit_bridge.read()
-        }
-
-        fn fee_ledger_address(self: @ContractState) -> ContractAddress {
-            self.fee_ledger.read()
-        }
-
         fn auction_verifier_address(self: @ContractState) -> ContractAddress {
             self.auction_verifier.read()
         }
@@ -485,38 +190,14 @@ pub mod ShieldedAssetAdapter {
         u256 { low: amount, high: 0 }
     }
 
-    fn poseidon_hash2(x: felt252, y: felt252) -> felt252 {
-        let (result, _, _) = hades_permutation(x, y, 2);
-        result
-    }
-
-    fn withdrawal_message_hash(note_commitment: felt252, recipient: ContractAddress) -> felt252 {
-        let tx_info = starknet::get_tx_info().unbox();
-        poseidon_hash2(
-            poseidon_hash2(
-                poseidon_hash2(
-                    poseidon_hash2(
-                        0x008c9bee4df79ca43188c02c21699eee1b86520e8bbe0291c437af32d37ff0e4,
-                        tx_info.chain_id,
-                    ),
-                    get_contract_address().into(),
-                ),
-                note_commitment,
-            ),
-            recipient.into(),
-        )
+    fn checked_token_balance(token: IERC20Dispatcher, owner: ContractAddress) -> u128 {
+        let balance = token.balance_of(owner);
+        assert(balance.high == 0, 'TOKEN_BALANCE_HIGH');
+        balance.low
     }
 
     fn assert_admin(self: @ContractState) {
         assert(get_caller_address() == self.admin.read(), 'UNAUTHORIZED');
-    }
-
-    fn assert_deposit_registrar(self: @ContractState) {
-        assert(get_caller_address() == self.privacy_deposit_bridge.read(), 'UNAUTHORIZED');
-    }
-
-    fn assert_fee_ledger(self: @ContractState) {
-        assert(get_caller_address() == self.fee_ledger.read(), 'UNAUTHORIZED');
     }
 
     fn assert_auction_verifier(self: @ContractState) {

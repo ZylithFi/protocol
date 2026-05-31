@@ -29,6 +29,13 @@ pub trait INoteConsolidationStatementProgram<TContractState> {
 }
 
 #[starknet::interface]
+pub trait IWithdrawalStatementProgram<TContractState> {
+    fn verify_withdrawal_statement(
+        ref self: TContractState, serialized_withdrawal_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
 pub trait IAuctionProofProgram<TContractState> {
     fn compile_settlement_proof(
         ref self: TContractState,
@@ -50,6 +57,11 @@ pub trait IAuctionProofProgram<TContractState> {
         auction_verifier: ContractAddress,
         serialized_note_consolidation_witness: Span<felt252>,
     ) -> felt252;
+    fn compile_withdrawal_proof(
+        ref self: TContractState,
+        auction_verifier: ContractAddress,
+        serialized_withdrawal_witness: Span<felt252>,
+    ) -> felt252;
     fn compile_admission_proof(
         ref self: TContractState,
         auction_verifier: ContractAddress,
@@ -67,6 +79,9 @@ pub trait IAuctionProofProgram<TContractState> {
     ) -> felt252;
     fn settlement_proof_message_hash(
         self: @TContractState, auction_verifier: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252;
+    fn withdrawal_proof_message_hash(
+        self: @TContractState, auction_verifier: ContractAddress, withdrawal_commitment: felt252,
     ) -> felt252;
 }
 
@@ -141,6 +156,23 @@ pub mod NoteConsolidationStatementProgram {
 }
 
 #[starknet::contract]
+pub mod WithdrawalStatementProgram {
+    use zylith_settlement_statement::verify_withdrawal_statement as verify_withdrawal_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl WithdrawalStatementProgramImpl of super::IWithdrawalStatementProgram<ContractState> {
+        fn verify_withdrawal_statement(
+            ref self: ContractState, serialized_withdrawal_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_withdrawal_statement_impl(serialized_withdrawal_witness)
+        }
+    }
+}
+
+#[starknet::contract]
 pub mod AuctionProofProgram {
     use core::array::{Array, ArrayTrait, SpanTrait};
     use core::num::traits::Zero;
@@ -154,13 +186,15 @@ pub mod AuctionProofProgram {
         INoteConsolidationStatementProgramDispatcherTrait, INullifierStatementProgramDispatcher,
         INullifierStatementProgramDispatcherTrait, IRenewalStatementProgramDispatcher,
         IRenewalStatementProgramDispatcherTrait, ISettlementStatementProgramDispatcher,
-        ISettlementStatementProgramDispatcherTrait,
+        ISettlementStatementProgramDispatcherTrait, IWithdrawalStatementProgramDispatcher,
+        IWithdrawalStatementProgramDispatcherTrait,
     };
 
     const SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_settle_v1';
     const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
     const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
     const NOTE_CONSOLIDATION_MESSAGE_DOMAIN: felt252 = 'zylith_consol_v1';
+    const WITHDRAWAL_MESSAGE_DOMAIN: felt252 = 'zylith_withdraw_v1';
     const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
     const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
     const SETTLEMENT_PROOF_MESSAGE_TO: felt252 = 0;
@@ -172,6 +206,7 @@ pub mod AuctionProofProgram {
         nullifier_statement_program: ContractAddress,
         renewal_statement_program: ContractAddress,
         note_consolidation_statement_program: ContractAddress,
+        withdrawal_statement_program: ContractAddress,
     }
 
     #[constructor]
@@ -181,15 +216,18 @@ pub mod AuctionProofProgram {
         nullifier_statement_program: ContractAddress,
         renewal_statement_program: ContractAddress,
         note_consolidation_statement_program: ContractAddress,
+        withdrawal_statement_program: ContractAddress,
     ) {
         assert(!settlement_statement_program.is_zero(), 'BAD_STMT_PROGRAM');
         assert(!nullifier_statement_program.is_zero(), 'BAD_NULL_PROGRAM');
         assert(!renewal_statement_program.is_zero(), 'BAD_RENEW_PROGRAM');
         assert(!note_consolidation_statement_program.is_zero(), 'BAD_CONSOL_PROGRAM');
+        assert(!withdrawal_statement_program.is_zero(), 'BAD_WITHDRAW_PROGRAM');
         self.settlement_statement_program.write(settlement_statement_program);
         self.nullifier_statement_program.write(nullifier_statement_program);
         self.renewal_statement_program.write(renewal_statement_program);
         self.note_consolidation_statement_program.write(note_consolidation_statement_program);
+        self.withdrawal_statement_program.write(withdrawal_statement_program);
     }
 
     #[abi(embed_v0)]
@@ -270,6 +308,20 @@ pub mod AuctionProofProgram {
             emit_note_consolidation_proof_message(auction_verifier, consolidation_commitment)
         }
 
+        fn compile_withdrawal_proof(
+            ref self: ContractState,
+            auction_verifier: ContractAddress,
+            serialized_withdrawal_witness: Span<felt252>,
+        ) -> felt252 {
+            assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
+            let withdrawal_statement_program = IWithdrawalStatementProgramDispatcher {
+                contract_address: self.withdrawal_statement_program.read(),
+            };
+            let withdrawal_commitment = withdrawal_statement_program
+                .verify_withdrawal_statement(serialized_withdrawal_witness);
+            emit_withdrawal_proof_message(auction_verifier, withdrawal_commitment)
+        }
+
         fn compile_admission_proof(
             ref self: ContractState,
             auction_verifier: ContractAddress,
@@ -290,23 +342,14 @@ pub mod AuctionProofProgram {
             serialized_private_auction_witness: Span<felt252>,
         ) -> felt252 {
             assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
-            let (
-                batch_id,
-                order_commitment_root,
-                admission_root,
-                transcript_commitment,
-                privacy_gate_config_commitment,
-            ) =
-                verify_auction_result_statement(
-                serialized_private_auction_witness,
-            );
+            let (batch_id, order_commitment_root, admission_root, transcript_commitment) =
+                verify_auction_result_statement(serialized_private_auction_witness);
             emit_auction_result_proof_message(
                 auction_verifier,
                 batch_id,
                 order_commitment_root,
                 admission_root,
                 transcript_commitment,
-                privacy_gate_config_commitment,
             )
         }
 
@@ -396,6 +439,19 @@ pub mod AuctionProofProgram {
                 get_contract_address(), statement_message_hash,
             )
         }
+
+        fn withdrawal_proof_message_hash(
+            self: @ContractState, auction_verifier: ContractAddress, withdrawal_commitment: felt252,
+        ) -> felt252 {
+            let _ = self;
+            assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
+            let statement_message_hash = native_withdrawal_message_hash(
+                auction_verifier, withdrawal_commitment,
+            );
+            withdrawal_proof_message_hash_from_statement(
+                get_contract_address(), statement_message_hash,
+            )
+        }
     }
 
     fn emit_settlement_proof_message(
@@ -464,6 +520,18 @@ pub mod AuctionProofProgram {
         )
     }
 
+    fn emit_withdrawal_proof_message(
+        auction_verifier: ContractAddress, withdrawal_commitment: felt252,
+    ) -> felt252 {
+        let statement_message_hash = native_withdrawal_message_hash(
+            auction_verifier, withdrawal_commitment,
+        );
+        let payload = withdrawal_proof_payload(statement_message_hash);
+        send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
+            .unwrap_syscall();
+        withdrawal_proof_message_hash_from_statement(get_contract_address(), statement_message_hash)
+    }
+
     fn emit_admission_proof_message(
         auction_verifier: ContractAddress,
         batch_id: felt252,
@@ -485,7 +553,6 @@ pub mod AuctionProofProgram {
         order_commitment_root: felt252,
         admission_root: felt252,
         transcript_commitment: felt252,
-        privacy_gate_config_commitment: felt252,
     ) -> felt252 {
         let statement_message_hash = native_auction_result_message_hash(
             auction_verifier,
@@ -493,7 +560,6 @@ pub mod AuctionProofProgram {
             order_commitment_root,
             admission_root,
             transcript_commitment,
-            privacy_gate_config_commitment,
         );
         let payload = auction_result_proof_payload(statement_message_hash);
         send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
@@ -541,6 +607,10 @@ pub mod AuctionProofProgram {
         array![NOTE_CONSOLIDATION_MESSAGE_DOMAIN, statement_message_hash]
     }
 
+    fn withdrawal_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![WITHDRAWAL_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
     fn admission_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![ADMISSION_MESSAGE_DOMAIN, statement_message_hash]
     }
@@ -581,6 +651,15 @@ pub mod AuctionProofProgram {
     ) -> felt252 {
         let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
         let payload = note_consolidation_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn withdrawal_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = withdrawal_proof_payload(statement_message_hash);
         payload.serialize(ref l1_message_data);
         poseidon_hash_span(l1_message_data.span())
     }
@@ -659,6 +738,14 @@ pub mod AuctionProofProgram {
         state
     }
 
+    fn native_withdrawal_message_hash(
+        auction_verifier_address: ContractAddress, withdrawal_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(WITHDRAWAL_MESSAGE_DOMAIN, auction_verifier_address.into());
+        state = poseidon_hash2(state, withdrawal_commitment);
+        state
+    }
+
     fn native_admission_message_hash(
         auction_verifier_address: ContractAddress,
         batch_id: felt252,
@@ -678,7 +765,6 @@ pub mod AuctionProofProgram {
         order_commitment_root: felt252,
         admission_root: felt252,
         transcript_commitment: felt252,
-        privacy_gate_config_commitment: felt252,
     ) -> felt252 {
         let mut state = poseidon_hash2(
             AUCTION_RESULT_MESSAGE_DOMAIN, auction_verifier_address.into(),
@@ -687,7 +773,6 @@ pub mod AuctionProofProgram {
         state = poseidon_hash2(state, order_commitment_root);
         state = poseidon_hash2(state, admission_root);
         state = poseidon_hash2(state, transcript_commitment);
-        state = poseidon_hash2(state, privacy_gate_config_commitment);
         state
     }
 }

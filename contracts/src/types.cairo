@@ -23,12 +23,11 @@ pub struct BatchView {
 }
 
 #[derive(Drop, Serde)]
-pub struct DepositRecord {
-    pub deposit_id: u64,
-    pub asset_id: felt252,
-    pub amount: u128,
-    pub deposit_nonce: u64,
-    pub note_commitment: felt252,
+pub struct DepositActivationRecord {
+    pub activation_id: u64,
+    pub funding_commitment: felt252,
+    pub deposit_root: felt252,
+    pub encrypted_note_activation: felt252,
 }
 
 #[derive(Drop, Serde)]
