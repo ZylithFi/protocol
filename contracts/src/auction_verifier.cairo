@@ -43,6 +43,17 @@ pub trait IAuctionVerifier<TContractState> {
         maker_fee_bps: u128,
         relay_fee_bps: u128,
     );
+    fn set_pair_privacy_gate_config(
+        ref self: TContractState,
+        pair_id: felt252,
+        min_batch_base_liquidity: u128,
+        min_batch_participants: u64,
+        min_eligible_orders: u64,
+        max_single_order_fill_bps: u64,
+        max_single_owner_fill_bps: u64,
+        min_maker_participants: u64,
+        max_maker_fill_bps: u64,
+    );
     fn propose_pair_fee_config(
         ref self: TContractState,
         pair_id: felt252,
@@ -75,6 +86,7 @@ pub trait IAuctionVerifier<TContractState> {
         order_commitment_root: felt252,
         admission_root: felt252,
         transcript_commitment: felt252,
+        privacy_gate_config_commitment: felt252,
     );
     fn record_nullifier_roots_with_proof_facts(
         ref self: TContractState,
@@ -153,8 +165,12 @@ pub trait IAuctionVerifier<TContractState> {
     fn is_batch_settled(self: @TContractState, batch_id: felt252) -> bool;
     fn verified_admission_root(self: @TContractState, batch_id: felt252) -> felt252;
     fn verified_auction_transcript(self: @TContractState, batch_id: felt252) -> felt252;
+    fn output_note_root(self: @TContractState, batch_id: felt252) -> felt252;
     fn current_settlement_roots(self: @TContractState) -> (felt252, felt252, felt252, felt252);
     fn pair_fee_config(self: @TContractState, pair_id: felt252) -> (u128, u128, u128, bool);
+    fn pair_privacy_gate_config(
+        self: @TContractState, pair_id: felt252,
+    ) -> (u128, u64, u64, u64, u64, u64, u64, bool);
     fn pending_pair_fee_config(
         self: @TContractState, pair_id: felt252,
     ) -> (u128, u128, u128, u64, bool);
@@ -236,6 +252,8 @@ pub mod AuctionVerifier {
         0x031ff5b95d48149e26b5a946562ff5ea925eb8b3ea09d3b389b209b672a37b6e;
     const DEPOSIT_NOTE_ROOT_DOMAIN: felt252 =
         0x7a796c6974685f6465706f7369745f6e6f74655f726f6f745f7631;
+    const PRIVACY_GATE_CONFIG_DOMAIN: felt252 =
+        0x7a796c6974685f707269766163795f676174655f6366675f7631;
     const NOTE_ROOT_TRANSITION_DEPOSIT: felt252 = 0;
     const NOTE_ROOT_TRANSITION_SETTLEMENT: felt252 = 1;
     const NOTE_ROOT_TRANSITION_CONSOLIDATION: felt252 = 2;
@@ -268,6 +286,14 @@ pub mod AuctionVerifier {
         pair_maker_fee_bps: Map<felt252, u128>,
         pair_relay_fee_bps: Map<felt252, u128>,
         pair_fee_configured: Map<felt252, bool>,
+        pair_min_batch_base_liquidity: Map<felt252, u128>,
+        pair_min_batch_participants: Map<felt252, u64>,
+        pair_min_eligible_orders: Map<felt252, u64>,
+        pair_max_single_order_fill_bps: Map<felt252, u64>,
+        pair_max_single_owner_fill_bps: Map<felt252, u64>,
+        pair_min_maker_participants: Map<felt252, u64>,
+        pair_max_maker_fill_bps: Map<felt252, u64>,
+        pair_privacy_gate_configured: Map<felt252, bool>,
         pending_pair_taker_fee_bps: Map<felt252, u128>,
         pending_pair_maker_fee_bps: Map<felt252, u128>,
         pending_pair_relay_fee_bps: Map<felt252, u128>,
@@ -275,6 +301,7 @@ pub mod AuctionVerifier {
         pending_pair_fee_config_active: Map<felt252, bool>,
         deposit_note_root_registrar: ContractAddress,
         settled_batches: Map<felt252, bool>,
+        settled_consolidations: Map<felt252, bool>,
         settled_at_unix_seconds: Map<felt252, u64>,
         withdrawn_output_notes: Map<felt252, bool>,
         activated_deposit_notes: Map<felt252, bool>,
@@ -492,6 +519,33 @@ pub mod AuctionVerifier {
             self.pair_fee_configured.write(pair_id, true);
         }
 
+        fn set_pair_privacy_gate_config(
+            ref self: ContractState,
+            pair_id: felt252,
+            min_batch_base_liquidity: u128,
+            min_batch_participants: u64,
+            min_eligible_orders: u64,
+            max_single_order_fill_bps: u64,
+            max_single_owner_fill_bps: u64,
+            min_maker_participants: u64,
+            max_maker_fill_bps: u64,
+        ) {
+            assert_admin(@self);
+            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
+            assert(pair_id != 0, 'BAD_PAIR');
+            assert(max_single_order_fill_bps <= 10000, 'BAD_ORDER_DOM');
+            assert(max_single_owner_fill_bps <= 10000, 'BAD_OWNER_DOM');
+            assert(max_maker_fill_bps <= 10000, 'BAD_MAKER_DOM');
+            self.pair_min_batch_base_liquidity.write(pair_id, min_batch_base_liquidity);
+            self.pair_min_batch_participants.write(pair_id, min_batch_participants);
+            self.pair_min_eligible_orders.write(pair_id, min_eligible_orders);
+            self.pair_max_single_order_fill_bps.write(pair_id, max_single_order_fill_bps);
+            self.pair_max_single_owner_fill_bps.write(pair_id, max_single_owner_fill_bps);
+            self.pair_min_maker_participants.write(pair_id, min_maker_participants);
+            self.pair_max_maker_fill_bps.write(pair_id, max_maker_fill_bps);
+            self.pair_privacy_gate_configured.write(pair_id, true);
+        }
+
         fn propose_pair_fee_config(
             ref self: ContractState,
             pair_id: felt252,
@@ -626,6 +680,7 @@ pub mod AuctionVerifier {
             order_commitment_root: felt252,
             admission_root: felt252,
             transcript_commitment: felt252,
+            privacy_gate_config_commitment: felt252,
         ) {
             assert_authorized_settlement_account(@self);
             assert_not_paused(@self);
@@ -633,11 +688,18 @@ pub mod AuctionVerifier {
             assert(order_commitment_root != 0, 'BAD_ORDER_ROOT');
             assert(admission_root != 0, 'BAD_ADMISSION_ROOT');
             assert(transcript_commitment != 0, 'BAD_TRANSCRIPT');
+            assert(privacy_gate_config_commitment != 0, 'BAD_PRIVACY_CFG');
             let batch_registry = IBatchRegistryDispatcher {
                 contract_address: self.batch_registry.read(),
             };
             let batch = batch_registry.get_batch(batch_id);
             assert(batch.order_commitment_root == order_commitment_root, 'ORDER_ROOT_BINDING');
+            assert(self.pair_privacy_gate_configured.read(batch.pair_id), 'PRIVACY_CFG_UNSET');
+            assert(
+                pair_privacy_gate_config_commitment(@self, batch.pair_id)
+                    == privacy_gate_config_commitment,
+                'PRIVACY_CFG_BINDING',
+            );
             let verified_admission = self.verified_admission_roots.read(batch_id);
             assert(verified_admission != 0, 'ADMISSION_REQUIRED');
             assert(verified_admission == admission_root, 'ADMISSION_REQUIRED');
@@ -647,6 +709,7 @@ pub mod AuctionVerifier {
                 order_commitment_root,
                 admission_root,
                 transcript_commitment,
+                privacy_gate_config_commitment,
             );
             let expected_messages = array![
                 auction_result_proof_message_hash_from_statement(
@@ -864,8 +927,14 @@ pub mod AuctionVerifier {
                 'NEW_NOTE_ROOT',
             );
             assert(new_nullifier_root != 0, 'NEW_NULLIFIER_ROOT');
-            let already_settled = self.settled_batches.read(consolidation_id);
-            assert(already_settled == false, 'CONSOLIDATION_SETTLED');
+            let already_consolidated = self.settled_consolidations.read(consolidation_id);
+            assert(already_consolidated == false, 'CONSOLIDATION_SETTLED');
+            let batch_registry = IBatchRegistryDispatcher {
+                contract_address: self.batch_registry.read(),
+            };
+            assert(
+                batch_registry.batch_exists(consolidation_id) == false, 'CONSOLIDATION_ID_BATCH',
+            );
 
             let consolidation_commitment = public_note_consolidation_commitment(
                 consolidation_id,
@@ -889,7 +958,7 @@ pub mod AuctionVerifier {
             ];
             assert_valid_proof_facts_messages(@self, expected_messages.span());
 
-            self.settled_batches.write(consolidation_id, true);
+            self.settled_consolidations.write(consolidation_id, true);
             self.settled_at_unix_seconds.write(consolidation_id, current_block_timestamp());
             self.output_note_roots.write(consolidation_id, output_note_root);
             self.current_note_root.write(new_note_root);
@@ -938,7 +1007,8 @@ pub mod AuctionVerifier {
             assert(withdraw_authorization_s != 0, 'BAD_WITHDRAW_SIG');
             assert(!recipient.is_zero(), 'BAD_RECIPIENT');
             let settled = self.settled_batches.read(batch_id);
-            assert(settled == true, 'UNKNOWN_SETTLEMENT');
+            let consolidated = self.settled_consolidations.read(batch_id);
+            assert(settled == true || consolidated == true, 'UNKNOWN_SETTLEMENT');
             assert_output_claim_window_open(@self, batch_id);
             let already_withdrawn = self.withdrawn_output_notes.read(note_commitment);
             assert(already_withdrawn == false, 'OUTPUT_WITHDRAWN');
@@ -985,6 +1055,10 @@ pub mod AuctionVerifier {
             self.verified_auction_transcripts.read(batch_id)
         }
 
+        fn output_note_root(self: @ContractState, batch_id: felt252) -> felt252 {
+            self.output_note_roots.read(batch_id)
+        }
+
         fn current_settlement_roots(self: @ContractState) -> (felt252, felt252, felt252, felt252) {
             (
                 self.current_note_root.read(),
@@ -1000,6 +1074,21 @@ pub mod AuctionVerifier {
                 self.pair_maker_fee_bps.read(pair_id),
                 self.pair_relay_fee_bps.read(pair_id),
                 self.pair_fee_configured.read(pair_id),
+            )
+        }
+
+        fn pair_privacy_gate_config(
+            self: @ContractState, pair_id: felt252,
+        ) -> (u128, u64, u64, u64, u64, u64, u64, bool) {
+            (
+                self.pair_min_batch_base_liquidity.read(pair_id),
+                self.pair_min_batch_participants.read(pair_id),
+                self.pair_min_eligible_orders.read(pair_id),
+                self.pair_max_single_order_fill_bps.read(pair_id),
+                self.pair_max_single_owner_fill_bps.read(pair_id),
+                self.pair_min_maker_participants.read(pair_id),
+                self.pair_max_maker_fill_bps.read(pair_id),
+                self.pair_privacy_gate_configured.read(pair_id),
             )
         }
 
@@ -1520,6 +1609,7 @@ pub mod AuctionVerifier {
         order_commitment_root: felt252,
         admission_root: felt252,
         transcript_commitment: felt252,
+        privacy_gate_config_commitment: felt252,
     ) -> felt252 {
         let mut state = poseidon_hash2(
             AUCTION_RESULT_MESSAGE_DOMAIN, auction_verifier_address.into(),
@@ -1528,6 +1618,22 @@ pub mod AuctionVerifier {
         state = poseidon_hash2(state, order_commitment_root);
         state = poseidon_hash2(state, admission_root);
         state = poseidon_hash2(state, transcript_commitment);
+        state = poseidon_hash2(state, privacy_gate_config_commitment);
+        state
+    }
+
+    fn pair_privacy_gate_config_commitment(
+        self: @ContractState, pair_id: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            PRIVACY_GATE_CONFIG_DOMAIN, self.pair_min_batch_base_liquidity.read(pair_id).into(),
+        );
+        state = poseidon_hash2(state, self.pair_min_batch_participants.read(pair_id).into());
+        state = poseidon_hash2(state, self.pair_min_eligible_orders.read(pair_id).into());
+        state = poseidon_hash2(state, self.pair_max_single_order_fill_bps.read(pair_id).into());
+        state = poseidon_hash2(state, self.pair_max_single_owner_fill_bps.read(pair_id).into());
+        state = poseidon_hash2(state, self.pair_min_maker_participants.read(pair_id).into());
+        state = poseidon_hash2(state, self.pair_max_maker_fill_bps.read(pair_id).into());
         state
     }
 
@@ -1792,7 +1898,7 @@ pub mod AuctionVerifier {
         assert(merkle_path.len() == merkle_directions.len(), 'RENEWAL_PATH_LEN');
         if prior_root == 0 {
             assert(merkle_path.len() == 0, 'RENEWAL_EMPTY_PATH');
-            return poseidon_hash2(RENEWAL_SPARSE_LEAF_DOMAIN, entry);
+            return sparse_insert_renewal_entry_from_empty(entry, key_low);
         }
         assert(merkle_path.len() == RENEWAL_SPARSE_TREE_DEPTH, 'RENEWAL_PATH_COUNT');
         let mut reconstructed_low: felt252 = 0;
@@ -1810,11 +1916,11 @@ pub mod AuctionVerifier {
             reconstructed_low = reconstructed_low + bit * bit_weight;
             bit_weight = bit_weight * 2;
             if bit == 0 {
-                empty_root = renewal_sparse_node(empty_root, sibling);
-                inserted_root = renewal_sparse_node(inserted_root, sibling);
+                empty_root = renewal_sparse_node(empty_root, sibling, level);
+                inserted_root = renewal_sparse_node(inserted_root, sibling, level);
             } else {
-                empty_root = renewal_sparse_node(sibling, empty_root);
-                inserted_root = renewal_sparse_node(sibling, inserted_root);
+                empty_root = renewal_sparse_node(sibling, empty_root, level);
+                inserted_root = renewal_sparse_node(sibling, inserted_root, level);
             }
             level += 1;
         }
@@ -1823,15 +1929,32 @@ pub mod AuctionVerifier {
         inserted_root
     }
 
-    fn renewal_sparse_node(left: felt252, right: felt252) -> felt252 {
-        if left == 0 {
-            return right;
+    fn sparse_insert_renewal_entry_from_empty(entry: felt252, key_low: u128) -> felt252 {
+        let mut inserted_root = poseidon_hash2(RENEWAL_SPARSE_LEAF_DOMAIN, entry);
+        let mut empty_sibling = 0;
+        let mut remaining_key = key_low;
+        let mut level = 0;
+        loop {
+            if level == RENEWAL_SPARSE_TREE_DEPTH {
+                break;
+            }
+            let bit = remaining_key % 2;
+            remaining_key = remaining_key / 2;
+            if bit == 0 {
+                inserted_root = renewal_sparse_node(inserted_root, empty_sibling, level);
+            } else {
+                inserted_root = renewal_sparse_node(empty_sibling, inserted_root, level);
+            }
+            empty_sibling = renewal_sparse_node(empty_sibling, empty_sibling, level);
+            level += 1;
         }
-        if right == 0 {
-            return left;
-        }
-        let (result, _, _) = hades_permutation(RENEWAL_SPARSE_NODE_DOMAIN, left, right);
-        result
+        inserted_root
+    }
+
+    fn renewal_sparse_node(left: felt252, right: felt252, level: usize) -> felt252 {
+        let state = poseidon_hash2(RENEWAL_SPARSE_NODE_DOMAIN, level.into());
+        let state = poseidon_hash2(state, left);
+        poseidon_hash2(state, right)
     }
 
     fn output_note_leaf(

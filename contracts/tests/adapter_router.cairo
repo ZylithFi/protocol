@@ -40,6 +40,8 @@ const VIRTUAL_SNOS0: felt252 = 'VIRTUAL_SNOS0';
 const TEST_PROOF_PROGRAM_HASH: felt252 = 0x987654321;
 const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
 const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
+const PRIVACY_GATE_CONFIG_DOMAIN: felt252 =
+    0x7a796c6974685f707269766163795f676174655f6366675f7631;
 const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
 const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
 const NOTE_CONSOLIDATION_MESSAGE_DOMAIN: felt252 = 'zylith_consol_v1';
@@ -141,13 +143,21 @@ fn deploy_auction_verifier(
     verifier.set_protocol_fee_recipient(TEST_PROTOCOL_FEE_RECIPIENT);
     verifier.set_relay_fee_recipient(TEST_RELAY_FEE_RECIPIENT);
     verifier.set_pair_fee_config(0x888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
+    set_test_pair_privacy_gate_config(verifier, 0x888);
     verifier.set_pair_fee_config(0x889, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
+    set_test_pair_privacy_gate_config(verifier, 0x889);
     verifier
         .set_pair_fee_config(0x1888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
+    set_test_pair_privacy_gate_config(verifier, 0x1888);
     verifier
         .set_pair_fee_config(0x2888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
+    set_test_pair_privacy_gate_config(verifier, 0x2888);
     stop_cheat_caller_address(verifier_address);
     verifier_address
+}
+
+fn set_test_pair_privacy_gate_config(verifier: IAuctionVerifierDispatcher, pair_id: felt252) {
+    verifier.set_pair_privacy_gate_config(pair_id, 0, 0, 0, 0, 0, 0, 0);
 }
 
 #[test]
@@ -567,12 +577,24 @@ fn native_auction_result_message_hash(
     order_commitment_root: felt252,
     admission_root: felt252,
     transcript_commitment: felt252,
+    privacy_gate_config_commitment: felt252,
 ) -> felt252 {
     let mut state = poseidon_hash2(AUCTION_RESULT_MESSAGE_DOMAIN, auction_verifier_address.into());
     state = poseidon_hash2(state, batch_id);
     state = poseidon_hash2(state, order_commitment_root);
     state = poseidon_hash2(state, admission_root);
-    poseidon_hash2(state, transcript_commitment)
+    state = poseidon_hash2(state, transcript_commitment);
+    poseidon_hash2(state, privacy_gate_config_commitment)
+}
+
+fn test_privacy_gate_config_commitment() -> felt252 {
+    let mut state = poseidon_hash2(PRIVACY_GATE_CONFIG_DOMAIN, 0);
+    state = poseidon_hash2(state, 0);
+    state = poseidon_hash2(state, 0);
+    state = poseidon_hash2(state, 0);
+    state = poseidon_hash2(state, 0);
+    state = poseidon_hash2(state, 0);
+    poseidon_hash2(state, 0)
 }
 
 fn native_admission_message_hash(
@@ -681,8 +703,14 @@ fn record_split_auction_proofs(
     verifier
         .record_admission_root_with_proof_facts(batch_id, order_commitment_root, admission_root);
 
+    let privacy_gate_config_commitment = test_privacy_gate_config_commitment();
     let auction_statement = native_auction_result_message_hash(
-        auction_verifier, batch_id, order_commitment_root, admission_root, transcript_commitment,
+        auction_verifier,
+        batch_id,
+        order_commitment_root,
+        admission_root,
+        transcript_commitment,
+        privacy_gate_config_commitment,
     );
     let auction_proof_message = auction_result_proof_message_hash(
         auction_verifier, auction_statement,
@@ -692,7 +720,11 @@ fn record_split_auction_proofs(
     cheat_proof_facts(auction_verifier, auction_proof_facts.span(), CheatSpan::TargetCalls(1));
     verifier
         .record_auction_result_with_proof_facts(
-            batch_id, order_commitment_root, admission_root, transcript_commitment,
+            batch_id,
+            order_commitment_root,
+            admission_root,
+            transcript_commitment,
+            privacy_gate_config_commitment,
         );
     stop_cheat_caller_address(auction_verifier);
 }

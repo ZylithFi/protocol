@@ -130,6 +130,7 @@ pub mod BatchRegistry {
             assert_batch_registrar(@self);
             assert(batch_id != 0, 'BAD_BATCH_ID');
             assert(pair_id != 0, 'BAD_PAIR_ID');
+            assert(epoch_id != 0, 'BAD_EPOCH');
             assert(order_commitment_root != 0, 'BAD_ORDER_ROOT');
             assert(encrypted_order_set_commitment != 0, 'BAD_ENC_SET');
             let exists = self.batch_exists.read(batch_id);

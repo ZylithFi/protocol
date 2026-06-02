@@ -290,7 +290,13 @@ pub mod AuctionProofProgram {
             serialized_private_auction_witness: Span<felt252>,
         ) -> felt252 {
             assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
-            let (batch_id, order_commitment_root, admission_root, transcript_commitment) =
+            let (
+                batch_id,
+                order_commitment_root,
+                admission_root,
+                transcript_commitment,
+                privacy_gate_config_commitment,
+            ) =
                 verify_auction_result_statement(
                 serialized_private_auction_witness,
             );
@@ -300,6 +306,7 @@ pub mod AuctionProofProgram {
                 order_commitment_root,
                 admission_root,
                 transcript_commitment,
+                privacy_gate_config_commitment,
             )
         }
 
@@ -478,6 +485,7 @@ pub mod AuctionProofProgram {
         order_commitment_root: felt252,
         admission_root: felt252,
         transcript_commitment: felt252,
+        privacy_gate_config_commitment: felt252,
     ) -> felt252 {
         let statement_message_hash = native_auction_result_message_hash(
             auction_verifier,
@@ -485,6 +493,7 @@ pub mod AuctionProofProgram {
             order_commitment_root,
             admission_root,
             transcript_commitment,
+            privacy_gate_config_commitment,
         );
         let payload = auction_result_proof_payload(statement_message_hash);
         send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
@@ -669,6 +678,7 @@ pub mod AuctionProofProgram {
         order_commitment_root: felt252,
         admission_root: felt252,
         transcript_commitment: felt252,
+        privacy_gate_config_commitment: felt252,
     ) -> felt252 {
         let mut state = poseidon_hash2(
             AUCTION_RESULT_MESSAGE_DOMAIN, auction_verifier_address.into(),
@@ -677,6 +687,7 @@ pub mod AuctionProofProgram {
         state = poseidon_hash2(state, order_commitment_root);
         state = poseidon_hash2(state, admission_root);
         state = poseidon_hash2(state, transcript_commitment);
+        state = poseidon_hash2(state, privacy_gate_config_commitment);
         state
     }
 }

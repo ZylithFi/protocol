@@ -18,7 +18,13 @@ pub fn main(input: Array<felt252>) -> felt252 {
         let (_batch_id, _order_commitment_root, admission_root) = verify_admission_statement(data);
         admission_root
     } else if statement_type == STATEMENT_TYPE_AUCTION_RESULT {
-        let (_batch_id, _order_commitment_root, _admission_root, transcript_commitment) =
+        let (
+            _batch_id,
+            _order_commitment_root,
+            _admission_root,
+            transcript_commitment,
+            _privacy_gate_config_commitment,
+        ) =
             verify_auction_result_statement(
             data,
         );
