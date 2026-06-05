@@ -5715,6 +5715,135 @@ fn auction_verifier_stages_strk20_open_note_withdrawal_with_nullifier_proof_fact
 
 #[test]
 #[should_panic]
+fn auction_verifier_rejects_normal_withdrawal_after_strk20_exit_stage() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x333);
+    let recipient = as_address(0x444);
+    let batch_id = 0x7821;
+    let pair_id = 0x888;
+    let output_note_commitment = 0xabc201;
+    let output_amount = 200_u128;
+    let exit_commitment = 0xeee201;
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let withdraw_authority = key_pair.public_key;
+    let (_, bridge_address, _, auction_verifier) = settle_single_output_note_for_strk20_exit(
+        admin,
+        settlement_account,
+        batch_id,
+        pair_id,
+        output_note_commitment,
+        output_amount,
+        withdraw_authority,
+    );
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    let strk20_message = output_strk20_exit_message_hash_for_verifier(
+        auction_verifier,
+        bridge_address,
+        TEST_CHAIN_ID,
+        batch_id,
+        output_note_commitment,
+        ASSET_ID,
+        output_amount,
+        exit_commitment,
+    );
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, strk20_message).unwrap();
+    let path = array![];
+    let directions = array![];
+    let first_consumed_root = single_field_root(
+        CONSUMED_NULLIFIER_ROOT_DOMAIN, array![0xdeadbeef].span(),
+    );
+    let first_new_nullifier_root = 0x5678;
+    let first_withdrawal_commitment = public_note_withdrawal_commitment(
+        batch_id,
+        output_note_commitment,
+        ASSET_ID,
+        output_amount,
+        withdraw_authority,
+        0,
+        first_consumed_root,
+        first_new_nullifier_root,
+    );
+    let first_statement = native_withdrawal_message_hash(
+        auction_verifier, first_withdrawal_commitment,
+    );
+    let first_proof_message = withdrawal_proof_message_hash(auction_verifier, first_statement);
+    let first_proof_facts = valid_proof_facts(99, first_proof_message);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_chain_id(auction_verifier, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, first_proof_facts.span(), CheatSpan::TargetCalls(1));
+    verifier
+        .withdraw_settlement_output_to_strk20_with_proof_facts(
+            batch_id,
+            first_statement,
+            0,
+            first_consumed_root,
+            first_new_nullifier_root,
+            output_note_commitment,
+            ASSET_ID,
+            output_amount,
+            withdraw_authority,
+            path.span(),
+            directions.span(),
+            r,
+            s,
+            exit_commitment,
+        );
+
+    let second_consumed_root = single_field_root(
+        CONSUMED_NULLIFIER_ROOT_DOMAIN, array![0xcafebabe].span(),
+    );
+    let second_new_nullifier_root = 0x6789;
+    let legacy_message = output_withdrawal_message_hash_for_verifier(
+        auction_verifier,
+        bridge_address,
+        TEST_CHAIN_ID,
+        batch_id,
+        output_note_commitment,
+        ASSET_ID,
+        output_amount,
+        recipient,
+    );
+    let (legacy_r, legacy_s) = StarkCurveSignerImpl::sign(key_pair, legacy_message).unwrap();
+    let second_withdrawal_commitment = public_note_withdrawal_commitment(
+        batch_id,
+        output_note_commitment,
+        ASSET_ID,
+        output_amount,
+        withdraw_authority,
+        first_new_nullifier_root,
+        second_consumed_root,
+        second_new_nullifier_root,
+    );
+    let second_statement = native_withdrawal_message_hash(
+        auction_verifier, second_withdrawal_commitment,
+    );
+    let second_proof_message = withdrawal_proof_message_hash(auction_verifier, second_statement);
+    let second_proof_facts = valid_proof_facts(99, second_proof_message);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_chain_id(auction_verifier, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, second_proof_facts.span(), CheatSpan::TargetCalls(1));
+    verifier
+        .withdraw_settlement_output_with_proof_facts(
+            batch_id,
+            second_statement,
+            first_new_nullifier_root,
+            second_consumed_root,
+            second_new_nullifier_root,
+            output_note_commitment,
+            ASSET_ID,
+            output_amount,
+            withdraw_authority,
+            path.span(),
+            directions.span(),
+            legacy_r,
+            legacy_s,
+            recipient,
+        );
+}
+
+#[test]
+#[should_panic]
 fn auction_verifier_rejects_duplicate_settlement_output_withdrawal_replay() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
@@ -6489,6 +6618,292 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_open_note() {
             array![].span(),
             array![exit_commitment, redirected_open_note_id, r, s].span(),
             array![].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_strk20_exit_claim_replay() {
+    let admin = as_address(0x111);
+    let auction_verifier = as_address(0x222);
+    let privacy_pool = deploy_mock_privacy_pool();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let token_address = deploy_mock_erc20();
+    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let token = IMockERC20Dispatcher { contract_address: token_address };
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let exit_commitment = 0xeee003;
+    let first_open_note_id = 0xabc004;
+    let replay_open_note_id = 0xabc005;
+
+    token.mint(bridge_address, as_u256(500));
+    start_cheat_caller_address(bridge_address, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(bridge_address);
+
+    start_cheat_caller_address(bridge_address, auction_verifier);
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, NOTE_COMMITMENT + 0x202, key_pair.public_key, exit_commitment,
+        );
+    stop_cheat_caller_address(bridge_address);
+
+    let first_message = strk20_exit_claim_message_hash_for_bridge(
+        bridge_address, privacy_pool, TEST_CHAIN_ID, exit_commitment, first_open_note_id,
+    );
+    let (first_r, first_s) = StarkCurveSignerImpl::sign(key_pair, first_message).unwrap();
+    cheat_chain_id(bridge_address, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(bridge_address, privacy_pool);
+    bridge
+        .privacy_invoke(
+            array![].span(),
+            array![exit_commitment, first_open_note_id, first_r, first_s].span(),
+            array![].span(),
+        );
+    stop_cheat_caller_address(bridge_address);
+
+    let replay_message = strk20_exit_claim_message_hash_for_bridge(
+        bridge_address, privacy_pool, TEST_CHAIN_ID, exit_commitment, replay_open_note_id,
+    );
+    let (replay_r, replay_s) = StarkCurveSignerImpl::sign(key_pair, replay_message).unwrap();
+    cheat_chain_id(bridge_address, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(bridge_address, privacy_pool);
+    bridge
+        .privacy_invoke(
+            array![].span(),
+            array![exit_commitment, replay_open_note_id, replay_r, replay_s].span(),
+            array![].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_chain() {
+    let admin = as_address(0x111);
+    let auction_verifier = as_address(0x222);
+    let privacy_pool = deploy_mock_privacy_pool();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let token_address = deploy_mock_erc20();
+    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let token = IMockERC20Dispatcher { contract_address: token_address };
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let exit_commitment = 0xeee004;
+    let open_note_id = 0xabc006;
+
+    token.mint(bridge_address, as_u256(500));
+    start_cheat_caller_address(bridge_address, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(bridge_address);
+
+    start_cheat_caller_address(bridge_address, auction_verifier);
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, NOTE_COMMITMENT + 0x203, key_pair.public_key, exit_commitment,
+        );
+    stop_cheat_caller_address(bridge_address);
+
+    let claim_message = strk20_exit_claim_message_hash_for_bridge(
+        bridge_address, privacy_pool, WRONG_CHAIN_ID, exit_commitment, open_note_id,
+    );
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, claim_message).unwrap();
+    cheat_chain_id(bridge_address, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(bridge_address, privacy_pool);
+    bridge
+        .privacy_invoke(
+            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_bridge_signature() {
+    let admin = as_address(0x111);
+    let auction_verifier = as_address(0x222);
+    let privacy_pool = deploy_mock_privacy_pool();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let token_address = deploy_mock_erc20();
+    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let token = IMockERC20Dispatcher { contract_address: token_address };
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let exit_commitment = 0xeee008;
+    let open_note_id = 0xabc009;
+    let wrong_bridge = as_address(0x999);
+
+    token.mint(bridge_address, as_u256(500));
+    start_cheat_caller_address(bridge_address, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(bridge_address);
+
+    start_cheat_caller_address(bridge_address, auction_verifier);
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, NOTE_COMMITMENT + 0x207, key_pair.public_key, exit_commitment,
+        );
+    stop_cheat_caller_address(bridge_address);
+
+    let claim_message = strk20_exit_claim_message_hash_for_bridge(
+        wrong_bridge, privacy_pool, TEST_CHAIN_ID, exit_commitment, open_note_id,
+    );
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, claim_message).unwrap();
+    cheat_chain_id(bridge_address, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(bridge_address, privacy_pool);
+    bridge
+        .privacy_invoke(
+            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_strk20_exit_stage_for_unsupported_asset() {
+    let admin = as_address(0x111);
+    let auction_verifier = as_address(0x222);
+    let privacy_pool = deploy_mock_privacy_pool();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+
+    start_cheat_caller_address(bridge_address, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    stop_cheat_caller_address(bridge_address);
+
+    start_cheat_caller_address(bridge_address, auction_verifier);
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, NOTE_COMMITMENT + 0x208, key_pair.public_key, 0xeee009,
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_strk20_exit_claim_from_wrong_pool_caller() {
+    let admin = as_address(0x111);
+    let auction_verifier = as_address(0x222);
+    let privacy_pool = deploy_mock_privacy_pool();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let token_address = deploy_mock_erc20();
+    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let token = IMockERC20Dispatcher { contract_address: token_address };
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let exit_commitment = 0xeee005;
+    let open_note_id = 0xabc007;
+
+    token.mint(bridge_address, as_u256(500));
+    start_cheat_caller_address(bridge_address, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(bridge_address);
+
+    start_cheat_caller_address(bridge_address, auction_verifier);
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, NOTE_COMMITMENT + 0x204, key_pair.public_key, exit_commitment,
+        );
+    stop_cheat_caller_address(bridge_address);
+
+    let claim_message = strk20_exit_claim_message_hash_for_bridge(
+        bridge_address, privacy_pool, TEST_CHAIN_ID, exit_commitment, open_note_id,
+    );
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, claim_message).unwrap();
+    cheat_chain_id(bridge_address, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(bridge_address, as_address(0x333));
+    bridge
+        .privacy_invoke(
+            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_strk20_exit_claim_short_transfer_from() {
+    let admin = as_address(0x111);
+    let auction_verifier = as_address(0x222);
+    let privacy_pool = deploy_mock_privacy_pool();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let token_address = deploy_configurable_mock_erc20();
+    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let token = IConfigurableMockERC20Dispatcher { contract_address: token_address };
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let exit_commitment = 0xeee006;
+    let open_note_id = 0xabc008;
+
+    token.mint(bridge_address, as_u256(500));
+    start_cheat_caller_address(token_address, admin);
+    token.set_short_transfer_from(true);
+    stop_cheat_caller_address(token_address);
+    start_cheat_caller_address(bridge_address, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(bridge_address);
+
+    start_cheat_caller_address(bridge_address, auction_verifier);
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, NOTE_COMMITMENT + 0x205, key_pair.public_key, exit_commitment,
+        );
+    stop_cheat_caller_address(bridge_address);
+
+    let claim_message = strk20_exit_claim_message_hash_for_bridge(
+        bridge_address, privacy_pool, TEST_CHAIN_ID, exit_commitment, open_note_id,
+    );
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, claim_message).unwrap();
+    cheat_chain_id(bridge_address, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(bridge_address, privacy_pool);
+    bridge
+        .privacy_invoke(
+            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_strk20_exit_stage_after_normal_withdrawal() {
+    let admin = as_address(0x111);
+    let auction_verifier = as_address(0x222);
+    let recipient = as_address(0x333);
+    let privacy_pool = deploy_mock_privacy_pool();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let token_address = deploy_mock_erc20();
+    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let token = IMockERC20Dispatcher { contract_address: token_address };
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let note_commitment = NOTE_COMMITMENT + 0x206;
+
+    token.mint(bridge_address, as_u256(500));
+    start_cheat_caller_address(bridge_address, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(bridge_address);
+
+    start_cheat_caller_address(bridge_address, auction_verifier);
+    bridge.withdraw_verified_note(ASSET_ID, 200, note_commitment, recipient);
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, note_commitment, key_pair.public_key, 0xeee007,
         );
 }
 
