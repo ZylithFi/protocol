@@ -31,7 +31,7 @@ use zylith_protocol::shielded_asset_adapter::{
 use zylith_protocol::types::BatchStatus;
 use crate::mock_erc20::{
     IConfigurableMockERC20Dispatcher, IConfigurableMockERC20DispatcherTrait, IMockERC20Dispatcher,
-    IMockERC20DispatcherTrait, IMockPrivacyPoolDispatcher, IMockPrivacyPoolDispatcherTrait,
+    IMockERC20DispatcherTrait,
 };
 
 const ASSET_ID: felt252 = 'USDC';
@@ -5635,7 +5635,6 @@ fn auction_verifier_stages_strk20_open_note_withdrawal_with_nullifier_proof_fact
     );
     let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
     let token = IERC20Dispatcher { contract_address: token_address };
-    let pool = IMockPrivacyPoolDispatcher { contract_address: privacy_pool };
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
     let message = output_strk20_exit_message_hash_for_verifier(
@@ -5715,7 +5714,7 @@ fn auction_verifier_stages_strk20_open_note_withdrawal_with_nullifier_proof_fact
     let (claim_r, claim_s) = StarkCurveSignerImpl::sign(key_pair, claim_message).unwrap();
     cheat_chain_id(bridge_address, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
     start_cheat_caller_address(bridge_address, privacy_pool);
-    bridge
+    let open_deposits = bridge
         .privacy_invoke(
             array![].span(),
             array![exit_commitment, open_note_id, claim_r, claim_s].span(),
@@ -5723,9 +5722,17 @@ fn auction_verifier_stages_strk20_open_note_withdrawal_with_nullifier_proof_fact
         );
     stop_cheat_caller_address(bridge_address);
 
+    assert(open_deposits.len() == 1, 'OPEN_DEPOSIT_MISSING');
+    let open_deposit = *open_deposits.at(0);
+    assert(open_deposit.note_id == open_note_id, 'BAD_OPEN_NOTE');
+    assert(open_deposit.token == token_address, 'BAD_OPEN_TOKEN');
+    assert(open_deposit.amount == output_amount, 'BAD_OPEN_AMOUNT');
     assert(bridge.strk20_exit_claimed_open_note_id(exit_commitment) == open_note_id, 'BAD_OPEN');
-    assert(pool.open_note_amount(open_note_id) == output_amount, 'BAD_OPEN_AMOUNT');
-    assert(pool.open_note_token(open_note_id) == token_address, 'BAD_OPEN_TOKEN');
+    let erc20 = IERC20Dispatcher { contract_address: token_address };
+    assert(erc20.allowance(bridge_address, privacy_pool) == as_u256(output_amount), 'BAD_APPROVAL');
+    start_cheat_caller_address(token_address, privacy_pool);
+    erc20.transfer_from(bridge_address, privacy_pool, as_u256(output_amount));
+    stop_cheat_caller_address(token_address);
     assert(token.balance_of(privacy_pool).low == output_amount, 'BAD_POOL_BALANCE');
 }
 
@@ -6553,7 +6560,6 @@ fn privacy_deposit_bridge_claims_staged_strk20_exit_to_open_note() {
     let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
     let token = IMockERC20Dispatcher { contract_address: token_address };
     let erc20 = IERC20Dispatcher { contract_address: token_address };
-    let pool = IMockPrivacyPoolDispatcher { contract_address: privacy_pool };
     let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
     let exit_commitment = 0xeee001;
     let open_note_id = 0xabc001;
@@ -6591,12 +6597,15 @@ fn privacy_deposit_bridge_claims_staged_strk20_exit_to_open_note() {
         );
     stop_cheat_caller_address(bridge_address);
 
-    assert(open_deposits.len() == 0, 'OPEN_DEPOSITS_RETURNED');
+    assert(open_deposits.len() == 1, 'OPEN_DEPOSIT_MISSING');
+    let open_deposit = *open_deposits.at(0);
+    assert(open_deposit.note_id == open_note_id, 'BAD_OPEN_NOTE');
+    assert(open_deposit.token == token_address, 'BAD_OPEN_TOKEN');
+    assert(open_deposit.amount == 200, 'BAD_OPEN_AMOUNT');
     assert(bridge.strk20_exit_claimed_open_note_id(exit_commitment) == open_note_id, 'BAD_OPEN');
-    assert(pool.open_note_amount(open_note_id) == 200, 'BAD_OPEN_AMOUNT');
-    assert(pool.open_note_token(open_note_id) == token_address, 'BAD_OPEN_TOKEN');
-    assert(erc20.balance_of(bridge_address).low == 300, 'BAD_BRIDGE_BALANCE');
-    assert(erc20.balance_of(privacy_pool).low == 200, 'BAD_POOL_BALANCE');
+    assert(erc20.balance_of(bridge_address).low == 500, 'BAD_BRIDGE_BALANCE');
+    assert(erc20.allowance(bridge_address, privacy_pool) == as_u256(200), 'BAD_APPROVAL');
+    assert(erc20.balance_of(privacy_pool).low == 0, 'BAD_POOL_BALANCE');
     assert(bridge.withdrawal_count() == 0, 'PUBLIC_WITHDRAWAL_RECORDED');
 }
 
@@ -7152,10 +7161,19 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_short_transfer_from() {
     let (r, s) = StarkCurveSignerImpl::sign(key_pair, claim_message).unwrap();
     cheat_chain_id(bridge_address, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
     start_cheat_caller_address(bridge_address, privacy_pool);
-    bridge
+    let open_deposits = bridge
         .privacy_invoke(
             array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
         );
+    stop_cheat_caller_address(bridge_address);
+
+    assert(open_deposits.len() == 1, 'OPEN_DEPOSIT_MISSING');
+    let open_deposit = *open_deposits.at(0);
+    let erc20 = IERC20Dispatcher { contract_address: token_address };
+    start_cheat_caller_address(token_address, privacy_pool);
+    erc20.transfer_from(bridge_address, privacy_pool, as_u256(open_deposit.amount));
+    stop_cheat_caller_address(token_address);
+    assert(erc20.balance_of(privacy_pool).low == open_deposit.amount, 'TOKEN_TRANSFER_DELTA');
 }
 
 #[test]

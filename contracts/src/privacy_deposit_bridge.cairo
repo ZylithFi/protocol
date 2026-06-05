@@ -57,13 +57,6 @@ pub trait IPrivacyDepositBridge<TContractState> {
     fn privacy_pool_address(self: @TContractState) -> ContractAddress;
 }
 
-#[starknet::interface]
-pub trait IStarknetPrivacyPool<TContractState> {
-    fn deposit_to_open_note(
-        ref self: TContractState, note_id: felt252, token: ContractAddress, amount: u128,
-    );
-}
-
 #[starknet::contract]
 pub mod PrivacyDepositBridge {
     use core::ecdsa::check_ecdsa_signature;
@@ -79,9 +72,6 @@ pub mod PrivacyDepositBridge {
         ICommitmentRegistryDispatcher, ICommitmentRegistryDispatcherTrait,
     };
     use zylith_protocol::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
-    use zylith_protocol::privacy_deposit_bridge::{
-        IStarknetPrivacyPoolDispatcher, IStarknetPrivacyPoolDispatcherTrait,
-    };
     use zylith_protocol::types::WithdrawalRecord;
 
     const STRK20_EXIT_CLAIM_DOMAIN: felt252 = 0x7a796c6974685f7374726b32305f636c61696d5f7631;
@@ -168,15 +158,20 @@ pub mod PrivacyDepositBridge {
             deposit_roots: Span<felt252>,
             encrypted_note_activations: Span<felt252>,
         ) -> Span<super::OpenNoteDeposit> {
+            let mut open_note_deposits: Array<super::OpenNoteDeposit> = array![];
             if funding_commitments.len() == 0 {
-                claim_strk20_exit_internal(ref self, deposit_roots, encrypted_note_activations);
+                open_note_deposits
+                    .append(
+                        claim_strk20_exit_internal(
+                            ref self, deposit_roots, encrypted_note_activations,
+                        ),
+                    );
             } else {
                 register_funding_activation_internal(
                     ref self, funding_commitments, deposit_roots, encrypted_note_activations,
                 );
             }
-            let empty: Array<super::OpenNoteDeposit> = array![];
-            empty.span()
+            open_note_deposits.span()
         }
 
         fn register_funding_activation(
@@ -364,7 +359,7 @@ pub mod PrivacyDepositBridge {
         ref self: ContractState,
         claim_fields: Span<felt252>,
         encrypted_note_activations: Span<felt252>,
-    ) {
+    ) -> super::OpenNoteDeposit {
         assert(get_caller_address() == self.privacy_pool.read(), 'BAD_PRIVACY_CALLER');
         assert(encrypted_note_activations.len() == 0, 'BAD_EXIT_CLAIM');
         assert(claim_fields.len() == 4, 'BAD_EXIT_CLAIM');
@@ -410,15 +405,12 @@ pub mod PrivacyDepositBridge {
         self.strk20_exit_claimed_open_note_ids.write(exit_commitment, open_note_id);
 
         let token = IERC20Dispatcher { contract_address: token_address };
-        let pool = IStarknetPrivacyPoolDispatcher { contract_address: privacy_pool };
-        let bridge_balance_before = checked_token_balance(token, get_contract_address());
-        let pool_balance_before = checked_token_balance(token, privacy_pool);
+        let bridge_balance = checked_token_balance(token, get_contract_address());
+        assert(bridge_balance >= amount, 'TOKEN_BALANCE_LOW');
+        // The STRK20 pool consumes the returned OpenNoteDeposit from privacy_invoke and
+        // pulls this approved amount while applying the proven Invoke server action.
         token.approve(privacy_pool, as_u256(amount));
-        pool.deposit_to_open_note(open_note_id, token_address, amount);
-        let bridge_balance_after = checked_token_balance(token, get_contract_address());
-        let pool_balance_after = checked_token_balance(token, privacy_pool);
-        assert(bridge_balance_before == bridge_balance_after + amount, 'TOKEN_TRANSFER_DELTA');
-        assert(pool_balance_after == pool_balance_before + amount, 'TOKEN_TRANSFER_DELTA');
+        super::OpenNoteDeposit { note_id: open_note_id, token: token_address, amount }
     }
 
     fn as_u256(amount: u128) -> u256 {
