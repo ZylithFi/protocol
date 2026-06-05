@@ -386,9 +386,19 @@ pub mod PrivacyDepositBridge {
         assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
         let privacy_pool = self.privacy_pool.read();
         assert(!privacy_pool.is_zero(), 'BAD_PRIVACY_POOL');
+        let auction_verifier = self.auction_verifier.read();
+        assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
         assert(
             check_ecdsa_signature(
-                strk20_exit_claim_message_hash(privacy_pool, exit_commitment, open_note_id),
+                strk20_exit_claim_message_hash(
+                    privacy_pool,
+                    auction_verifier,
+                    asset_id,
+                    token_address,
+                    amount,
+                    exit_commitment,
+                    open_note_id,
+                ),
                 withdraw_authority,
                 signature_r,
                 signature_s,
@@ -430,12 +440,22 @@ pub mod PrivacyDepositBridge {
     }
 
     fn strk20_exit_claim_message_hash(
-        privacy_pool: ContractAddress, exit_commitment: felt252, open_note_id: felt252,
+        privacy_pool: ContractAddress,
+        auction_verifier: ContractAddress,
+        asset_id: felt252,
+        token_address: ContractAddress,
+        amount: u128,
+        exit_commitment: felt252,
+        open_note_id: felt252,
     ) -> felt252 {
         let tx_info = get_tx_info().unbox();
         let mut state = poseidon_hash2(STRK20_EXIT_CLAIM_DOMAIN, tx_info.chain_id);
         state = poseidon_hash2(state, get_contract_address().into());
         state = poseidon_hash2(state, privacy_pool.into());
+        state = poseidon_hash2(state, auction_verifier.into());
+        state = poseidon_hash2(state, asset_id);
+        state = poseidon_hash2(state, token_address.into());
+        state = poseidon_hash2(state, amount.into());
         state = poseidon_hash2(state, exit_commitment);
         poseidon_hash2(state, open_note_id)
     }
