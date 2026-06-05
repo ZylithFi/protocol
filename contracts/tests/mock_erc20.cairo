@@ -13,6 +13,58 @@ pub trait IConfigurableMockERC20<TContractState> {
     fn set_short_transfer_from(ref self: TContractState, enabled: bool);
 }
 
+#[starknet::interface]
+pub trait IMockPrivacyPool<TContractState> {
+    fn deposit_to_open_note(
+        ref self: TContractState, note_id: felt252, token: ContractAddress, amount: u128,
+    );
+    fn open_note_amount(self: @TContractState, note_id: felt252) -> u128;
+    fn open_note_token(self: @TContractState, note_id: felt252) -> ContractAddress;
+}
+
+#[starknet::contract]
+pub mod MockPrivacyPool {
+    use core::integer::u256;
+    use starknet::storage::{Map, StorageMapReadAccess, StorageMapWriteAccess};
+    use starknet::{ContractAddress, get_caller_address, get_contract_address};
+    use zylith_protocol::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
+
+    #[storage]
+    struct Storage {
+        open_note_amounts: Map<felt252, u128>,
+        open_note_tokens: Map<felt252, ContractAddress>,
+    }
+
+    #[constructor]
+    fn constructor(ref self: ContractState) {}
+
+    #[abi(embed_v0)]
+    impl MockPrivacyPoolImpl of super::IMockPrivacyPool<ContractState> {
+        fn deposit_to_open_note(
+            ref self: ContractState, note_id: felt252, token: ContractAddress, amount: u128,
+        ) {
+            assert(note_id != 0, 'BAD_OPEN_NOTE');
+            assert(amount > 0, 'BAD_AMOUNT');
+            let erc20 = IERC20Dispatcher { contract_address: token };
+            erc20.transfer_from(get_caller_address(), get_contract_address(), as_u256(amount));
+            self.open_note_amounts.write(note_id, amount);
+            self.open_note_tokens.write(note_id, token);
+        }
+
+        fn open_note_amount(self: @ContractState, note_id: felt252) -> u128 {
+            self.open_note_amounts.read(note_id)
+        }
+
+        fn open_note_token(self: @ContractState, note_id: felt252) -> ContractAddress {
+            self.open_note_tokens.read(note_id)
+        }
+    }
+
+    fn as_u256(amount: u128) -> u256 {
+        u256 { low: amount, high: 0 }
+    }
+}
+
 #[starknet::contract]
 pub mod MockERC20 {
     use core::integer::u256;

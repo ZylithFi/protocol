@@ -157,6 +157,23 @@ pub trait IAuctionVerifier<TContractState> {
         withdraw_authorization_s: felt252,
         recipient: ContractAddress,
     ) -> (felt252, u128);
+    fn withdraw_settlement_output_to_strk20_with_proof_facts(
+        ref self: TContractState,
+        batch_id: felt252,
+        proof_artifact_commitment: felt252,
+        prior_nullifier_root: felt252,
+        consumed_nullifier_root: felt252,
+        new_nullifier_root: felt252,
+        note_commitment: felt252,
+        asset_id: felt252,
+        amount: u128,
+        withdraw_authority: felt252,
+        merkle_path: Span<felt252>,
+        merkle_directions: Span<felt252>,
+        withdraw_authorization_r: felt252,
+        withdraw_authorization_s: felt252,
+        exit_commitment: felt252,
+    ) -> (felt252, u128, felt252);
     // Deprecated fail-closed compatibility shim. Use withdraw_settlement_output_with_proof_facts.
     fn is_batch_settled(self: @TContractState, batch_id: felt252) -> bool;
     fn is_consolidation_settled(self: @TContractState, consolidation_id: felt252) -> bool;
@@ -250,6 +267,8 @@ pub mod AuctionVerifier {
         0x03c6998f476a618431be1c1764a6724f13c0739be395bab4c1217bc0a65b2ee7;
     const OUTPUT_WITHDRAWAL_DOMAIN: felt252 =
         0x031ff5b95d48149e26b5a946562ff5ea925eb8b3ea09d3b389b209b672a37b6e;
+    const OUTPUT_WITHDRAWAL_STRK20_EXIT_DOMAIN: felt252 =
+        0x7a796c6974685f7374726b32305f657869745f7631;
     const NOTE_ROOT_TRANSITION_DEPOSIT: felt252 = 0;
     const NOTE_ROOT_TRANSITION_SETTLEMENT: felt252 = 1;
     const NOTE_ROOT_TRANSITION_CONSOLIDATION: felt252 = 2;
@@ -1129,6 +1148,106 @@ pub mod AuctionVerifier {
             let adapter = IShieldedAssetAdapterDispatcher { contract_address: adapter_address };
             adapter.withdraw_verified_note(asset_id, amount, note_commitment, recipient);
             (asset_id, amount)
+        }
+
+        fn withdraw_settlement_output_to_strk20_with_proof_facts(
+            ref self: ContractState,
+            batch_id: felt252,
+            proof_artifact_commitment: felt252,
+            prior_nullifier_root: felt252,
+            consumed_nullifier_root: felt252,
+            new_nullifier_root: felt252,
+            note_commitment: felt252,
+            asset_id: felt252,
+            amount: u128,
+            withdraw_authority: felt252,
+            merkle_path: Span<felt252>,
+            merkle_directions: Span<felt252>,
+            withdraw_authorization_r: felt252,
+            withdraw_authorization_s: felt252,
+            exit_commitment: felt252,
+        ) -> (felt252, u128, felt252) {
+            assert_not_paused(@self);
+            assert_no_pending_root_transition(@self);
+            assert(batch_id != 0, 'BAD_BATCH');
+            assert(proof_artifact_commitment != 0, 'BAD_PROOF');
+            assert(consumed_nullifier_root != 0, 'BAD_CONSUMED_NULLS');
+            assert(new_nullifier_root != 0, 'NEW_NULLIFIER_ROOT');
+            assert(note_commitment != 0, 'BAD_COMMITMENT');
+            assert(asset_id != 0, 'BAD_ASSET');
+            assert(amount > 0, 'BAD_AMOUNT');
+            assert(withdraw_authority != 0, 'BAD_AUTHORITY');
+            assert(withdraw_authorization_r != 0, 'BAD_WITHDRAW_SIG');
+            assert(withdraw_authorization_s != 0, 'BAD_WITHDRAW_SIG');
+            assert(exit_commitment != 0, 'BAD_EXIT');
+            assert(
+                prior_nullifier_root == self.current_nullifier_root.read(), 'NULLIFIER_ROOT_STALE',
+            );
+            let settled = self.settled_batches.read(batch_id);
+            let consolidated = self.settled_consolidations.read(batch_id);
+            assert(settled == true || consolidated == true, 'UNKNOWN_SETTLEMENT');
+            assert_output_claim_window_open(@self, batch_id);
+            let already_withdrawn = self.withdrawn_output_notes.read(note_commitment);
+            assert(already_withdrawn == false, 'OUTPUT_WITHDRAWN');
+            let output_note_root = self.output_note_roots.read(batch_id);
+            let recomputed_root = verify_output_note_path(
+                note_commitment,
+                asset_id,
+                amount,
+                withdraw_authority,
+                merkle_path,
+                merkle_directions,
+            );
+            assert(recomputed_root == output_note_root, 'OUTPUT_NOTE_PROOF');
+
+            let withdrawal_commitment = public_note_withdrawal_commitment(
+                batch_id,
+                note_commitment,
+                asset_id,
+                amount,
+                withdraw_authority,
+                prior_nullifier_root,
+                consumed_nullifier_root,
+                new_nullifier_root,
+            );
+            let expected_statement_message = native_withdrawal_message_hash(
+                get_contract_address(), withdrawal_commitment,
+            );
+            assert(proof_artifact_commitment == expected_statement_message, 'PROOF_COMMITMENT');
+            let expected_messages = array![
+                withdrawal_proof_message_hash_from_statement(
+                    self.proof_program.read(), expected_statement_message,
+                ),
+            ];
+            assert_valid_proof_facts_messages(@self, expected_messages.span());
+
+            let adapter_address = self.shielded_asset_adapter.read();
+            assert(!adapter_address.is_zero(), 'BAD_ADAPTER');
+            assert(
+                check_ecdsa_signature(
+                    output_strk20_exit_message_hash(
+                        adapter_address,
+                        batch_id,
+                        note_commitment,
+                        asset_id,
+                        amount,
+                        exit_commitment,
+                    ),
+                    withdraw_authority,
+                    withdraw_authorization_r,
+                    withdraw_authorization_s,
+                ),
+                'BAD_WITHDRAW_SIG',
+            );
+
+            self.current_nullifier_root.write(new_nullifier_root);
+            self.withdrawn_output_notes.write(note_commitment, true);
+            let adapter = IShieldedAssetAdapterDispatcher { contract_address: adapter_address };
+            adapter
+                .stage_verified_note_strk20_exit(
+                    asset_id, amount, note_commitment, withdraw_authority, exit_commitment,
+                );
+            (asset_id, amount, exit_commitment)
         }
 
         fn is_batch_settled(self: @ContractState, batch_id: felt252) -> bool {
@@ -2149,5 +2268,24 @@ pub mod AuctionVerifier {
         state = poseidon_hash2(state, asset_id);
         state = poseidon_hash2(state, amount.into());
         poseidon_hash2(state, recipient.into())
+    }
+
+    fn output_strk20_exit_message_hash(
+        adapter_address: ContractAddress,
+        batch_id: felt252,
+        note_commitment: felt252,
+        asset_id: felt252,
+        amount: u128,
+        exit_commitment: felt252,
+    ) -> felt252 {
+        let tx_info = starknet::get_tx_info().unbox();
+        let mut state = poseidon_hash2(OUTPUT_WITHDRAWAL_STRK20_EXIT_DOMAIN, tx_info.chain_id);
+        state = poseidon_hash2(state, get_contract_address().into());
+        state = poseidon_hash2(state, adapter_address.into());
+        state = poseidon_hash2(state, batch_id);
+        state = poseidon_hash2(state, note_commitment);
+        state = poseidon_hash2(state, asset_id);
+        state = poseidon_hash2(state, amount.into());
+        poseidon_hash2(state, exit_commitment)
     }
 }

@@ -15,6 +15,14 @@ pub trait IShieldedAssetAdapter<TContractState> {
         note_commitment: felt252,
         recipient: starknet::ContractAddress,
     );
+    fn stage_verified_note_strk20_exit(
+        ref self: TContractState,
+        asset_id: felt252,
+        amount: u128,
+        note_commitment: felt252,
+        withdraw_authority: felt252,
+        exit_commitment: felt252,
+    );
     fn asset_token(self: @TContractState, asset_id: felt252) -> starknet::ContractAddress;
     fn is_asset_supported(self: @TContractState, asset_id: felt252) -> bool;
     fn withdrawal_recipient(
@@ -138,6 +146,19 @@ pub mod ShieldedAssetAdapter {
                 recipient_balance_after == recipient_balance_before + amount,
                 'TOKEN_TRANSFER_DELTA',
             );
+        }
+
+        fn stage_verified_note_strk20_exit(
+            ref self: ContractState,
+            asset_id: felt252,
+            amount: u128,
+            note_commitment: felt252,
+            withdraw_authority: felt252,
+            exit_commitment: felt252,
+        ) {
+            let _ = (asset_id, amount, note_commitment, withdraw_authority, exit_commitment);
+            assert_auction_verifier(@self);
+            assert(false, 'STRK20_EXIT_UNSUPPORTED');
         }
 
         fn asset_token(self: @ContractState, asset_id: felt252) -> ContractAddress {
