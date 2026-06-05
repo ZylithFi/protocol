@@ -128,10 +128,10 @@ fn deploy_batch_registry(
 }
 
 fn deploy_privacy_deposit_bridge(
-    commitment_registry: ContractAddress, _shielded_asset_adapter: ContractAddress,
+    admin: ContractAddress, commitment_registry: ContractAddress,
 ) -> ContractAddress {
     let class = declare("PrivacyDepositBridge").unwrap().contract_class();
-    let calldata = array![commitment_registry.into(), PRIVACY_POOL];
+    let calldata = array![admin.into(), commitment_registry.into(), PRIVACY_POOL];
     let (address, _) = class.deploy(@calldata).unwrap_syscall();
     address
 }
@@ -652,13 +652,12 @@ fn setup_privacy_activation_stack(
     let commitment_registry = deploy_commitment_registry(admin);
     let shielded_asset_adapter = deploy_shielded_asset_adapter(admin);
     let token_address = deploy_mock_erc20();
-    let privacy_deposit_bridge = deploy_privacy_deposit_bridge(
-        commitment_registry, shielded_asset_adapter,
-    );
+    let privacy_deposit_bridge = deploy_privacy_deposit_bridge(admin, commitment_registry);
     let batch_registry = deploy_batch_registry(admin, admin);
     let auction_verifier = deploy_auction_verifier(admin, batch_registry);
     let token = IMockERC20Dispatcher { contract_address: token_address };
     let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
     authorize_privacy_deposit_bridge(
         admin, commitment_registry, shielded_asset_adapter, privacy_deposit_bridge,
     );
@@ -666,14 +665,21 @@ fn setup_privacy_activation_stack(
     start_cheat_caller_address(shielded_asset_adapter, admin);
     adapter.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(shielded_asset_adapter);
+    start_cheat_caller_address(privacy_deposit_bridge, admin);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(privacy_deposit_bridge);
 
     let registry = ICommitmentRegistryDispatcher { contract_address: commitment_registry };
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
-    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
 
     start_cheat_caller_address(auction_verifier, admin);
     verifier.set_deposit_root_registrar(commitment_registry);
+    verifier.set_shielded_asset_adapter(privacy_deposit_bridge);
     stop_cheat_caller_address(auction_verifier);
+
+    start_cheat_caller_address(privacy_deposit_bridge, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    stop_cheat_caller_address(privacy_deposit_bridge);
 
     start_cheat_caller_address(commitment_registry, admin);
     registry.set_auction_verifier(auction_verifier);

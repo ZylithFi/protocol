@@ -1427,8 +1427,10 @@ pub fn verify_note_consolidation_statement(data: Span<felt252>) -> felt252 {
         let output_asset = *output_note_asset_ids.at(output_index);
         let output_amount = *output_note_amounts.at(output_index);
         let output_withdraw = *output_note_withdraw_authorities.at(output_index);
+        let output_nonce = *output_note_nonces.at(output_index);
         assert(output_asset == asset_id, 'E');
         assert(output_amount != 0, 'E');
+        assert(output_nonce != 0, 'E');
         assert(
             note_commitment(
                 note_commitment_domain,
@@ -1438,7 +1440,7 @@ pub fn verify_note_consolidation_statement(data: Span<felt252>) -> felt252 {
                 *output_note_spend_authorities.at(output_index),
                 output_withdraw,
                 *output_note_blindings.at(output_index),
-                *output_note_nonces.at(output_index),
+                output_nonce,
                 *output_note_metadata_commitments.at(output_index),
             ) == *output_note_commitments
                 .at(output_index),
