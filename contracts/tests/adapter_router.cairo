@@ -774,15 +774,19 @@ fn privacy_invoke_single_with_note(
     funding_commitment: felt252,
     deposit_root: felt252,
     encrypted_note_activation: felt252,
-    _note_commitment: felt252,
-    _amount: u128,
-    _withdraw_authority: felt252,
+    note_commitment: felt252,
+    amount: u128,
+    withdraw_authority: felt252,
 ) {
     let open_deposits = bridge
         .privacy_invoke(
             array![funding_commitment].span(),
             array![deposit_root].span(),
             array![encrypted_note_activation].span(),
+            array![note_commitment].span(),
+            array![ASSET_ID].span(),
+            array![amount].span(),
+            array![withdraw_authority].span(),
         );
     assert(open_deposits.len() == 0, 'OPEN_DEPOSITS_RETURNED');
 }
@@ -1975,6 +1979,28 @@ fn submit_two_batch_aggregate_with_roots(
     first_new_fee_root: felt252,
     second_prior_fee_root: felt252,
 ) {
+    submit_two_batch_aggregate_with_roots_and_order(
+        second_prior_note_root,
+        first_new_nullifier_root,
+        second_prior_nullifier_root,
+        first_new_renewal_root,
+        second_prior_renewal_root,
+        first_new_fee_root,
+        second_prior_fee_root,
+        false,
+    );
+}
+
+fn submit_two_batch_aggregate_with_roots_and_order(
+    second_prior_note_root: felt252,
+    first_new_nullifier_root: felt252,
+    second_prior_nullifier_root: felt252,
+    first_new_renewal_root: felt252,
+    second_prior_renewal_root: felt252,
+    first_new_fee_root: felt252,
+    second_prior_fee_root: felt252,
+    reverse_records: bool,
+) {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x222);
     let pair_id_1 = 0x888;
@@ -2092,90 +2118,215 @@ fn submit_two_batch_aggregate_with_roots(
         0x338,
         transcript_2,
     );
-    let messages = array![
-        verifier.settlement_proof_message_hash(transcript_1),
-        nullifier_proof_message_hash(
-            auction_verifier,
-            native_nullifier_message_hash(
-                auction_verifier, transcript_1, 0, empty_nullifier_root, first_new_nullifier_root,
-            ),
-        ),
-        renewal_proof_message_hash(
-            auction_verifier,
-            native_renewal_message_hash(
-                auction_verifier, transcript_1, 0, empty_renewal_root, first_new_renewal_root,
-            ),
-        ),
-        verifier.settlement_proof_message_hash(transcript_2),
-        nullifier_proof_message_hash(
-            auction_verifier,
-            native_nullifier_message_hash(
-                auction_verifier,
-                transcript_2,
-                second_prior_nullifier_root,
-                empty_nullifier_root,
-                second_new_nullifier_root,
-            ),
-        ),
-        renewal_proof_message_hash(
-            auction_verifier,
-            native_renewal_message_hash(
-                auction_verifier,
-                transcript_2,
-                second_prior_renewal_root,
-                empty_renewal_root,
-                second_new_renewal_root,
-            ),
-        ),
-    ];
+    let mut messages = array![];
+    if reverse_records {
+        messages.append(verifier.settlement_proof_message_hash(transcript_2));
+        messages
+            .append(
+                nullifier_proof_message_hash(
+                    auction_verifier,
+                    native_nullifier_message_hash(
+                        auction_verifier,
+                        transcript_2,
+                        second_prior_nullifier_root,
+                        empty_nullifier_root,
+                        second_new_nullifier_root,
+                    ),
+                ),
+            );
+        messages
+            .append(
+                renewal_proof_message_hash(
+                    auction_verifier,
+                    native_renewal_message_hash(
+                        auction_verifier,
+                        transcript_2,
+                        second_prior_renewal_root,
+                        empty_renewal_root,
+                        second_new_renewal_root,
+                    ),
+                ),
+            );
+        messages.append(verifier.settlement_proof_message_hash(transcript_1));
+        messages
+            .append(
+                nullifier_proof_message_hash(
+                    auction_verifier,
+                    native_nullifier_message_hash(
+                        auction_verifier,
+                        transcript_1,
+                        0,
+                        empty_nullifier_root,
+                        first_new_nullifier_root,
+                    ),
+                ),
+            );
+        messages
+            .append(
+                renewal_proof_message_hash(
+                    auction_verifier,
+                    native_renewal_message_hash(
+                        auction_verifier,
+                        transcript_1,
+                        0,
+                        empty_renewal_root,
+                        first_new_renewal_root,
+                    ),
+                ),
+            );
+    } else {
+        messages.append(verifier.settlement_proof_message_hash(transcript_1));
+        messages
+            .append(
+                nullifier_proof_message_hash(
+                    auction_verifier,
+                    native_nullifier_message_hash(
+                        auction_verifier,
+                        transcript_1,
+                        0,
+                        empty_nullifier_root,
+                        first_new_nullifier_root,
+                    ),
+                ),
+            );
+        messages
+            .append(
+                renewal_proof_message_hash(
+                    auction_verifier,
+                    native_renewal_message_hash(
+                        auction_verifier,
+                        transcript_1,
+                        0,
+                        empty_renewal_root,
+                        first_new_renewal_root,
+                    ),
+                ),
+            );
+        messages.append(verifier.settlement_proof_message_hash(transcript_2));
+        messages
+            .append(
+                nullifier_proof_message_hash(
+                    auction_verifier,
+                    native_nullifier_message_hash(
+                        auction_verifier,
+                        transcript_2,
+                        second_prior_nullifier_root,
+                        empty_nullifier_root,
+                        second_new_nullifier_root,
+                    ),
+                ),
+            );
+        messages
+            .append(
+                renewal_proof_message_hash(
+                    auction_verifier,
+                    native_renewal_message_hash(
+                        auction_verifier,
+                        transcript_2,
+                        second_prior_renewal_root,
+                        empty_renewal_root,
+                        second_new_renewal_root,
+                    ),
+                ),
+            );
+    }
     let proof_facts = valid_aggregate_proof_facts(99, messages.span());
     let mut aggregate_inputs = array![2];
-    append_root_settlement_input(
-        ref aggregate_inputs,
-        batch_id_1,
-        order_commitment_root_1,
-        encrypted_order_set_commitment_1,
-        transcript_1,
-        native_settlement_message_hash(auction_verifier, transcript_1),
-        clearing_price,
-        output_bundle_ref_1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        empty_nullifier_root,
-        empty_renewal_root,
-        0,
-        0,
-        first_new_note_root,
-        first_new_nullifier_root,
-        first_new_renewal_root,
-        first_new_fee_root,
-    );
-    append_root_settlement_input(
-        ref aggregate_inputs,
-        batch_id_2,
-        order_commitment_root_2,
-        encrypted_order_set_commitment_2,
-        transcript_2,
-        native_settlement_message_hash(auction_verifier, transcript_2),
-        clearing_price,
-        output_bundle_ref_2,
-        second_prior_note_root,
-        second_prior_nullifier_root,
-        second_prior_renewal_root,
-        second_prior_fee_root,
-        0,
-        empty_nullifier_root,
-        empty_renewal_root,
-        0,
-        0,
-        second_new_note_root,
-        second_new_nullifier_root,
-        second_new_renewal_root,
-        second_new_fee_root,
-    );
+    if reverse_records {
+        append_root_settlement_input(
+            ref aggregate_inputs,
+            batch_id_2,
+            order_commitment_root_2,
+            encrypted_order_set_commitment_2,
+            transcript_2,
+            native_settlement_message_hash(auction_verifier, transcript_2),
+            clearing_price,
+            output_bundle_ref_2,
+            second_prior_note_root,
+            second_prior_nullifier_root,
+            second_prior_renewal_root,
+            second_prior_fee_root,
+            0,
+            empty_nullifier_root,
+            empty_renewal_root,
+            0,
+            0,
+            second_new_note_root,
+            second_new_nullifier_root,
+            second_new_renewal_root,
+            second_new_fee_root,
+        );
+        append_root_settlement_input(
+            ref aggregate_inputs,
+            batch_id_1,
+            order_commitment_root_1,
+            encrypted_order_set_commitment_1,
+            transcript_1,
+            native_settlement_message_hash(auction_verifier, transcript_1),
+            clearing_price,
+            output_bundle_ref_1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            empty_nullifier_root,
+            empty_renewal_root,
+            0,
+            0,
+            first_new_note_root,
+            first_new_nullifier_root,
+            first_new_renewal_root,
+            first_new_fee_root,
+        );
+    } else {
+        append_root_settlement_input(
+            ref aggregate_inputs,
+            batch_id_1,
+            order_commitment_root_1,
+            encrypted_order_set_commitment_1,
+            transcript_1,
+            native_settlement_message_hash(auction_verifier, transcript_1),
+            clearing_price,
+            output_bundle_ref_1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            empty_nullifier_root,
+            empty_renewal_root,
+            0,
+            0,
+            first_new_note_root,
+            first_new_nullifier_root,
+            first_new_renewal_root,
+            first_new_fee_root,
+        );
+        append_root_settlement_input(
+            ref aggregate_inputs,
+            batch_id_2,
+            order_commitment_root_2,
+            encrypted_order_set_commitment_2,
+            transcript_2,
+            native_settlement_message_hash(auction_verifier, transcript_2),
+            clearing_price,
+            output_bundle_ref_2,
+            second_prior_note_root,
+            second_prior_nullifier_root,
+            second_prior_renewal_root,
+            second_prior_fee_root,
+            0,
+            empty_nullifier_root,
+            empty_renewal_root,
+            0,
+            0,
+            second_new_note_root,
+            second_new_nullifier_root,
+            second_new_renewal_root,
+            second_new_fee_root,
+        );
+    }
 
     cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
     cheat_proof_facts(auction_verifier, proof_facts.span(), CheatSpan::TargetCalls(1));
@@ -2683,6 +2834,37 @@ fn privacy_deposit_bridge_registers_privacy_funded_execution_notes() {
 }
 
 #[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_activation_without_token_custody() {
+    let admin = as_address(0x111);
+    let commitment_registry = deploy_commitment_registry(admin);
+    let token_address = deploy_mock_erc20();
+    let privacy_deposit_bridge = deploy_privacy_deposit_bridge(admin, commitment_registry);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
+    let registry = ICommitmentRegistryDispatcher { contract_address: commitment_registry };
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    authorize_privacy_deposit_bridge(
+        admin, commitment_registry, as_address(0), privacy_deposit_bridge,
+    );
+    start_cheat_caller_address(privacy_deposit_bridge, admin);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    bridge.set_auction_verifier(auction_verifier);
+    stop_cheat_caller_address(privacy_deposit_bridge);
+    start_cheat_caller_address(commitment_registry, admin);
+    registry.set_auction_verifier(auction_verifier);
+    stop_cheat_caller_address(commitment_registry);
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_deposit_root_registrar(commitment_registry);
+    stop_cheat_caller_address(auction_verifier);
+
+    start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
+    privacy_invoke_single(bridge, FUNDING_COMMITMENT, deposit_root(), ENCRYPTED_NOTE_ACTIVATION);
+}
+
+#[test]
 fn privacy_deposit_bridge_registers_batched_privacy_funded_notes() {
     let admin = as_address(0x111);
     let (_, _, privacy_deposit_bridge, registry, bridge, verifier) = setup_privacy_activation_stack(
@@ -2694,6 +2876,10 @@ fn privacy_deposit_bridge_registers_batched_privacy_funded_notes() {
             array![FUNDING_COMMITMENT, SECOND_FUNDING_COMMITMENT].span(),
             array![deposit_root(), second_deposit_root()].span(),
             array![ENCRYPTED_NOTE_ACTIVATION, SECOND_ENCRYPTED_NOTE_ACTIVATION].span(),
+            array![NOTE_COMMITMENT, SECOND_NOTE_COMMITMENT].span(),
+            array![ASSET_ID, ASSET_ID].span(),
+            array![DEPOSIT_AMOUNT, SECOND_DEPOSIT_AMOUNT].span(),
+            array![DEPOSIT_WITHDRAW_AUTHORITY, SECOND_DEPOSIT_WITHDRAW_AUTHORITY].span(),
         );
     assert(open_deposits.len() == 0, 'OPEN_DEPOSITS_RETURNED');
     stop_cheat_caller_address(privacy_deposit_bridge);
@@ -2732,6 +2918,10 @@ fn privacy_deposit_bridge_rejects_duplicate_batch_funding_commitments() {
             array![FUNDING_COMMITMENT, FUNDING_COMMITMENT].span(),
             array![deposit_root(), second_deposit_root()].span(),
             array![ENCRYPTED_NOTE_ACTIVATION, SECOND_ENCRYPTED_NOTE_ACTIVATION].span(),
+            array![NOTE_COMMITMENT, SECOND_NOTE_COMMITMENT].span(),
+            array![ASSET_ID, ASSET_ID].span(),
+            array![DEPOSIT_AMOUNT, SECOND_DEPOSIT_AMOUNT].span(),
+            array![DEPOSIT_WITHDRAW_AUTHORITY, SECOND_DEPOSIT_WITHDRAW_AUTHORITY].span(),
         );
 }
 
@@ -2746,6 +2936,10 @@ fn privacy_deposit_bridge_rejects_duplicate_batch_deposit_roots() {
             array![FUNDING_COMMITMENT, SECOND_FUNDING_COMMITMENT].span(),
             array![deposit_root(), deposit_root()].span(),
             array![ENCRYPTED_NOTE_ACTIVATION, SECOND_ENCRYPTED_NOTE_ACTIVATION].span(),
+            array![NOTE_COMMITMENT, SECOND_NOTE_COMMITMENT].span(),
+            array![ASSET_ID, ASSET_ID].span(),
+            array![DEPOSIT_AMOUNT, SECOND_DEPOSIT_AMOUNT].span(),
+            array![DEPOSIT_WITHDRAW_AUTHORITY, SECOND_DEPOSIT_WITHDRAW_AUTHORITY].span(),
         );
 }
 
@@ -3814,6 +4008,24 @@ fn auction_verifier_rejects_truncated_aggregate_calldata() {
 
 #[test]
 #[should_panic]
+fn auction_verifier_rejects_aggregate_count_larger_than_records() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+
+    let (single_inputs, _) = sample_single_aggregate_inputs(auction_verifier, verifier);
+    let mut inputs = array![2];
+    append_aggregate_record_copy(ref inputs, single_inputs.span());
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    verifier.submit_aggregate_settlements_with_proof_facts(inputs.span());
+}
+
+#[test]
+#[should_panic]
 fn auction_verifier_rejects_trailing_aggregate_calldata() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x222);
@@ -3989,6 +4201,16 @@ fn auction_verifier_rejects_aggregate_mismatched_fee_root() {
     let first_new_note_root = root_only_state_transition(0, 0);
     let first_new_fee_root = root_only_state_transition(0, empty_fee_root());
     submit_two_batch_aggregate_with_roots(first_new_note_root, 0, 0, 0, 0, first_new_fee_root, 0);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_reordered_aggregate_settlement_records() {
+    let first_new_note_root = root_only_state_transition(0, 0);
+    let first_new_fee_root = root_only_state_transition(0, empty_fee_root());
+    submit_two_batch_aggregate_with_roots_and_order(
+        first_new_note_root, 0, 0, 0, 0, first_new_fee_root, first_new_fee_root, true,
+    );
 }
 
 #[test]
@@ -4598,6 +4820,83 @@ fn auction_verifier_rejects_stale_fee_recipient_at_settlement() {
         TEST_RELAY_FEE_BPS,
         TEST_PROTOCOL_FEE_RECIPIENT + 1,
         TEST_RELAY_FEE_RECIPIENT,
+        output_bundle_ref,
+        0,
+        0,
+        0,
+        0,
+        0,
+        single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
+        empty_renewal_child_root(),
+        0,
+        0,
+        root_only_state_transition(0, 0),
+        0,
+        0,
+        root_only_state_transition(0, 0),
+    );
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_stale_relay_fee_recipient_at_settlement() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    let batch_id = 0x7e3;
+    let pair_id = 0x888;
+    let order_commitment_root = 0x111;
+    let encrypted_order_set_commitment = 0x222;
+    let clearing_price = 0_u128;
+    let output_bundle_ref = 0x999;
+
+    register_prepared_batch(
+        batch_registry,
+        admin,
+        auction_verifier,
+        batch_id,
+        pair_id,
+        1,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+    );
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+    let transcript_commitment = prepare_empty_root_transition(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        pair_id,
+        1,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        clearing_price,
+        output_bundle_ref,
+        0x349,
+    );
+    let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
+    let proof_facts = valid_proof_facts(99, proof_message_hash);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, proof_facts.span(), CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    submit_root_settlement_with_fee_config(
+        verifier,
+        batch_id,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        transcript_commitment,
+        native_settlement_message_hash(auction_verifier, transcript_commitment),
+        clearing_price,
+        TEST_PRICE_BASE_SCALE,
+        TEST_TAKER_FEE_BPS,
+        TEST_MAKER_FEE_BPS,
+        TEST_RELAY_FEE_BPS,
+        TEST_PROTOCOL_FEE_RECIPIENT,
+        TEST_RELAY_FEE_RECIPIENT + 1,
         output_bundle_ref,
         0,
         0,
@@ -5719,6 +6018,10 @@ fn auction_verifier_stages_strk20_open_note_withdrawal_with_nullifier_proof_fact
             array![].span(),
             array![exit_commitment, open_note_id, claim_r, claim_s].span(),
             array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
     stop_cheat_caller_address(bridge_address);
 
@@ -6593,7 +6896,13 @@ fn privacy_deposit_bridge_claims_staged_strk20_exit_to_open_note() {
     start_cheat_caller_address(bridge_address, privacy_pool);
     let open_deposits = bridge
         .privacy_invoke(
-            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+            array![].span(),
+            array![exit_commitment, open_note_id, r, s].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
     stop_cheat_caller_address(bridge_address);
 
@@ -6659,6 +6968,10 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_open_note() {
             array![].span(),
             array![exit_commitment, redirected_open_note_id, r, s].span(),
             array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
 }
 
@@ -6712,6 +7025,10 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_replay() {
             array![].span(),
             array![exit_commitment, first_open_note_id, first_r, first_s].span(),
             array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
     stop_cheat_caller_address(bridge_address);
 
@@ -6733,6 +7050,10 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_replay() {
         .privacy_invoke(
             array![].span(),
             array![exit_commitment, replay_open_note_id, replay_r, replay_s].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
             array![].span(),
         );
 }
@@ -6783,7 +7104,13 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_chain() {
     start_cheat_caller_address(bridge_address, privacy_pool);
     bridge
         .privacy_invoke(
-            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+            array![].span(),
+            array![exit_commitment, open_note_id, r, s].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
 }
 
@@ -6834,7 +7161,13 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_bridge_signature()
     start_cheat_caller_address(bridge_address, privacy_pool);
     bridge
         .privacy_invoke(
-            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+            array![].span(),
+            array![exit_commitment, open_note_id, r, s].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
 }
 
@@ -6885,7 +7218,13 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_verifier_signature
     start_cheat_caller_address(bridge_address, privacy_pool);
     bridge
         .privacy_invoke(
-            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+            array![].span(),
+            array![exit_commitment, open_note_id, r, s].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
 }
 
@@ -6936,7 +7275,13 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_token_signature() 
     start_cheat_caller_address(bridge_address, privacy_pool);
     bridge
         .privacy_invoke(
-            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+            array![].span(),
+            array![exit_commitment, open_note_id, r, s].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
 }
 
@@ -6986,7 +7331,13 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_asset_signature() 
     start_cheat_caller_address(bridge_address, privacy_pool);
     bridge
         .privacy_invoke(
-            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+            array![].span(),
+            array![exit_commitment, open_note_id, r, s].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
 }
 
@@ -7036,7 +7387,13 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_amount_signature()
     start_cheat_caller_address(bridge_address, privacy_pool);
     bridge
         .privacy_invoke(
-            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+            array![].span(),
+            array![exit_commitment, open_note_id, r, s].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
 }
 
@@ -7110,7 +7467,13 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_from_wrong_pool_caller() {
     start_cheat_caller_address(bridge_address, as_address(0x333));
     bridge
         .privacy_invoke(
-            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+            array![].span(),
+            array![exit_commitment, open_note_id, r, s].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
 }
 
@@ -7163,7 +7526,13 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_short_transfer_from() {
     start_cheat_caller_address(bridge_address, privacy_pool);
     let open_deposits = bridge
         .privacy_invoke(
-            array![].span(), array![exit_commitment, open_note_id, r, s].span(), array![].span(),
+            array![].span(),
+            array![exit_commitment, open_note_id, r, s].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
     stop_cheat_caller_address(bridge_address);
 

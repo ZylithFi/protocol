@@ -21,12 +21,20 @@ pub trait IPrivacyDepositBridge<TContractState> {
         funding_commitments: Span<felt252>,
         deposit_roots: Span<felt252>,
         encrypted_note_activations: Span<felt252>,
+        note_commitments: Span<felt252>,
+        asset_ids: Span<felt252>,
+        amounts: Span<u128>,
+        withdraw_authorities: Span<felt252>,
     ) -> Span<OpenNoteDeposit>;
     fn register_funding_activation(
         ref self: TContractState,
         funding_commitments: Span<felt252>,
         deposit_roots: Span<felt252>,
         encrypted_note_activations: Span<felt252>,
+        note_commitments: Span<felt252>,
+        asset_ids: Span<felt252>,
+        amounts: Span<u128>,
+        withdraw_authorities: Span<felt252>,
     );
     fn withdraw_verified_note(
         ref self: TContractState,
@@ -44,6 +52,7 @@ pub trait IPrivacyDepositBridge<TContractState> {
         exit_commitment: felt252,
     );
     fn strk20_exit_claimed_open_note_id(self: @TContractState, exit_commitment: felt252) -> felt252;
+    fn escrowed_asset_amount(self: @TContractState, asset_id: felt252) -> u128;
     fn asset_token(self: @TContractState, asset_id: felt252) -> ContractAddress;
     fn is_asset_supported(self: @TContractState, asset_id: felt252) -> bool;
     fn withdrawal_recipient(self: @TContractState, note_commitment: felt252) -> ContractAddress;
@@ -75,6 +84,8 @@ pub mod PrivacyDepositBridge {
     use zylith_protocol::types::WithdrawalRecord;
 
     const STRK20_EXIT_CLAIM_DOMAIN: felt252 = 0x7a796c6974685f7374726b32305f636c61696d5f7631;
+    const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
+        0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
 
     #[storage]
     struct Storage {
@@ -96,6 +107,7 @@ pub mod PrivacyDepositBridge {
         strk20_exit_note_commitments: Map<felt252, felt252>,
         strk20_exit_withdraw_authorities: Map<felt252, felt252>,
         strk20_exit_claimed_open_note_ids: Map<felt252, felt252>,
+        escrowed_asset_amounts: Map<felt252, u128>,
     }
 
     #[constructor]
@@ -157,9 +169,17 @@ pub mod PrivacyDepositBridge {
             funding_commitments: Span<felt252>,
             deposit_roots: Span<felt252>,
             encrypted_note_activations: Span<felt252>,
+            note_commitments: Span<felt252>,
+            asset_ids: Span<felt252>,
+            amounts: Span<u128>,
+            withdraw_authorities: Span<felt252>,
         ) -> Span<super::OpenNoteDeposit> {
             let mut open_note_deposits: Array<super::OpenNoteDeposit> = array![];
             if funding_commitments.len() == 0 {
+                assert(note_commitments.len() == 0, 'BAD_EXIT_CLAIM');
+                assert(asset_ids.len() == 0, 'BAD_EXIT_CLAIM');
+                assert(amounts.len() == 0, 'BAD_EXIT_CLAIM');
+                assert(withdraw_authorities.len() == 0, 'BAD_EXIT_CLAIM');
                 open_note_deposits
                     .append(
                         claim_strk20_exit_internal(
@@ -168,7 +188,14 @@ pub mod PrivacyDepositBridge {
                     );
             } else {
                 register_funding_activation_internal(
-                    ref self, funding_commitments, deposit_roots, encrypted_note_activations,
+                    ref self,
+                    funding_commitments,
+                    deposit_roots,
+                    encrypted_note_activations,
+                    note_commitments,
+                    asset_ids,
+                    amounts,
+                    withdraw_authorities,
                 );
             }
             open_note_deposits.span()
@@ -179,9 +206,20 @@ pub mod PrivacyDepositBridge {
             funding_commitments: Span<felt252>,
             deposit_roots: Span<felt252>,
             encrypted_note_activations: Span<felt252>,
+            note_commitments: Span<felt252>,
+            asset_ids: Span<felt252>,
+            amounts: Span<u128>,
+            withdraw_authorities: Span<felt252>,
         ) {
             register_funding_activation_internal(
-                ref self, funding_commitments, deposit_roots, encrypted_note_activations,
+                ref self,
+                funding_commitments,
+                deposit_roots,
+                encrypted_note_activations,
+                note_commitments,
+                asset_ids,
+                amounts,
+                withdraw_authorities,
             );
         }
 
@@ -200,6 +238,7 @@ pub mod PrivacyDepositBridge {
             assert(self.withdrawal_recipients.read(note_commitment).is_zero(), 'NOTE_WITHDRAWN');
             let token_address = self.asset_tokens.read(asset_id);
             assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
+            let escrowed = self.escrowed_asset_amounts.read(asset_id);
 
             self.withdrawal_recipients.write(note_commitment, recipient);
 
@@ -221,6 +260,9 @@ pub mod PrivacyDepositBridge {
                 recipient_balance_after == recipient_balance_before + amount,
                 'TOKEN_TRANSFER_DELTA',
             );
+            if escrowed >= amount {
+                self.escrowed_asset_amounts.write(asset_id, escrowed - amount);
+            }
         }
 
         fn stage_verified_note_strk20_exit(
@@ -253,6 +295,10 @@ pub mod PrivacyDepositBridge {
             self: @ContractState, exit_commitment: felt252,
         ) -> felt252 {
             self.strk20_exit_claimed_open_note_ids.read(exit_commitment)
+        }
+
+        fn escrowed_asset_amount(self: @ContractState, asset_id: felt252) -> u128 {
+            self.escrowed_asset_amounts.read(asset_id)
         }
 
         fn asset_token(self: @ContractState, asset_id: felt252) -> ContractAddress {
@@ -314,6 +360,10 @@ pub mod PrivacyDepositBridge {
         funding_commitments: Span<felt252>,
         deposit_roots: Span<felt252>,
         encrypted_note_activations: Span<felt252>,
+        note_commitments: Span<felt252>,
+        asset_ids: Span<felt252>,
+        amounts: Span<u128>,
+        withdraw_authorities: Span<felt252>,
     ) {
         assert(get_caller_address() == self.privacy_pool.read(), 'BAD_PRIVACY_CALLER');
         let len = funding_commitments.len();
@@ -321,6 +371,10 @@ pub mod PrivacyDepositBridge {
         assert(len <= 16, 'TOO_MANY_ACTIVATIONS');
         assert(deposit_roots.len() == len, 'BAD_ACTIVATION_LEN');
         assert(encrypted_note_activations.len() == len, 'BAD_ACTIVATION_LEN');
+        assert(note_commitments.len() == len, 'BAD_ACTIVATION_LEN');
+        assert(asset_ids.len() == len, 'BAD_ACTIVATION_LEN');
+        assert(amounts.len() == len, 'BAD_ACTIVATION_LEN');
+        assert(withdraw_authorities.len() == len, 'BAD_ACTIVATION_LEN');
         let commitment_registry = ICommitmentRegistryDispatcher {
             contract_address: self.commitment_registry.read(),
         };
@@ -332,9 +386,25 @@ pub mod PrivacyDepositBridge {
             let funding_commitment = *funding_commitments.at(index);
             let deposit_root = *deposit_roots.at(index);
             let encrypted_note_activation = *encrypted_note_activations.at(index);
+            let note_commitment = *note_commitments.at(index);
+            let asset_id = *asset_ids.at(index);
+            let amount = *amounts.at(index);
+            let withdraw_authority = *withdraw_authorities.at(index);
             assert(funding_commitment != 0, 'BAD_FUNDING');
             assert(deposit_root != 0, 'BAD_DEPOSIT_ROOT');
             assert(encrypted_note_activation != 0, 'BAD_ACTIVATION');
+            assert(note_commitment != 0, 'BAD_COMMITMENT');
+            assert(asset_id != 0, 'BAD_ASSET');
+            assert(amount > 0, 'BAD_AMOUNT');
+            assert(withdraw_authority != 0, 'BAD_AUTHORITY');
+            assert(
+                deposit_root == output_note_leaf(
+                    note_commitment, asset_id, amount, withdraw_authority,
+                ),
+                'DEPOSIT_ROOT_MISMATCH',
+            );
+            let token_address = self.asset_tokens.read(asset_id);
+            assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
             let mut duplicate_index = index + 1;
             loop {
                 if duplicate_index == len {
@@ -345,8 +415,14 @@ pub mod PrivacyDepositBridge {
                     'DUPLICATE_FUNDING',
                 );
                 assert(deposit_root != *deposit_roots.at(duplicate_index), 'DUPLICATE_ROOT');
+                assert(note_commitment != *note_commitments.at(duplicate_index), 'DUPLICATE_NOTE');
                 duplicate_index += 1;
             }
+            let escrowed = self.escrowed_asset_amounts.read(asset_id);
+            let token = IERC20Dispatcher { contract_address: token_address };
+            let bridge_balance = checked_token_balance(token, get_contract_address());
+            assert(bridge_balance >= escrowed + amount, 'TOKEN_CUSTODY_LOW');
+            self.escrowed_asset_amounts.write(asset_id, escrowed + amount);
             commitment_registry
                 .register_funding_activation(
                     funding_commitment, deposit_root, encrypted_note_activation,
@@ -379,6 +455,7 @@ pub mod PrivacyDepositBridge {
         let withdraw_authority = self.strk20_exit_withdraw_authorities.read(exit_commitment);
         let token_address = self.asset_tokens.read(asset_id);
         assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
+        let escrowed = self.escrowed_asset_amounts.read(asset_id);
         let privacy_pool = self.privacy_pool.read();
         assert(!privacy_pool.is_zero(), 'BAD_PRIVACY_POOL');
         let auction_verifier = self.auction_verifier.read();
@@ -403,6 +480,9 @@ pub mod PrivacyDepositBridge {
 
         self.strk20_exit_amounts.write(exit_commitment, 0);
         self.strk20_exit_claimed_open_note_ids.write(exit_commitment, open_note_id);
+        if escrowed >= amount {
+            self.escrowed_asset_amounts.write(asset_id, escrowed - amount);
+        }
 
         let token = IERC20Dispatcher { contract_address: token_address };
         let bridge_balance = checked_token_balance(token, get_contract_address());
@@ -421,6 +501,15 @@ pub mod PrivacyDepositBridge {
         let balance = token.balance_of(owner);
         assert(balance.high == 0, 'TOKEN_BALANCE_HIGH');
         balance.low
+    }
+
+    fn output_note_leaf(
+        note_commitment: felt252, asset_id: felt252, amount: u128, withdraw_authority: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(OUTPUT_NOTE_LEAF_DOMAIN, note_commitment);
+        state = poseidon_hash2(state, asset_id);
+        state = poseidon_hash2(state, amount.into());
+        poseidon_hash2(state, withdraw_authority)
     }
 
     fn assert_admin(self: @ContractState) {
