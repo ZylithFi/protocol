@@ -105,6 +105,7 @@ pub mod PrivacyDepositBridge {
         strk20_exit_asset_ids: Map<felt252, felt252>,
         strk20_exit_amounts: Map<felt252, u128>,
         strk20_exit_note_commitments: Map<felt252, felt252>,
+        strk20_exit_commitments_by_note: Map<felt252, felt252>,
         strk20_exit_withdraw_authorities: Map<felt252, felt252>,
         strk20_exit_claimed_open_note_ids: Map<felt252, felt252>,
         escrowed_asset_amounts: Map<felt252, u128>,
@@ -236,9 +237,13 @@ pub mod PrivacyDepositBridge {
             assert(note_commitment != 0, 'BAD_COMMITMENT');
             assert(!recipient.is_zero(), 'BAD_RECIPIENT');
             assert(self.withdrawal_recipients.read(note_commitment).is_zero(), 'NOTE_WITHDRAWN');
+            assert(
+                self.strk20_exit_commitments_by_note.read(note_commitment) == 0, 'NOTE_WITHDRAWN',
+            );
             let token_address = self.asset_tokens.read(asset_id);
             assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
             let escrowed = self.escrowed_asset_amounts.read(asset_id);
+            assert(escrowed >= amount, 'ESCROW_LOW');
 
             self.withdrawal_recipients.write(note_commitment, recipient);
 
@@ -260,9 +265,7 @@ pub mod PrivacyDepositBridge {
                 recipient_balance_after == recipient_balance_before + amount,
                 'TOKEN_TRANSFER_DELTA',
             );
-            if escrowed >= amount {
-                self.escrowed_asset_amounts.write(asset_id, escrowed - amount);
-            }
+            self.escrowed_asset_amounts.write(asset_id, escrowed - amount);
         }
 
         fn stage_verified_note_strk20_exit(
@@ -282,13 +285,20 @@ pub mod PrivacyDepositBridge {
             assert(self.strk20_exit_amounts.read(exit_commitment) == 0, 'EXIT_EXISTS');
             assert(self.strk20_exit_note_commitments.read(exit_commitment) == 0, 'EXIT_EXISTS');
             assert(self.withdrawal_recipients.read(note_commitment).is_zero(), 'NOTE_WITHDRAWN');
+            assert(
+                self.strk20_exit_commitments_by_note.read(note_commitment) == 0, 'NOTE_WITHDRAWN',
+            );
             let token_address = self.asset_tokens.read(asset_id);
             assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
+            let escrowed = self.escrowed_asset_amounts.read(asset_id);
+            assert(escrowed >= amount, 'ESCROW_LOW');
 
             self.strk20_exit_asset_ids.write(exit_commitment, asset_id);
             self.strk20_exit_amounts.write(exit_commitment, amount);
             self.strk20_exit_note_commitments.write(exit_commitment, note_commitment);
+            self.strk20_exit_commitments_by_note.write(note_commitment, exit_commitment);
             self.strk20_exit_withdraw_authorities.write(exit_commitment, withdraw_authority);
+            self.escrowed_asset_amounts.write(asset_id, escrowed - amount);
         }
 
         fn strk20_exit_claimed_open_note_id(
@@ -455,7 +465,6 @@ pub mod PrivacyDepositBridge {
         let withdraw_authority = self.strk20_exit_withdraw_authorities.read(exit_commitment);
         let token_address = self.asset_tokens.read(asset_id);
         assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
-        let escrowed = self.escrowed_asset_amounts.read(asset_id);
         let privacy_pool = self.privacy_pool.read();
         assert(!privacy_pool.is_zero(), 'BAD_PRIVACY_POOL');
         let auction_verifier = self.auction_verifier.read();
@@ -480,9 +489,6 @@ pub mod PrivacyDepositBridge {
 
         self.strk20_exit_amounts.write(exit_commitment, 0);
         self.strk20_exit_claimed_open_note_ids.write(exit_commitment, open_note_id);
-        if escrowed >= amount {
-            self.escrowed_asset_amounts.write(asset_id, escrowed - amount);
-        }
 
         let token = IERC20Dispatcher { contract_address: token_address };
         let bridge_balance = checked_token_balance(token, get_contract_address());

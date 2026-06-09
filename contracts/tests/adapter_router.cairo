@@ -791,6 +791,46 @@ fn privacy_invoke_single_with_note(
     assert(open_deposits.len() == 0, 'OPEN_DEPOSITS_RETURNED');
 }
 
+fn seed_bridge_escrow(
+    admin: ContractAddress,
+    privacy_pool: ContractAddress,
+    commitment_registry: ContractAddress,
+    bridge_address: ContractAddress,
+    bridge: IPrivacyDepositBridgeDispatcher,
+    funding_commitment: felt252,
+    note_commitment: felt252,
+    amount: u128,
+) {
+    let registry = ICommitmentRegistryDispatcher { contract_address: commitment_registry };
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let activation_verifier = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: activation_verifier };
+
+    start_cheat_caller_address(activation_verifier, admin);
+    verifier.set_deposit_root_registrar(commitment_registry);
+    stop_cheat_caller_address(activation_verifier);
+
+    start_cheat_caller_address(commitment_registry, admin);
+    registry.set_privacy_deposit_bridge(bridge_address);
+    registry.set_auction_verifier(activation_verifier);
+    stop_cheat_caller_address(commitment_registry);
+
+    let root = output_note_leaf(note_commitment, ASSET_ID, amount, DEPOSIT_WITHDRAW_AUTHORITY);
+    start_cheat_caller_address(bridge_address, privacy_pool);
+    let open_deposits = bridge
+        .privacy_invoke(
+            array![funding_commitment].span(),
+            array![root].span(),
+            array![ENCRYPTED_NOTE_ACTIVATION + funding_commitment].span(),
+            array![note_commitment].span(),
+            array![ASSET_ID].span(),
+            array![amount].span(),
+            array![DEPOSIT_WITHDRAW_AUTHORITY].span(),
+        );
+    stop_cheat_caller_address(bridge_address);
+    assert(open_deposits.len() == 0, 'OPEN_DEPOSITS_RETURNED');
+}
+
 fn deposit_root() -> felt252 {
     output_note_leaf(NOTE_COMMITMENT, ASSET_ID, DEPOSIT_AMOUNT, DEPOSIT_WITHDRAW_AUTHORITY)
 }
@@ -1274,6 +1314,16 @@ fn settle_single_output_note_for_strk20_exit(
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x80f,
+        output_amount,
+    );
 
     start_cheat_caller_address(batch_registry, admin);
     batches.set_auction_verifier(auction_verifier);
@@ -2940,6 +2990,118 @@ fn privacy_deposit_bridge_rejects_duplicate_batch_deposit_roots() {
             array![ASSET_ID, ASSET_ID].span(),
             array![DEPOSIT_AMOUNT, SECOND_DEPOSIT_AMOUNT].span(),
             array![DEPOSIT_WITHDRAW_AUTHORITY, SECOND_DEPOSIT_WITHDRAW_AUTHORITY].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_duplicate_batch_note_commitments() {
+    let admin = as_address(0x111);
+    let (_, _, privacy_deposit_bridge, _, bridge, _) = setup_privacy_activation_stack(admin);
+    start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
+    bridge
+        .privacy_invoke(
+            array![FUNDING_COMMITMENT, SECOND_FUNDING_COMMITMENT].span(),
+            array![deposit_root(), second_deposit_root()].span(),
+            array![ENCRYPTED_NOTE_ACTIVATION, SECOND_ENCRYPTED_NOTE_ACTIVATION].span(),
+            array![NOTE_COMMITMENT, NOTE_COMMITMENT].span(),
+            array![ASSET_ID, ASSET_ID].span(),
+            array![DEPOSIT_AMOUNT, SECOND_DEPOSIT_AMOUNT].span(),
+            array![DEPOSIT_WITHDRAW_AUTHORITY, SECOND_DEPOSIT_WITHDRAW_AUTHORITY].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_deposit_root_mismatch() {
+    let admin = as_address(0x111);
+    let (_, _, privacy_deposit_bridge, _, bridge, _) = setup_privacy_activation_stack(admin);
+    start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
+    bridge
+        .privacy_invoke(
+            array![FUNDING_COMMITMENT].span(),
+            array![second_deposit_root()].span(),
+            array![ENCRYPTED_NOTE_ACTIVATION].span(),
+            array![NOTE_COMMITMENT].span(),
+            array![ASSET_ID].span(),
+            array![DEPOSIT_AMOUNT].span(),
+            array![DEPOSIT_WITHDRAW_AUTHORITY].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_mismatched_activation_lengths() {
+    let admin = as_address(0x111);
+    let (_, _, privacy_deposit_bridge, _, bridge, _) = setup_privacy_activation_stack(admin);
+    start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
+    bridge
+        .privacy_invoke(
+            array![FUNDING_COMMITMENT].span(),
+            array![].span(),
+            array![ENCRYPTED_NOTE_ACTIVATION].span(),
+            array![NOTE_COMMITMENT].span(),
+            array![ASSET_ID].span(),
+            array![DEPOSIT_AMOUNT].span(),
+            array![DEPOSIT_WITHDRAW_AUTHORITY].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_too_many_batched_activations() {
+    let admin = as_address(0x111);
+    let (_, _, privacy_deposit_bridge, _, bridge, _) = setup_privacy_activation_stack(admin);
+    start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
+    bridge
+        .privacy_invoke(
+            array![
+                0x100, 0x101, 0x102, 0x103, 0x104, 0x105, 0x106, 0x107, 0x108, 0x109, 0x10a, 0x10b,
+                0x10c, 0x10d, 0x10e, 0x10f, 0x110,
+            ]
+                .span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_mixed_exit_claim_payload() {
+    let admin = as_address(0x111);
+    let (_, _, privacy_deposit_bridge, _, bridge, _) = setup_privacy_activation_stack(admin);
+    start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
+    bridge
+        .privacy_invoke(
+            array![].span(),
+            array![0x1, 0x2, 0x3, 0x4].span(),
+            array![].span(),
+            array![NOTE_COMMITMENT].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_exit_claim_with_encrypted_activation_payload() {
+    let admin = as_address(0x111);
+    let (_, _, privacy_deposit_bridge, _, bridge, _) = setup_privacy_activation_stack(admin);
+    start_cheat_caller_address(privacy_deposit_bridge, as_address(PRIVACY_POOL));
+    bridge
+        .privacy_invoke(
+            array![].span(),
+            array![0x1, 0x2, 0x3, 0x4].span(),
+            array![ENCRYPTED_NOTE_ACTIVATION].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
 }
 
@@ -4986,6 +5148,291 @@ fn auction_verifier_rejects_wrong_fee_root_at_settlement() {
 }
 
 #[test]
+#[should_panic]
+fn auction_verifier_rejects_wrong_clearing_price_at_settlement() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    let batch_id = 0x7e4;
+    let pair_id = 0x888;
+    let order_commitment_root = 0x111;
+    let encrypted_order_set_commitment = 0x222;
+    let clearing_price = 4_u128;
+    let output_bundle_ref = 0x999;
+
+    register_prepared_batch(
+        batch_registry,
+        admin,
+        auction_verifier,
+        batch_id,
+        pair_id,
+        1,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+    );
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+    let transcript_commitment = prepare_empty_root_transition(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        pair_id,
+        1,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        clearing_price,
+        output_bundle_ref,
+        0x350,
+    );
+    let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
+    let proof_facts = valid_proof_facts(99, proof_message_hash);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, proof_facts.span(), CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    submit_root_settlement(
+        verifier,
+        batch_id,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        transcript_commitment,
+        native_settlement_message_hash(auction_verifier, transcript_commitment),
+        clearing_price + 1,
+        output_bundle_ref,
+        0,
+        0,
+        0,
+        0,
+        0,
+        single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
+        empty_renewal_child_root(),
+        0,
+        0,
+        root_only_state_transition(0, 0),
+        0,
+        0,
+        root_only_state_transition(0, 0),
+    );
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_wrong_output_bundle_ref_at_settlement() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    let batch_id = 0x7e5;
+    let pair_id = 0x888;
+    let order_commitment_root = 0x111;
+    let encrypted_order_set_commitment = 0x222;
+    let clearing_price = 4_u128;
+    let output_bundle_ref = 0x999;
+
+    register_prepared_batch(
+        batch_registry,
+        admin,
+        auction_verifier,
+        batch_id,
+        pair_id,
+        1,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+    );
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+    let transcript_commitment = prepare_empty_root_transition(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        pair_id,
+        1,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        clearing_price,
+        output_bundle_ref,
+        0x351,
+    );
+    let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
+    let proof_facts = valid_proof_facts(99, proof_message_hash);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, proof_facts.span(), CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    submit_root_settlement(
+        verifier,
+        batch_id,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        transcript_commitment,
+        native_settlement_message_hash(auction_verifier, transcript_commitment),
+        clearing_price,
+        output_bundle_ref + 1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
+        empty_renewal_child_root(),
+        0,
+        0,
+        root_only_state_transition(0, 0),
+        0,
+        0,
+        root_only_state_transition(0, 0),
+    );
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_transcript_bound_to_wrong_pair_id() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    let batch_id = 0x7e6;
+    let pair_id = 0x888;
+    let order_commitment_root = 0x111;
+    let encrypted_order_set_commitment = 0x222;
+    let clearing_price = 4_u128;
+    let output_bundle_ref = 0x999;
+
+    register_prepared_batch(
+        batch_registry,
+        admin,
+        auction_verifier,
+        batch_id,
+        pair_id,
+        1,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+    );
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+    let transcript_commitment = prepare_empty_root_transition(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        pair_id + 1,
+        1,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        clearing_price,
+        output_bundle_ref,
+        0x352,
+    );
+    let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
+    let proof_facts = valid_proof_facts(99, proof_message_hash);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, proof_facts.span(), CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    submit_root_settlement(
+        verifier,
+        batch_id,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        transcript_commitment,
+        native_settlement_message_hash(auction_verifier, transcript_commitment),
+        clearing_price,
+        output_bundle_ref,
+        0,
+        0,
+        0,
+        0,
+        0,
+        single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
+        empty_renewal_child_root(),
+        0,
+        0,
+        root_only_state_transition(0, 0),
+        0,
+        0,
+        root_only_state_transition(0, 0),
+    );
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_transcript_bound_to_wrong_epoch_id() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    let batch_id = 0x7e7;
+    let pair_id = 0x888;
+    let epoch_id = 1_u64;
+    let order_commitment_root = 0x111;
+    let encrypted_order_set_commitment = 0x222;
+    let clearing_price = 4_u128;
+    let output_bundle_ref = 0x999;
+
+    register_prepared_batch(
+        batch_registry,
+        admin,
+        auction_verifier,
+        batch_id,
+        pair_id,
+        epoch_id,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+    );
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+    let transcript_commitment = prepare_empty_root_transition(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        pair_id,
+        epoch_id + 1,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        clearing_price,
+        output_bundle_ref,
+        0x353,
+    );
+    let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
+    let proof_facts = valid_proof_facts(99, proof_message_hash);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, proof_facts.span(), CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    submit_root_settlement(
+        verifier,
+        batch_id,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        transcript_commitment,
+        native_settlement_message_hash(auction_verifier, transcript_commitment),
+        clearing_price,
+        output_bundle_ref,
+        0,
+        0,
+        0,
+        0,
+        0,
+        single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
+        empty_renewal_child_root(),
+        0,
+        0,
+        root_only_state_transition(0, 0),
+        0,
+        0,
+        root_only_state_transition(0, 0),
+    );
+}
+
+#[test]
 fn auction_verifier_accepts_permissionless_note_consolidation_proof_facts() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x222);
@@ -6041,6 +6488,87 @@ fn auction_verifier_stages_strk20_open_note_withdrawal_with_nullifier_proof_fact
 
 #[test]
 #[should_panic]
+fn auction_verifier_rejects_strk20_withdrawal_signature_for_wrong_exit_commitment() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x333);
+    let batch_id = 0x782a;
+    let pair_id = 0x888;
+    let output_note_commitment = 0xabc20a;
+    let output_amount = 200_u128;
+    let exit_commitment = 0xeee20a;
+    let signed_exit_commitment = 0xeee20b;
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let withdraw_authority = key_pair.public_key;
+    let (_, bridge_address, _, auction_verifier) = settle_single_output_note_for_strk20_exit(
+        admin,
+        settlement_account,
+        batch_id,
+        pair_id,
+        output_note_commitment,
+        output_amount,
+        withdraw_authority,
+    );
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    let message = output_strk20_exit_message_hash_for_verifier(
+        auction_verifier,
+        bridge_address,
+        TEST_CHAIN_ID,
+        batch_id,
+        output_note_commitment,
+        ASSET_ID,
+        output_amount,
+        signed_exit_commitment,
+    );
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, message).unwrap();
+    let path = array![];
+    let directions = array![];
+    let consumed_nullifiers = array![0xdeadbeef];
+    let consumed_nullifier_root = single_field_root(
+        CONSUMED_NULLIFIER_ROOT_DOMAIN, consumed_nullifiers.span(),
+    );
+    let new_nullifier_root = 0x5678;
+    let withdrawal_commitment = public_note_withdrawal_commitment(
+        batch_id,
+        output_note_commitment,
+        ASSET_ID,
+        output_amount,
+        withdraw_authority,
+        0,
+        consumed_nullifier_root,
+        new_nullifier_root,
+    );
+    let withdrawal_statement = native_withdrawal_message_hash(
+        auction_verifier, withdrawal_commitment,
+    );
+    let withdrawal_proof_message = withdrawal_proof_message_hash(
+        auction_verifier, withdrawal_statement,
+    );
+    let withdrawal_proof_facts = valid_proof_facts(99, withdrawal_proof_message);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_chain_id(auction_verifier, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, withdrawal_proof_facts.span(), CheatSpan::TargetCalls(1));
+    verifier
+        .withdraw_settlement_output_to_strk20_with_proof_facts(
+            batch_id,
+            withdrawal_statement,
+            0,
+            consumed_nullifier_root,
+            new_nullifier_root,
+            output_note_commitment,
+            ASSET_ID,
+            output_amount,
+            withdraw_authority,
+            path.span(),
+            directions.span(),
+            r,
+            s,
+            exit_commitment,
+        );
+}
+
+#[test]
+#[should_panic]
 fn auction_verifier_rejects_normal_withdrawal_after_strk20_exit_stage() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
@@ -6872,6 +7400,16 @@ fn privacy_deposit_bridge_claims_staged_strk20_exit_to_open_note() {
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x900,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge
@@ -6941,6 +7479,16 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_open_note() {
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x901,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge
@@ -6998,6 +7546,16 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_replay() {
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x902,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge
@@ -7080,6 +7638,16 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_chain() {
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x903,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge
@@ -7137,6 +7705,16 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_bridge_signature()
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x904,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge
@@ -7194,6 +7772,16 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_verifier_signature
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x905,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge
@@ -7251,6 +7839,16 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_token_signature() 
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x906,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge
@@ -7307,6 +7905,16 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_asset_signature() 
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x907,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge
@@ -7363,6 +7971,16 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_for_wrong_amount_signature()
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x908,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge
@@ -7423,6 +8041,59 @@ fn privacy_deposit_bridge_rejects_strk20_exit_stage_for_unsupported_asset() {
 
 #[test]
 #[should_panic]
+fn privacy_deposit_bridge_rejects_strk20_exit_stage_without_tracked_escrow() {
+    let admin = as_address(0x111);
+    let auction_verifier = as_address(0x222);
+    let privacy_pool = deploy_mock_privacy_pool();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let token_address = deploy_mock_erc20();
+    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let token = IMockERC20Dispatcher { contract_address: token_address };
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+
+    token.mint(bridge_address, as_u256(500));
+    start_cheat_caller_address(bridge_address, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(bridge_address);
+
+    start_cheat_caller_address(bridge_address, auction_verifier);
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, NOTE_COMMITMENT + 0x209, key_pair.public_key, 0xeee009,
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_verified_withdrawal_without_tracked_escrow() {
+    let admin = as_address(0x111);
+    let auction_verifier = as_address(0x222);
+    let recipient = as_address(0x333);
+    let privacy_pool = deploy_mock_privacy_pool();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let token_address = deploy_mock_erc20();
+    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let token = IMockERC20Dispatcher { contract_address: token_address };
+
+    token.mint(bridge_address, as_u256(500));
+    start_cheat_caller_address(bridge_address, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(bridge_address);
+
+    start_cheat_caller_address(bridge_address, auction_verifier);
+    bridge.withdraw_verified_note(ASSET_ID, 200, NOTE_COMMITMENT + 0x20d, recipient);
+}
+
+#[test]
+#[should_panic]
 fn privacy_deposit_bridge_rejects_strk20_exit_claim_from_wrong_pool_caller() {
     let admin = as_address(0x111);
     let auction_verifier = as_address(0x222);
@@ -7443,6 +8114,16 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_from_wrong_pool_caller() {
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x909,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge
@@ -7502,6 +8183,16 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_short_transfer_from() {
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x90a,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge
@@ -7567,6 +8258,16 @@ fn privacy_deposit_bridge_rejects_strk20_exit_stage_after_normal_withdrawal() {
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x90b,
+        200,
+    );
 
     start_cheat_caller_address(bridge_address, auction_verifier);
     bridge.withdraw_verified_note(ASSET_ID, 200, note_commitment, recipient);
@@ -7574,6 +8275,90 @@ fn privacy_deposit_bridge_rejects_strk20_exit_stage_after_normal_withdrawal() {
         .stage_verified_note_strk20_exit(
             ASSET_ID, 200, note_commitment, key_pair.public_key, 0xeee007,
         );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_duplicate_strk20_exit_stage_for_same_note() {
+    let admin = as_address(0x111);
+    let auction_verifier = as_address(0x222);
+    let privacy_pool = deploy_mock_privacy_pool();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let token_address = deploy_mock_erc20();
+    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let token = IMockERC20Dispatcher { contract_address: token_address };
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let note_commitment = NOTE_COMMITMENT + 0x207;
+
+    token.mint(bridge_address, as_u256(500));
+    start_cheat_caller_address(bridge_address, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x90c,
+        200,
+    );
+
+    start_cheat_caller_address(bridge_address, auction_verifier);
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, note_commitment, key_pair.public_key, 0xeee008,
+        );
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, note_commitment, key_pair.public_key, 0xeee009,
+        );
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_rejects_normal_withdrawal_after_strk20_exit_stage() {
+    let admin = as_address(0x111);
+    let auction_verifier = as_address(0x222);
+    let recipient = as_address(0x333);
+    let privacy_pool = deploy_mock_privacy_pool();
+    let commitment_registry = deploy_commitment_registry(admin);
+    let token_address = deploy_mock_erc20();
+    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let token = IMockERC20Dispatcher { contract_address: token_address };
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let note_commitment = NOTE_COMMITMENT + 0x208;
+
+    token.mint(bridge_address, as_u256(500));
+    start_cheat_caller_address(bridge_address, admin);
+    bridge.set_auction_verifier(auction_verifier);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(bridge_address);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        bridge_address,
+        bridge,
+        FUNDING_COMMITMENT,
+        NOTE_COMMITMENT + 0x90d,
+        200,
+    );
+
+    start_cheat_caller_address(bridge_address, auction_verifier);
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, note_commitment, key_pair.public_key, 0xeee00a,
+        );
+    bridge.withdraw_verified_note(ASSET_ID, 200, note_commitment, recipient);
 }
 
 #[test]
