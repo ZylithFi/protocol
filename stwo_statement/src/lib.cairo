@@ -87,6 +87,8 @@ const ORDER_COMMITMENT_DOMAIN: felt252 =
     0x7cd5dda33869da7da5ccb3afbc70fc766fb0cbe3d560c2bfb3bdbab8a4b844d;
 const MAKER_CURVE_DOMAIN: felt252 =
     0x2bb800aa603725e7b3e29bfbb5ba435c441a04b05c97196f83c523417c2e7f0;
+const MANAGED_MAKER_POLICY_DOMAIN: felt252 =
+    0x3b74119f54e15bd9e0f5dbe415d8a3cd7ba5df59ac462a1369ecbb6b7daf5fd;
 const PUBLIC_SETTLEMENT_DOMAIN: felt252 =
     0x0283f626418aa97a073f64500f7e35dd8bf7c01ff8611917c3c38e5be92eb205;
 const PUBLIC_NOTE_CONSOLIDATION_DOMAIN: felt252 =
@@ -1672,6 +1674,18 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
     let funding_note_owner_keys = read_vector(data, ref index);
     let funding_authorization_rs = read_vector(data, ref index);
     let funding_authorization_ss = read_vector(data, ref index);
+    let managed_authorization_modes = read_vector(data, ref index);
+    let managed_delegate_public_keys = read_vector(data, ref index);
+    let managed_allow_buy = read_vector(data, ref index);
+    let managed_allow_sell = read_vector(data, ref index);
+    let managed_max_epoch_base = read_vector(data, ref index);
+    let managed_min_prices = read_vector(data, ref index);
+    let managed_max_prices = read_vector(data, ref index);
+    let managed_valid_from_epochs = read_vector(data, ref index);
+    let managed_valid_until_epochs = read_vector(data, ref index);
+    let managed_policy_nonces = read_vector(data, ref index);
+    let managed_owner_authorization_rs = read_vector(data, ref index);
+    let managed_owner_authorization_ss = read_vector(data, ref index);
     let funding_nullifiers = read_vector(data, ref index);
     let recipient_owner_keys = read_vector(data, ref index);
     let recipient_spend_authorities = read_vector(data, ref index);
@@ -1693,6 +1707,13 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
             funding_note_refs.len().into(), funding_input_counts.len().into(),
             funding_note_amounts.len().into(), funding_note_owner_keys.len().into(),
             funding_authorization_rs.len().into(), funding_authorization_ss.len().into(),
+            managed_authorization_modes.len().into(), managed_delegate_public_keys.len().into(),
+            managed_allow_buy.len().into(), managed_allow_sell.len().into(),
+            managed_max_epoch_base.len().into(), managed_min_prices.len().into(),
+            managed_max_prices.len().into(), managed_valid_from_epochs.len().into(),
+            managed_valid_until_epochs.len().into(), managed_policy_nonces.len().into(),
+            managed_owner_authorization_rs.len().into(),
+            managed_owner_authorization_ss.len().into(),
             funding_nullifiers.len().into(), recipient_owner_keys.len().into(),
             recipient_spend_authorities.len().into(), recipient_withdraw_authorities.len().into(),
             res_auths_span.len().into(),
@@ -1756,6 +1777,18 @@ pub fn verify_admission_statement(data: Span<felt252>) -> (felt252, felt252, fel
             funding_note_owner_keys.span(),
             funding_authorization_rs.span(),
             funding_authorization_ss.span(),
+            managed_authorization_modes.span(),
+            managed_delegate_public_keys.span(),
+            managed_allow_buy.span(),
+            managed_allow_sell.span(),
+            managed_max_epoch_base.span(),
+            managed_min_prices.span(),
+            managed_max_prices.span(),
+            managed_valid_from_epochs.span(),
+            managed_valid_until_epochs.span(),
+            managed_policy_nonces.span(),
+            managed_owner_authorization_rs.span(),
+            managed_owner_authorization_ss.span(),
             funding_nullifiers.span(),
             recipient_owner_keys.span(),
             recipient_spend_authorities.span(),
@@ -2068,6 +2101,18 @@ fn assert_auction_order_preimages(
     funding_note_owner_keys: Span<felt252>,
     funding_authorization_rs: Span<felt252>,
     funding_authorization_ss: Span<felt252>,
+    managed_authorization_modes: Span<felt252>,
+    managed_delegate_public_keys: Span<felt252>,
+    managed_allow_buy: Span<felt252>,
+    managed_allow_sell: Span<felt252>,
+    managed_max_epoch_base: Span<felt252>,
+    managed_min_prices: Span<felt252>,
+    managed_max_prices: Span<felt252>,
+    managed_valid_from_epochs: Span<felt252>,
+    managed_valid_until_epochs: Span<felt252>,
+    managed_policy_nonces: Span<felt252>,
+    managed_owner_authorization_rs: Span<felt252>,
+    managed_owner_authorization_ss: Span<felt252>,
     funding_nullifiers: Span<felt252>,
     recipient_owner_keys: Span<felt252>,
     recipient_spend_authorities: Span<felt252>,
@@ -2110,6 +2155,18 @@ fn assert_auction_order_preimages(
         let funding_note_owner_key = *funding_note_owner_keys.at(index);
         let funding_authorization_r = *funding_authorization_rs.at(index);
         let funding_authorization_s = *funding_authorization_ss.at(index);
+        let managed_authorization_mode = *managed_authorization_modes.at(index);
+        let managed_delegate_public_key = *managed_delegate_public_keys.at(index);
+        let managed_buy_allowed = *managed_allow_buy.at(index);
+        let managed_sell_allowed = *managed_allow_sell.at(index);
+        let managed_max_base = *managed_max_epoch_base.at(index);
+        let managed_min_price = *managed_min_prices.at(index);
+        let managed_max_price = *managed_max_prices.at(index);
+        let managed_valid_from_epoch = *managed_valid_from_epochs.at(index);
+        let managed_valid_until_epoch = *managed_valid_until_epochs.at(index);
+        let managed_policy_nonce = *managed_policy_nonces.at(index);
+        let managed_owner_authorization_r = *managed_owner_authorization_rs.at(index);
+        let managed_owner_authorization_s = *managed_owner_authorization_ss.at(index);
         let funding_nullifier = *funding_nullifiers.at(index);
         let recipient_owner_key = *recipient_owner_keys.at(index);
         let recipient_spend_authority = *recipient_spend_authorities.at(index);
@@ -2190,15 +2247,102 @@ fn assert_auction_order_preimages(
         );
         let first_spend_authority = *funding_note_spend_authorities.at(funding_input_cursor);
         assert(first_spend_authority != 0, 'E');
-        assert(
-            check_ecdsa_signature(
-                order_commitment,
-                first_spend_authority,
-                funding_authorization_r,
-                funding_authorization_s,
-            ),
-            'E',
-        );
+        if managed_authorization_mode == 0 {
+            assert(managed_delegate_public_key == 0, 'E');
+            assert(managed_buy_allowed == 0, 'E');
+            assert(managed_sell_allowed == 0, 'E');
+            assert(managed_max_base == 0, 'E');
+            assert(managed_min_price == 0, 'E');
+            assert(managed_max_price == 0, 'E');
+            assert(managed_valid_from_epoch == 0, 'E');
+            assert(managed_valid_until_epoch == 0, 'E');
+            assert(managed_policy_nonce == 0, 'E');
+            assert(managed_owner_authorization_r == 0, 'E');
+            assert(managed_owner_authorization_s == 0, 'E');
+            assert(
+                check_ecdsa_signature(
+                    order_commitment,
+                    first_spend_authority,
+                    funding_authorization_r,
+                    funding_authorization_s,
+                ),
+                'E',
+            );
+        } else {
+            assert(managed_authorization_mode == 1, 'E');
+            assert(order_type == ORDER_TYPE_MAKER_CURVE, 'E');
+            assert(tif == TIF_CURRENT_BATCH_ONLY, 'E');
+            assert(managed_delegate_public_key != 0, 'E');
+            assert(managed_buy_allowed == 0 || managed_buy_allowed == 1, 'E');
+            assert(managed_sell_allowed == 0 || managed_sell_allowed == 1, 'E');
+            assert(managed_buy_allowed + managed_sell_allowed != 0, 'E');
+            if side == ORDER_SIDE_BUY {
+                assert(managed_buy_allowed == 1, 'E');
+            } else {
+                assert(side == ORDER_SIDE_SELL, 'E');
+                assert(managed_sell_allowed == 1, 'E');
+            }
+            assert(managed_max_base != 0, 'E');
+            assert(felt_to_u128(order_amount) <= felt_to_u128(managed_max_base), 'E');
+            assert(managed_min_price != 0, 'E');
+            assert(felt_to_u128(managed_max_price) >= felt_to_u128(managed_min_price), 'E');
+            assert(felt_to_u128(limit_price) >= felt_to_u128(managed_min_price), 'E');
+            assert(felt_to_u128(limit_price) <= felt_to_u128(managed_max_price), 'E');
+            assert(managed_valid_from_epoch != 0, 'E');
+            let managed_valid_from_epoch_u128 = felt_to_u128(managed_valid_from_epoch);
+            let managed_valid_until_epoch_u128 = felt_to_u128(managed_valid_until_epoch);
+            let expiry_epoch_u128 = felt_to_u128(expiry_epoch);
+            assert(managed_valid_until_epoch_u128 >= managed_valid_from_epoch_u128, 'E');
+            assert(expiry_epoch_u128 >= managed_valid_from_epoch_u128, 'E');
+            assert(expiry_epoch_u128 <= managed_valid_until_epoch_u128, 'E');
+            assert(managed_policy_nonce != 0, 'E');
+            assert(managed_owner_authorization_r != 0, 'E');
+            assert(managed_owner_authorization_s != 0, 'E');
+            assert_curve_prices_in_range(
+                point_count,
+                curve_cursor,
+                maker_curve_prices,
+                managed_min_price,
+                managed_max_price,
+            );
+            let policy_commitment = managed_maker_policy_commitment(
+                managed_delegate_public_key,
+                pair_id,
+                managed_buy_allowed,
+                managed_sell_allowed,
+                managed_max_base,
+                managed_min_price,
+                managed_max_price,
+                managed_valid_from_epoch,
+                managed_valid_until_epoch,
+                relay_mode,
+                parent_order_commitment,
+                recipient_owner_key,
+                recipient_spend_authority,
+                recipient_withdraw_authority,
+                recipient_residual_withdraw_authority,
+                auditor_view_allowed,
+                managed_policy_nonce,
+            );
+            assert(
+                check_ecdsa_signature(
+                    policy_commitment,
+                    first_spend_authority,
+                    managed_owner_authorization_r,
+                    managed_owner_authorization_s,
+                ),
+                'E',
+            );
+            assert(
+                check_ecdsa_signature(
+                    order_commitment,
+                    managed_delegate_public_key,
+                    funding_authorization_r,
+                    funding_authorization_s,
+                ),
+                'E',
+            );
+        }
         let recomputed_order_commitment = order_intent_commitment(
             order_commitment_domain,
             pair_id,
@@ -4235,6 +4379,63 @@ fn note_commitment(
 
 fn note_nullifier(seed: felt252, note_commitment: felt252, note_secret: felt252) -> felt252 {
     poseidon_hash2(poseidon_hash2(seed, note_commitment), note_secret)
+}
+
+fn assert_curve_prices_in_range(
+    point_count: usize,
+    curve_cursor: usize,
+    maker_curve_prices: Span<felt252>,
+    min_price: felt252,
+    max_price: felt252,
+) {
+    let min_price_u128 = felt_to_u128(min_price);
+    let max_price_u128 = felt_to_u128(max_price);
+    let mut point_index = 0;
+    while point_index < point_count {
+        let price = felt_to_u128(*maker_curve_prices.at(curve_cursor + point_index));
+        assert(price >= min_price_u128, 'E');
+        assert(price <= max_price_u128, 'E');
+        point_index += 1;
+    }
+}
+
+fn managed_maker_policy_commitment(
+    delegate_public_key: felt252,
+    pair_id: felt252,
+    allow_buy: felt252,
+    allow_sell: felt252,
+    max_epoch_base: felt252,
+    min_price: felt252,
+    max_price: felt252,
+    valid_from_epoch: felt252,
+    valid_until_epoch: felt252,
+    relay_mode: felt252,
+    parent_order_commitment: felt252,
+    recipient_owner_key: felt252,
+    recipient_spend_authority: felt252,
+    recipient_withdraw_authority: felt252,
+    recipient_residual_withdraw_authority: felt252,
+    auditor_view_allowed: felt252,
+    policy_nonce: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(MANAGED_MAKER_POLICY_DOMAIN, 1);
+    state = poseidon_hash2(state, delegate_public_key);
+    state = poseidon_hash2(state, pair_id);
+    state = poseidon_hash2(state, allow_buy);
+    state = poseidon_hash2(state, allow_sell);
+    state = poseidon_hash2(state, max_epoch_base);
+    state = poseidon_hash2(state, min_price);
+    state = poseidon_hash2(state, max_price);
+    state = poseidon_hash2(state, valid_from_epoch);
+    state = poseidon_hash2(state, valid_until_epoch);
+    state = poseidon_hash2(state, relay_mode);
+    state = poseidon_hash2(state, parent_order_commitment);
+    state = poseidon_hash2(state, recipient_owner_key);
+    state = poseidon_hash2(state, recipient_spend_authority);
+    state = poseidon_hash2(state, recipient_withdraw_authority);
+    state = poseidon_hash2(state, recipient_residual_withdraw_authority);
+    state = poseidon_hash2(state, auditor_view_allowed);
+    poseidon_hash2(state, policy_nonce)
 }
 
 fn order_intent_commitment(
