@@ -4,11 +4,11 @@ use starknet::ContractAddress;
 pub struct ProofFacts {
     pub proof_version: felt252,
     pub program_variant: felt252,
-    pub virtual_program_hash: felt252,
+    pub starknet_os_config_hash: felt252,
     pub starknet_os_output_version: felt252,
     pub base_block_number: u64,
     pub base_block_hash: felt252,
-    pub starknet_os_config_hash: felt252,
+    pub virtual_program_hash: felt252,
     pub message_to_l1_hashes: Span<felt252>,
 }
 
@@ -24,6 +24,10 @@ pub trait IAuctionVerifier<TContractState> {
     fn set_proof_program(
         ref self: TContractState, proof_program: ContractAddress, virtual_program_hash: felt252,
     );
+    fn set_statement_proof_program_hash(
+        ref self: TContractState, statement_kind: felt252, virtual_program_hash: felt252,
+    );
+    fn statement_proof_program_hash(self: @TContractState, statement_kind: felt252) -> felt252;
     fn lock_proof_program(ref self: TContractState);
     fn set_proof_validity_blocks(ref self: TContractState, proof_validity_blocks: u64);
     fn set_expected_starknet_os_config_hash(ref self: TContractState, config_hash: felt252);
@@ -33,23 +37,8 @@ pub trait IAuctionVerifier<TContractState> {
     fn set_protocol_fee_recipient(ref self: TContractState, recipient: felt252);
     fn propose_protocol_fee_recipient(ref self: TContractState, recipient: felt252);
     fn execute_protocol_fee_recipient(ref self: TContractState);
-    fn set_relay_fee_recipient(ref self: TContractState, recipient: felt252);
-    fn propose_relay_fee_recipient(ref self: TContractState, recipient: felt252);
-    fn execute_relay_fee_recipient(ref self: TContractState);
-    fn set_pair_fee_config(
-        ref self: TContractState,
-        pair_id: felt252,
-        taker_fee_bps: u128,
-        maker_fee_bps: u128,
-        relay_fee_bps: u128,
-    );
-    fn propose_pair_fee_config(
-        ref self: TContractState,
-        pair_id: felt252,
-        taker_fee_bps: u128,
-        maker_fee_bps: u128,
-        relay_fee_bps: u128,
-    );
+    fn set_pair_fee_config(ref self: TContractState, pair_id: felt252, taker_fee_bps: u128);
+    fn propose_pair_fee_config(ref self: TContractState, pair_id: felt252, taker_fee_bps: u128);
     fn execute_pair_fee_config(ref self: TContractState, pair_id: felt252);
     fn cancel_renewal_parent_marker(
         ref self: TContractState,
@@ -78,6 +67,9 @@ pub trait IAuctionVerifier<TContractState> {
         admission_root: felt252,
         transcript_commitment: felt252,
     );
+    fn record_multi_pair_solution_with_proof_facts(
+        ref self: TContractState, batch_id: felt252, multi_pair_commitment: felt252,
+    );
     fn record_nullifier_roots_with_proof_facts(
         ref self: TContractState,
         batch_id: felt252,
@@ -93,6 +85,15 @@ pub trait IAuctionVerifier<TContractState> {
         prior_renewal_root: felt252,
         renewal_child_root: felt252,
         new_renewal_root: felt252,
+    );
+    fn record_settlement_order_with_proof_facts(
+        ref self: TContractState, batch_id: felt252, transcript_commitment: felt252,
+    );
+    fn record_settlement_input_membership_with_proof_facts(
+        ref self: TContractState, batch_id: felt252, transcript_commitment: felt252,
+    );
+    fn record_settlement_output_recovery_with_proof_facts(
+        ref self: TContractState, batch_id: felt252, transcript_commitment: felt252,
     );
     fn clear_unsettled_root_transition(ref self: TContractState, batch_id: felt252);
     fn submit_note_consolidation_with_proof_facts(
@@ -118,11 +119,41 @@ pub trait IAuctionVerifier<TContractState> {
         clearing_price: u128,
         price_base_scale: u128,
         taker_fee_bps: u128,
-        maker_fee_bps: u128,
-        relay_fee_bps: u128,
         protocol_fee_recipient: felt252,
-        relay_fee_recipient: felt252,
         output_bundle_ref: felt252,
+        multi_pair_commitment: felt252,
+        prior_note_root: felt252,
+        prior_nullifier_root: felt252,
+        prior_renewal_root: felt252,
+        prior_fee_root: felt252,
+        consumed_note_root: felt252,
+        consumed_nullifier_root: felt252,
+        renewal_child_root: felt252,
+        output_note_root: felt252,
+        fee_root: felt252,
+        new_note_root: felt252,
+        new_nullifier_root: felt252,
+        new_renewal_root: felt252,
+        new_fee_root: felt252,
+    );
+    fn submit_multi_pair_settlement_with_proof_facts(
+        ref self: TContractState,
+        group_id: felt252,
+        batch_epoch: u64,
+        batch_ids: Span<felt252>,
+        pair_ids: Span<felt252>,
+        order_commitment_roots: Span<felt252>,
+        encrypted_order_set_commitments: Span<felt252>,
+        base_asset_ids: Span<felt252>,
+        quote_asset_ids: Span<felt252>,
+        price_base_scales: Span<felt252>,
+        taker_fee_bps_values: Span<felt252>,
+        transcript_commitment: felt252,
+        proof_artifact_commitment: felt252,
+        protocol_fee_recipient: felt252,
+        output_bundle_ref: felt252,
+        multi_pair_commitment: felt252,
+        batch_binding_root: felt252,
         prior_note_root: felt252,
         prior_nullifier_root: felt252,
         prior_renewal_root: felt252,
@@ -140,23 +171,6 @@ pub trait IAuctionVerifier<TContractState> {
     fn submit_aggregate_settlements_with_proof_facts(
         ref self: TContractState, settlement_inputs: Span<felt252>,
     );
-    fn withdraw_settlement_output_with_proof_facts(
-        ref self: TContractState,
-        batch_id: felt252,
-        proof_artifact_commitment: felt252,
-        prior_nullifier_root: felt252,
-        consumed_nullifier_root: felt252,
-        new_nullifier_root: felt252,
-        note_commitment: felt252,
-        asset_id: felt252,
-        amount: u128,
-        withdraw_authority: felt252,
-        merkle_path: Span<felt252>,
-        merkle_directions: Span<felt252>,
-        withdraw_authorization_r: felt252,
-        withdraw_authorization_s: felt252,
-        recipient: ContractAddress,
-    ) -> (felt252, u128);
     fn withdraw_settlement_output_to_strk20_with_proof_facts(
         ref self: TContractState,
         batch_id: felt252,
@@ -174,18 +188,20 @@ pub trait IAuctionVerifier<TContractState> {
         withdraw_authorization_s: felt252,
         exit_commitment: felt252,
     ) -> (felt252, u128, felt252);
-    // Deprecated fail-closed compatibility shim. Use withdraw_settlement_output_with_proof_facts.
     fn is_batch_settled(self: @TContractState, batch_id: felt252) -> bool;
     fn is_consolidation_settled(self: @TContractState, consolidation_id: felt252) -> bool;
+    fn is_multi_pair_group_settled(self: @TContractState, group_id: felt252) -> bool;
+    fn verified_multi_pair_settlement_transcript(
+        self: @TContractState, group_id: felt252,
+    ) -> felt252;
     fn verified_admission_root(self: @TContractState, batch_id: felt252) -> felt252;
     fn verified_auction_transcript(self: @TContractState, batch_id: felt252) -> felt252;
+    fn verified_multi_pair_solution(self: @TContractState, batch_id: felt252) -> (felt252, bool);
     fn output_note_root(self: @TContractState, batch_id: felt252) -> felt252;
     fn current_settlement_roots(self: @TContractState) -> (felt252, felt252, felt252, felt252);
     fn renewal_cancel_marker_recorded(self: @TContractState, cancel_marker: felt252) -> bool;
-    fn pair_fee_config(self: @TContractState, pair_id: felt252) -> (u128, u128, u128, bool);
-    fn pending_pair_fee_config(
-        self: @TContractState, pair_id: felt252,
-    ) -> (u128, u128, u128, u64, bool);
+    fn pair_fee_config(self: @TContractState, pair_id: felt252) -> (u128, bool);
+    fn pending_pair_fee_config(self: @TContractState, pair_id: felt252) -> (u128, u64, bool);
     fn admin_address(self: @TContractState) -> ContractAddress;
     fn pending_admin_address(self: @TContractState) -> ContractAddress;
     fn admin_transfer_pending(self: @TContractState) -> bool;
@@ -194,8 +210,6 @@ pub trait IAuctionVerifier<TContractState> {
     fn proof_program_is_locked(self: @TContractState) -> bool;
     fn protocol_fee_recipient(self: @TContractState) -> felt252;
     fn pending_protocol_fee_recipient(self: @TContractState) -> (felt252, u64, bool);
-    fn relay_fee_recipient(self: @TContractState) -> felt252;
-    fn pending_relay_fee_recipient(self: @TContractState) -> (felt252, u64, bool);
     fn note_root_transition_count(self: @TContractState) -> u64;
     fn note_root_transition(
         self: @TContractState, transition_id: u64,
@@ -208,6 +222,12 @@ pub trait IAuctionVerifier<TContractState> {
     ) -> felt252;
     fn withdrawal_proof_message_hash(
         self: @TContractState, withdrawal_commitment: felt252,
+    ) -> felt252;
+    fn multi_pair_proof_message_hash(
+        self: @TContractState, batch_id: felt252, multi_pair_commitment: felt252,
+    ) -> felt252;
+    fn multi_pair_settlement_proof_message_hash(
+        self: @TContractState, transcript_commitment: felt252,
     ) -> felt252;
 }
 
@@ -235,23 +255,33 @@ pub mod AuctionVerifier {
     const DEFAULT_PROOF_VALIDITY_BLOCKS: u64 = 450;
     const VIRTUAL_SNOS: felt252 = 'VIRTUAL_SNOS';
     const VIRTUAL_SNOS0: felt252 = 'VIRTUAL_SNOS0';
-    const EXPECTED_PROOF_VERSION: felt252 = 'PROOF0';
+    const EXPECTED_PROOF_VERSION: felt252 = 'PROOF1';
     const SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_settle_v1';
     const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
     const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
+    const SETTLEMENT_ORDER_MESSAGE_DOMAIN: felt252 = 'zylith_ord_v1';
+    const SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN: felt252 = 'zylith_inmem_v1';
+    const SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN: felt252 = 'zylith_outrec_v1';
     const NOTE_CONSOLIDATION_MESSAGE_DOMAIN: felt252 = 'zylith_consol_v1';
     const WITHDRAWAL_MESSAGE_DOMAIN: felt252 = 'zylith_withdraw_v1';
     const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
     const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
+    const MULTI_PAIR_MESSAGE_DOMAIN: felt252 = 'zylith_mpair_v1';
+    const MULTI_PAIR_SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_mp_settle_v1';
     const SETTLEMENT_PROOF_MESSAGE_TO: felt252 = 0;
+    const PUBLIC_MULTI_PAIR_SETTLEMENT_DOMAIN: felt252 =
+        0x7a796c6974685f6d756c74695f736574746c655f7631;
     const PUBLIC_NOTE_WITHDRAWAL_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f77697468647261775f7631;
     const ROOT_ONLY_STATE_TRANSITION_DOMAIN: felt252 =
         0x01f14f0555b0b80fd6af9553623a021c472d8c930dfcb5b204b35b26f0d2b1b2;
+    const MULTI_PAIR_BATCH_ROOT_DOMAIN: felt252 =
+        0x039f98f789ba5c8e01cb79a02c22b9d9e3d71e692cc6c17cb60f2ab76a4e9090;
     const FEE_BPS_DENOMINATOR: u128 = 10000;
     const MAX_PAIR_FEE_BPS: u128 = 100;
     const PAIR_FEE_TIMELOCK_SECONDS: u64 = 86400;
     const FEE_RECIPIENT_TIMELOCK_SECONDS: u64 = 604800;
     const MAX_OUTPUT_CLAIM_DELAY_SECONDS: u64 = 604800;
+    const MAX_AGGREGATE_SETTLEMENTS: usize = 16;
     const RENEWAL_PARENT_CANCEL_DOMAIN: felt252 =
         0x26f84b60309c08d4030876815edb467f89f78e5a5f62823af4521f1be502ca3;
     const RENEWAL_SPARSE_LEAF_DOMAIN: felt252 =
@@ -259,19 +289,31 @@ pub mod AuctionVerifier {
     const RENEWAL_SPARSE_NODE_DOMAIN: felt252 =
         0x02de7e98b8f1ba580329d7cfcf51a36f6eb4f8611cae6f82b34e116bb9c2588c;
     const RENEWAL_SPARSE_TREE_DEPTH: usize = 128;
-    const RENEWAL_KEY_HIGH_BOUND: u128 = 0x10000000000000000000000000000000;
+    const SPARSE_KEY_HIGH_MAX: u128 = 0x8000000000000110000000000000000;
     const TWO_POW_128: felt252 = 0x100000000000000000000000000000000;
     const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
         0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
     const OUTPUT_NOTE_NODE_DOMAIN: felt252 =
         0x03c6998f476a618431be1c1764a6724f13c0739be395bab4c1217bc0a65b2ee7;
-    const OUTPUT_WITHDRAWAL_DOMAIN: felt252 =
-        0x031ff5b95d48149e26b5a946562ff5ea925eb8b3ea09d3b389b209b672a37b6e;
     const OUTPUT_WITHDRAWAL_STRK20_EXIT_DOMAIN: felt252 =
         0x7a796c6974685f7374726b32305f657869745f7631;
     const NOTE_ROOT_TRANSITION_DEPOSIT: felt252 = 0;
     const NOTE_ROOT_TRANSITION_SETTLEMENT: felt252 = 1;
     const NOTE_ROOT_TRANSITION_CONSOLIDATION: felt252 = 2;
+    const NOTE_ROOT_TRANSITION_MULTI_PAIR_SETTLEMENT: felt252 = 3;
+    const STATEMENT_ADMISSION: felt252 = 'ADMISSION';
+    const STATEMENT_AUCTION_RESULT: felt252 = 'AUCTION_RESULT';
+    const STATEMENT_NULLIFIER: felt252 = 'NULLIFIER';
+    const STATEMENT_RENEWAL: felt252 = 'RENEWAL';
+    const STATEMENT_SETTLEMENT: felt252 = 'SETTLEMENT';
+    const STATEMENT_SETTLEMENT_ORDER: felt252 = 'SETTLEMENT_ORDER';
+    const STATEMENT_SETTLEMENT_INPUT_MEMBERSHIP: felt252 = 'SETTLEMENT_INPUT_MEMBERSHIP';
+    const STATEMENT_SETTLEMENT_OUTPUT_RECOVERY: felt252 = 'SETTLEMENT_OUTPUT_RECOVERY';
+    const STATEMENT_NOTE_CONSOLIDATION: felt252 = 'NOTE_CONSOLIDATION';
+    const STATEMENT_AGGREGATE_SETTLEMENT: felt252 = 'AGGREGATE_SETTLEMENT';
+    const STATEMENT_WITHDRAWAL: felt252 = 'WITHDRAWAL';
+    const STATEMENT_MULTI_PAIR: felt252 = 'MULTI_PAIR';
+    const STATEMENT_MULTI_PAIR_SETTLEMENT: felt252 = 'MULTI_PAIR_SETTLEMENT';
     #[storage]
     struct Storage {
         admin: ContractAddress,
@@ -283,6 +325,7 @@ pub mod AuctionVerifier {
         authorized_settlement_account: ContractAddress,
         proof_program: ContractAddress,
         proof_program_hash: felt252,
+        statement_proof_program_hashes: Map<felt252, felt252>,
         proof_program_locked: bool,
         proof_validity_blocks: u64,
         expected_starknet_os_config_hash: felt252,
@@ -293,22 +336,15 @@ pub mod AuctionVerifier {
         pending_protocol_fee_recipient: felt252,
         pending_protocol_fee_recipient_eta: u64,
         pending_protocol_fee_recipient_active: bool,
-        relay_fee_recipient: felt252,
-        pending_relay_fee_recipient: felt252,
-        pending_relay_fee_recipient_eta: u64,
-        pending_relay_fee_recipient_active: bool,
         pair_taker_fee_bps: Map<felt252, u128>,
-        pair_maker_fee_bps: Map<felt252, u128>,
-        pair_relay_fee_bps: Map<felt252, u128>,
         pair_fee_configured: Map<felt252, bool>,
         pending_pair_taker_fee_bps: Map<felt252, u128>,
-        pending_pair_maker_fee_bps: Map<felt252, u128>,
-        pending_pair_relay_fee_bps: Map<felt252, u128>,
         pending_pair_fee_config_eta: Map<felt252, u64>,
         pending_pair_fee_config_active: Map<felt252, bool>,
         deposit_root_registrar: ContractAddress,
         settled_batches: Map<felt252, bool>,
         settled_consolidations: Map<felt252, bool>,
+        settled_multi_pair_groups: Map<felt252, bool>,
         settled_at_unix_seconds: Map<felt252, u64>,
         withdrawn_output_notes: Map<felt252, bool>,
         activated_funding_commitments: Map<felt252, bool>,
@@ -324,8 +360,11 @@ pub mod AuctionVerifier {
         note_root_transition_batch_roots: Map<u64, felt252>,
         note_root_transition_new_roots: Map<u64, felt252>,
         output_note_roots: Map<felt252, felt252>,
+        verified_multi_pair_settlement_transcripts: Map<felt252, felt252>,
         verified_admission_roots: Map<felt252, felt252>,
         verified_auction_transcripts: Map<felt252, felt252>,
+        verified_multi_pair_solution_commitments: Map<felt252, felt252>,
+        verified_multi_pair_solution_active: Map<felt252, bool>,
         verified_nullifier_roots_active: Map<felt252, bool>,
         verified_nullifier_transcripts: Map<felt252, felt252>,
         verified_prior_nullifier_roots: Map<felt252, felt252>,
@@ -336,16 +375,32 @@ pub mod AuctionVerifier {
         verified_prior_renewal_roots: Map<felt252, felt252>,
         verified_renewal_child_roots: Map<felt252, felt252>,
         verified_new_renewal_roots: Map<felt252, felt252>,
+        verified_settlement_order_active: Map<felt252, bool>,
+        verified_settlement_order_transcripts: Map<felt252, felt252>,
+        verified_settlement_input_membership_active: Map<felt252, bool>,
+        verified_settlement_input_membership_transcripts: Map<felt252, felt252>,
+        verified_settlement_output_recovery_active: Map<felt252, bool>,
+        verified_settlement_output_recovery_transcripts: Map<felt252, felt252>,
     }
 
     #[constructor]
     fn constructor(
-        ref self: ContractState, admin: ContractAddress, batch_registry: ContractAddress,
+        ref self: ContractState,
+        admin: ContractAddress,
+        batch_registry: ContractAddress,
+        initial_note_root: felt252,
+        initial_nullifier_root: felt252,
+        initial_renewal_root: felt252,
+        initial_fee_root: felt252,
     ) {
         assert(!admin.is_zero(), 'BAD_ADMIN');
         assert(!batch_registry.is_zero(), 'BAD_BATCH_REGISTRY');
         self.admin.write(admin);
         self.batch_registry.write(batch_registry);
+        self.current_note_root.write(initial_note_root);
+        self.current_nullifier_root.write(initial_nullifier_root);
+        self.current_renewal_root.write(initial_renewal_root);
+        self.current_fee_root.write(initial_fee_root);
         self.proof_validity_blocks.write(DEFAULT_PROOF_VALIDITY_BLOCKS);
     }
 
@@ -369,6 +424,7 @@ pub mod AuctionVerifier {
 
         fn set_pause_guardian(ref self: ContractState, guardian: ContractAddress) {
             assert_admin(@self);
+            assert(!guardian.is_zero(), 'BAD_GUARDIAN');
             self.pause_guardian.write(guardian);
         }
 
@@ -385,6 +441,14 @@ pub mod AuctionVerifier {
         fn lock_operational_config(ref self: ContractState) {
             assert_admin(@self);
             assert(self.expected_starknet_os_config_hash.read() != 0, 'OS_CONFIG_UNSET');
+            assert(!self.authorized_settlement_account.read().is_zero(), 'SETTLEMENT_ACCT_UNSET');
+            assert(!self.proof_program.read().is_zero(), 'PROOF_PROGRAM_UNSET');
+            assert(self.proof_program_hash.read() != 0, 'PROOF_HASH_UNSET');
+            assert_required_statement_proof_hashes(@self);
+            assert(self.proof_program_locked.read(), 'PROOF_PROGRAM_UNLOCKED');
+            assert(!self.shielded_asset_adapter.read().is_zero(), 'ADAPTER_UNSET');
+            assert(!self.deposit_root_registrar.read().is_zero(), 'DEPOSIT_REG_UNSET');
+            assert(self.protocol_fee_recipient.read() != 0, 'FEE_RECIPIENT_UNSET');
             self.operational_config_locked.write(true);
         }
 
@@ -399,6 +463,7 @@ pub mod AuctionVerifier {
             ref self: ContractState, proof_program: ContractAddress, virtual_program_hash: felt252,
         ) {
             assert_admin(@self);
+            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
             assert(!self.proof_program_locked.read(), 'PROOF_PROGRAM_LOCKED');
             assert(!proof_program.is_zero(), 'BAD_PROOF_PROGRAM');
             assert(virtual_program_hash != 0, 'BAD_PROOF_HASH');
@@ -406,10 +471,26 @@ pub mod AuctionVerifier {
             self.proof_program_hash.write(virtual_program_hash);
         }
 
+        fn set_statement_proof_program_hash(
+            ref self: ContractState, statement_kind: felt252, virtual_program_hash: felt252,
+        ) {
+            assert_admin(@self);
+            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
+            assert(!self.proof_program_locked.read(), 'PROOF_PROGRAM_LOCKED');
+            assert(statement_kind != 0, 'BAD_STATEMENT_KIND');
+            assert(virtual_program_hash != 0, 'BAD_PROOF_HASH');
+            self.statement_proof_program_hashes.write(statement_kind, virtual_program_hash);
+        }
+
+        fn statement_proof_program_hash(self: @ContractState, statement_kind: felt252) -> felt252 {
+            statement_proof_hash_or_default(self, statement_kind)
+        }
+
         fn lock_proof_program(ref self: ContractState) {
             assert_admin(@self);
             assert(!self.proof_program.read().is_zero(), 'PROOF_PROGRAM_UNSET');
             assert(self.proof_program_hash.read() != 0, 'PROOF_HASH_UNSET');
+            assert_required_statement_proof_hashes(@self);
             self.proof_program_locked.write(true);
         }
 
@@ -482,77 +563,23 @@ pub mod AuctionVerifier {
             self.pending_protocol_fee_recipient.write(0);
         }
 
-        fn set_relay_fee_recipient(ref self: ContractState, recipient: felt252) {
-            assert_admin(@self);
-            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
-            assert(recipient != 0, 'BAD_RELAY_RECIPIENT');
-            assert(self.relay_fee_recipient.read() == 0, 'RELAY_RECIP_TIMELOCK');
-            self.relay_fee_recipient.write(recipient);
-        }
-
-        fn propose_relay_fee_recipient(ref self: ContractState, recipient: felt252) {
-            assert_admin(@self);
-            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
-            assert(recipient != 0, 'BAD_RELAY_RECIPIENT');
-            assert(self.relay_fee_recipient.read() != 0, 'RELAY_RECIP_UNSET');
-            self.pending_relay_fee_recipient.write(recipient);
-            self
-                .pending_relay_fee_recipient_eta
-                .write(current_block_timestamp() + FEE_RECIPIENT_TIMELOCK_SECONDS);
-            self.pending_relay_fee_recipient_active.write(true);
-        }
-
-        fn execute_relay_fee_recipient(ref self: ContractState) {
-            assert_admin(@self);
-            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
-            assert(self.pending_relay_fee_recipient_active.read(), 'NO_RELAY_RECIP_PENDING');
-            let eta = self.pending_relay_fee_recipient_eta.read();
-            assert(current_block_timestamp() >= eta, 'RELAY_RECIP_TIMELOCK');
-            let recipient = self.pending_relay_fee_recipient.read();
-            assert(recipient != 0, 'BAD_RELAY_RECIPIENT');
-            self.relay_fee_recipient.write(recipient);
-            self.pending_relay_fee_recipient_active.write(false);
-            self.pending_relay_fee_recipient_eta.write(0);
-            self.pending_relay_fee_recipient.write(0);
-        }
-
-        fn set_pair_fee_config(
-            ref self: ContractState,
-            pair_id: felt252,
-            taker_fee_bps: u128,
-            maker_fee_bps: u128,
-            relay_fee_bps: u128,
-        ) {
+        fn set_pair_fee_config(ref self: ContractState, pair_id: felt252, taker_fee_bps: u128) {
             assert_admin(@self);
             assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
             assert(pair_id != 0, 'BAD_PAIR');
             assert(taker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_TAKER_FEE');
-            assert(maker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_MAKER_FEE');
-            assert(relay_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_RELAY_FEE');
             assert(!self.pair_fee_configured.read(pair_id), 'PAIR_FEE_TIMELOCK');
             self.pair_taker_fee_bps.write(pair_id, taker_fee_bps);
-            self.pair_maker_fee_bps.write(pair_id, maker_fee_bps);
-            self.pair_relay_fee_bps.write(pair_id, relay_fee_bps);
             self.pair_fee_configured.write(pair_id, true);
         }
 
-        fn propose_pair_fee_config(
-            ref self: ContractState,
-            pair_id: felt252,
-            taker_fee_bps: u128,
-            maker_fee_bps: u128,
-            relay_fee_bps: u128,
-        ) {
+        fn propose_pair_fee_config(ref self: ContractState, pair_id: felt252, taker_fee_bps: u128) {
             assert_admin(@self);
             assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
             assert(pair_id != 0, 'BAD_PAIR');
             assert(self.pair_fee_configured.read(pair_id), 'PAIR_FEE_UNSET');
             assert(taker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_TAKER_FEE');
-            assert(maker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_MAKER_FEE');
-            assert(relay_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_RELAY_FEE');
             self.pending_pair_taker_fee_bps.write(pair_id, taker_fee_bps);
-            self.pending_pair_maker_fee_bps.write(pair_id, maker_fee_bps);
-            self.pending_pair_relay_fee_bps.write(pair_id, relay_fee_bps);
             self
                 .pending_pair_fee_config_eta
                 .write(pair_id, current_block_timestamp() + PAIR_FEE_TIMELOCK_SECONDS);
@@ -567,14 +594,10 @@ pub mod AuctionVerifier {
             let eta = self.pending_pair_fee_config_eta.read(pair_id);
             assert(current_block_timestamp() >= eta, 'PAIR_FEE_TIMELOCK');
             self.pair_taker_fee_bps.write(pair_id, self.pending_pair_taker_fee_bps.read(pair_id));
-            self.pair_maker_fee_bps.write(pair_id, self.pending_pair_maker_fee_bps.read(pair_id));
-            self.pair_relay_fee_bps.write(pair_id, self.pending_pair_relay_fee_bps.read(pair_id));
             self.pair_fee_configured.write(pair_id, true);
             self.pending_pair_fee_config_active.write(pair_id, false);
             self.pending_pair_fee_config_eta.write(pair_id, 0);
             self.pending_pair_taker_fee_bps.write(pair_id, 0);
-            self.pending_pair_maker_fee_bps.write(pair_id, 0);
-            self.pending_pair_relay_fee_bps.write(pair_id, 0);
         }
 
         fn cancel_renewal_parent_marker(
@@ -599,7 +622,7 @@ pub mod AuctionVerifier {
                 cancel_marker == sparse_key_low.into() + sparse_key_high.into() * TWO_POW_128,
                 'RENEWAL_KEY_BIND',
             );
-            assert(sparse_key_high < RENEWAL_KEY_HIGH_BOUND, 'RENEWAL_KEY_HIGH');
+            assert_renewal_sparse_key_in_field(sparse_key_low, sparse_key_high);
             assert(
                 check_ecdsa_signature(
                     renewal_parent_cancel_marker_message_hash(cancel_marker),
@@ -626,6 +649,7 @@ pub mod AuctionVerifier {
             ref self: ContractState, funding_commitment: felt252, deposit_root: felt252,
         ) {
             assert_deposit_root_registrar(@self);
+            assert_not_paused(@self);
             assert_no_pending_root_transition(@self);
             assert(funding_commitment != 0, 'BAD_FUNDING');
             assert(deposit_root != 0, 'BAD_DEPOSIT_ROOT');
@@ -670,7 +694,7 @@ pub mod AuctionVerifier {
                     self.proof_program.read(), expected_statement_message,
                 ),
             ];
-            assert_valid_proof_facts_messages(@self, expected_messages.span());
+            assert_valid_proof_facts_messages(@self, expected_messages.span(), STATEMENT_ADMISSION);
             self.verified_admission_roots.write(batch_id, admission_root);
         }
 
@@ -693,13 +717,7 @@ pub mod AuctionVerifier {
                 if existing_transcript == transcript_commitment {
                     return;
                 }
-                let pending_batch = self.pending_root_transition_batch.read();
-                if pending_batch != 0 {
-                    assert(pending_batch == batch_id, 'ROOT_TRANSITION_BATCH');
-                    self.verified_nullifier_roots_active.write(batch_id, false);
-                    self.verified_renewal_roots_active.write(batch_id, false);
-                    clear_root_transition(ref self, batch_id);
-                }
+                assert(false, 'AUCTION_RESULT_EXISTS');
             }
             let batch_registry = IBatchRegistryDispatcher {
                 contract_address: self.batch_registry.read(),
@@ -721,8 +739,44 @@ pub mod AuctionVerifier {
                     self.proof_program.read(), expected_statement_message,
                 ),
             ];
-            assert_valid_proof_facts_messages(@self, expected_messages.span());
+            assert_valid_proof_facts_messages(
+                @self, expected_messages.span(), STATEMENT_AUCTION_RESULT,
+            );
             self.verified_auction_transcripts.write(batch_id, transcript_commitment);
+        }
+
+        fn record_multi_pair_solution_with_proof_facts(
+            ref self: ContractState, batch_id: felt252, multi_pair_commitment: felt252,
+        ) {
+            assert_authorized_settlement_account(@self);
+            assert_not_paused(@self);
+            assert(batch_id != 0, 'BAD_BATCH');
+            assert(multi_pair_commitment != 0, 'BAD_MULTI_PAIR');
+            assert(self.settled_batches.read(batch_id) == false, 'BATCH_SETTLED');
+            if self.verified_multi_pair_solution_active.read(batch_id) {
+                assert(
+                    self
+                        .verified_multi_pair_solution_commitments
+                        .read(batch_id) == multi_pair_commitment,
+                    'MULTI_PAIR_EXISTS',
+                );
+            } else {
+                let expected_statement_message = native_multi_pair_message_hash(
+                    get_contract_address(), batch_id, multi_pair_commitment,
+                );
+                let expected_messages = array![
+                    multi_pair_proof_message_hash_from_statement(
+                        self.proof_program.read(), expected_statement_message,
+                    ),
+                ];
+                assert_valid_proof_facts_messages(
+                    @self, expected_messages.span(), STATEMENT_MULTI_PAIR,
+                );
+                self
+                    .verified_multi_pair_solution_commitments
+                    .write(batch_id, multi_pair_commitment);
+                self.verified_multi_pair_solution_active.write(batch_id, true);
+            }
         }
 
         fn record_nullifier_roots_with_proof_facts(
@@ -779,7 +833,9 @@ pub mod AuctionVerifier {
                         self.proof_program.read(), expected_statement_message,
                     ),
                 ];
-                assert_valid_proof_facts_messages(@self, expected_messages.span());
+                assert_valid_proof_facts_messages(
+                    @self, expected_messages.span(), STATEMENT_NULLIFIER,
+                );
                 self.verified_nullifier_roots_active.write(batch_id, true);
                 self.verified_nullifier_transcripts.write(batch_id, transcript_commitment);
                 self.verified_prior_nullifier_roots.write(batch_id, prior_nullifier_root);
@@ -839,12 +895,126 @@ pub mod AuctionVerifier {
                         self.proof_program.read(), expected_statement_message,
                     ),
                 ];
-                assert_valid_proof_facts_messages(@self, expected_messages.span());
+                assert_valid_proof_facts_messages(
+                    @self, expected_messages.span(), STATEMENT_RENEWAL,
+                );
                 self.verified_renewal_roots_active.write(batch_id, true);
                 self.verified_renewal_transcripts.write(batch_id, transcript_commitment);
                 self.verified_prior_renewal_roots.write(batch_id, prior_renewal_root);
                 self.verified_renewal_child_roots.write(batch_id, renewal_child_root);
                 self.verified_new_renewal_roots.write(batch_id, new_renewal_root);
+            }
+        }
+
+        fn record_settlement_order_with_proof_facts(
+            ref self: ContractState, batch_id: felt252, transcript_commitment: felt252,
+        ) {
+            assert_authorized_settlement_account(@self);
+            assert_not_paused(@self);
+            assert(batch_id != 0, 'BAD_BATCH');
+            assert(self.settled_batches.read(batch_id) == false, 'BATCH_SETTLED');
+            assert(transcript_commitment != 0, 'BAD_TRANSCRIPT');
+            assert(
+                self.verified_auction_transcripts.read(batch_id) == transcript_commitment,
+                'AUCTION_RESULT_REQUIRED',
+            );
+            if self.verified_settlement_order_active.read(batch_id) {
+                assert(
+                    self
+                        .verified_settlement_order_transcripts
+                        .read(batch_id) == transcript_commitment,
+                    'ORDER_EXISTS',
+                );
+            } else {
+                let expected_statement_message = native_settlement_order_message_hash(
+                    get_contract_address(), transcript_commitment,
+                );
+                let expected_messages = array![
+                    settlement_order_proof_message_hash_from_statement(
+                        self.proof_program.read(), expected_statement_message,
+                    ),
+                ];
+                assert_valid_proof_facts_messages(
+                    @self, expected_messages.span(), STATEMENT_SETTLEMENT_ORDER,
+                );
+                self.verified_settlement_order_active.write(batch_id, true);
+                self.verified_settlement_order_transcripts.write(batch_id, transcript_commitment);
+            }
+        }
+
+        fn record_settlement_input_membership_with_proof_facts(
+            ref self: ContractState, batch_id: felt252, transcript_commitment: felt252,
+        ) {
+            assert_authorized_settlement_account(@self);
+            assert_not_paused(@self);
+            assert(batch_id != 0, 'BAD_BATCH');
+            assert(self.settled_batches.read(batch_id) == false, 'BATCH_SETTLED');
+            assert(transcript_commitment != 0, 'BAD_TRANSCRIPT');
+            assert(
+                self.verified_auction_transcripts.read(batch_id) == transcript_commitment,
+                'AUCTION_RESULT_REQUIRED',
+            );
+            if self.verified_settlement_input_membership_active.read(batch_id) {
+                assert(
+                    self
+                        .verified_settlement_input_membership_transcripts
+                        .read(batch_id) == transcript_commitment,
+                    'MEMBERSHIP_EXISTS',
+                );
+            } else {
+                let expected_statement_message = native_settlement_input_membership_message_hash(
+                    get_contract_address(), transcript_commitment,
+                );
+                let expected_messages = array![
+                    settlement_input_membership_proof_message_hash_from_statement(
+                        self.proof_program.read(), expected_statement_message,
+                    ),
+                ];
+                assert_valid_proof_facts_messages(
+                    @self, expected_messages.span(), STATEMENT_SETTLEMENT_INPUT_MEMBERSHIP,
+                );
+                self.verified_settlement_input_membership_active.write(batch_id, true);
+                self
+                    .verified_settlement_input_membership_transcripts
+                    .write(batch_id, transcript_commitment);
+            }
+        }
+
+        fn record_settlement_output_recovery_with_proof_facts(
+            ref self: ContractState, batch_id: felt252, transcript_commitment: felt252,
+        ) {
+            assert_authorized_settlement_account(@self);
+            assert_not_paused(@self);
+            assert(batch_id != 0, 'BAD_BATCH');
+            assert(self.settled_batches.read(batch_id) == false, 'BATCH_SETTLED');
+            assert(transcript_commitment != 0, 'BAD_TRANSCRIPT');
+            assert(
+                self.verified_auction_transcripts.read(batch_id) == transcript_commitment,
+                'AUCTION_RESULT_REQUIRED',
+            );
+            if self.verified_settlement_output_recovery_active.read(batch_id) {
+                assert(
+                    self
+                        .verified_settlement_output_recovery_transcripts
+                        .read(batch_id) == transcript_commitment,
+                    'RECOVERY_EXISTS',
+                );
+            } else {
+                let expected_statement_message = native_settlement_output_recovery_message_hash(
+                    get_contract_address(), transcript_commitment,
+                );
+                let expected_messages = array![
+                    settlement_output_recovery_proof_message_hash_from_statement(
+                        self.proof_program.read(), expected_statement_message,
+                    ),
+                ];
+                assert_valid_proof_facts_messages(
+                    @self, expected_messages.span(), STATEMENT_SETTLEMENT_OUTPUT_RECOVERY,
+                );
+                self.verified_settlement_output_recovery_active.write(batch_id, true);
+                self
+                    .verified_settlement_output_recovery_transcripts
+                    .write(batch_id, transcript_commitment);
             }
         }
 
@@ -856,6 +1026,10 @@ pub mod AuctionVerifier {
             assert(self.pending_root_transition_batch.read() == batch_id, 'ROOT_TRANSITION_BATCH');
             self.verified_nullifier_roots_active.write(batch_id, false);
             self.verified_renewal_roots_active.write(batch_id, false);
+            self.verified_settlement_order_active.write(batch_id, false);
+            self.verified_settlement_input_membership_active.write(batch_id, false);
+            self.verified_settlement_output_recovery_active.write(batch_id, false);
+            self.verified_multi_pair_solution_active.write(batch_id, false);
             clear_root_transition(ref self, batch_id);
         }
 
@@ -869,11 +1043,9 @@ pub mod AuctionVerifier {
             clearing_price: u128,
             price_base_scale: u128,
             taker_fee_bps: u128,
-            maker_fee_bps: u128,
-            relay_fee_bps: u128,
             protocol_fee_recipient: felt252,
-            relay_fee_recipient: felt252,
             output_bundle_ref: felt252,
+            multi_pair_commitment: felt252,
             prior_note_root: felt252,
             prior_nullifier_root: felt252,
             prior_renewal_root: felt252,
@@ -929,12 +1101,50 @@ pub mod AuctionVerifier {
                 self.verified_new_renewal_roots.read(batch_id) == new_renewal_root,
                 'NEW_RENEWAL_ROOT',
             );
+            assert(self.verified_settlement_order_active.read(batch_id), 'ORDER_PROOF_REQUIRED');
+            assert(
+                self.verified_settlement_order_transcripts.read(batch_id) == transcript_commitment,
+                'ORDER_TRANSCRIPT',
+            );
+            assert(
+                self.verified_settlement_input_membership_active.read(batch_id),
+                'MEMBER_PROOF_REQUIRED',
+            );
+            assert(
+                self
+                    .verified_settlement_input_membership_transcripts
+                    .read(batch_id) == transcript_commitment,
+                'MEMBER_TRANSCRIPT',
+            );
+            assert(
+                self.verified_settlement_output_recovery_active.read(batch_id),
+                'RECOVERY_PROOF_REQUIRED',
+            );
+            assert(
+                self
+                    .verified_settlement_output_recovery_transcripts
+                    .read(batch_id) == transcript_commitment,
+                'RECOVERY_TRANSCRIPT',
+            );
+            if multi_pair_commitment != 0 {
+                assert(
+                    self.verified_multi_pair_solution_active.read(batch_id), 'MP_PROOF_REQUIRED',
+                );
+                assert(
+                    self
+                        .verified_multi_pair_solution_commitments
+                        .read(batch_id) == multi_pair_commitment,
+                    'MP_COMMITMENT',
+                );
+            }
             let expected_messages = array![
                 settlement_proof_message_hash_from_statement(
                     self.proof_program.read(), expected_statement_message,
                 ),
             ];
-            assert_valid_proof_facts_messages(@self, expected_messages.span());
+            assert_valid_proof_facts_messages(
+                @self, expected_messages.span(), STATEMENT_SETTLEMENT,
+            );
 
             settle_verified_batch(
                 ref self,
@@ -945,11 +1155,9 @@ pub mod AuctionVerifier {
                 clearing_price,
                 price_base_scale,
                 taker_fee_bps,
-                maker_fee_bps,
-                relay_fee_bps,
                 protocol_fee_recipient,
-                relay_fee_recipient,
                 output_bundle_ref,
+                multi_pair_commitment,
                 prior_note_root,
                 prior_nullifier_root,
                 prior_renewal_root,
@@ -965,6 +1173,150 @@ pub mod AuctionVerifier {
                 new_fee_root,
             );
             clear_root_transition(ref self, batch_id);
+        }
+
+        fn submit_multi_pair_settlement_with_proof_facts(
+            ref self: ContractState,
+            group_id: felt252,
+            batch_epoch: u64,
+            batch_ids: Span<felt252>,
+            pair_ids: Span<felt252>,
+            order_commitment_roots: Span<felt252>,
+            encrypted_order_set_commitments: Span<felt252>,
+            base_asset_ids: Span<felt252>,
+            quote_asset_ids: Span<felt252>,
+            price_base_scales: Span<felt252>,
+            taker_fee_bps_values: Span<felt252>,
+            transcript_commitment: felt252,
+            proof_artifact_commitment: felt252,
+            protocol_fee_recipient: felt252,
+            output_bundle_ref: felt252,
+            multi_pair_commitment: felt252,
+            batch_binding_root: felt252,
+            prior_note_root: felt252,
+            prior_nullifier_root: felt252,
+            prior_renewal_root: felt252,
+            prior_fee_root: felt252,
+            consumed_note_root: felt252,
+            consumed_nullifier_root: felt252,
+            renewal_child_root: felt252,
+            output_note_root: felt252,
+            fee_root: felt252,
+            new_note_root: felt252,
+            new_nullifier_root: felt252,
+            new_renewal_root: felt252,
+            new_fee_root: felt252,
+        ) {
+            assert_authorized_settlement_account(@self);
+            assert_not_paused(@self);
+            assert(group_id != 0, 'BAD_GROUP');
+            assert(batch_epoch != 0, 'BAD_EPOCH');
+            assert(transcript_commitment != 0, 'BAD_TRANSCRIPT');
+            assert(output_bundle_ref != 0, 'BAD_OUTPUT_BUNDLE');
+            assert(multi_pair_commitment != 0, 'BAD_MULTI_PAIR');
+            assert(batch_binding_root != 0, 'BAD_BATCH_BINDING');
+            assert(protocol_fee_recipient != 0, 'BAD_FEE_RECIPIENT');
+            assert(self.settled_batches.read(group_id) == false, 'GROUP_ID_BATCH');
+            assert(self.settled_consolidations.read(group_id) == false, 'GROUP_ID_CONSOL');
+            assert(self.settled_multi_pair_groups.read(group_id) == false, 'GROUP_SETTLED');
+            let batch_registry = IBatchRegistryDispatcher {
+                contract_address: self.batch_registry.read(),
+            };
+            assert(batch_registry.batch_exists(group_id) == false, 'GROUP_ID_BATCH_REG');
+            assert(self.output_note_roots.read(group_id) == 0, 'GROUP_OUTPUT_USED');
+            claim_root_transition(ref self, group_id);
+            assert(prior_note_root == self.current_note_root.read(), 'NOTE_ROOT_STALE');
+            assert(
+                prior_nullifier_root == self.current_nullifier_root.read(), 'NULLIFIER_ROOT_STALE',
+            );
+            assert(prior_renewal_root == self.current_renewal_root.read(), 'RENEWAL_ROOT_STALE');
+            assert(prior_fee_root == self.current_fee_root.read(), 'FEE_ROOT_STALE');
+            assert(
+                new_note_root == state_transition_root(prior_note_root, output_note_root),
+                'NEW_NOTE_ROOT',
+            );
+            assert(new_nullifier_root != 0 || prior_nullifier_root == 0, 'NEW_NULLIFIER_ROOT');
+            assert(new_renewal_root != 0 || prior_renewal_root == 0, 'NEW_RENEWAL_ROOT');
+            assert(new_fee_root == state_transition_root(prior_fee_root, fee_root), 'NEW_FEE_ROOT');
+            assert_multi_pair_member_batch_bindings(
+                @self,
+                batch_epoch,
+                batch_ids,
+                pair_ids,
+                order_commitment_roots,
+                encrypted_order_set_commitments,
+                base_asset_ids,
+                quote_asset_ids,
+                price_base_scales,
+                taker_fee_bps_values,
+                protocol_fee_recipient,
+            );
+            let recomputed_batch_binding_root = multi_pair_batch_binding_root(
+                batch_ids,
+                pair_ids,
+                batch_epoch,
+                order_commitment_roots,
+                encrypted_order_set_commitments,
+                base_asset_ids,
+                quote_asset_ids,
+                price_base_scales,
+                taker_fee_bps_values,
+            );
+            assert(recomputed_batch_binding_root == batch_binding_root, 'MP_BINDING');
+            assert(self.verified_multi_pair_solution_active.read(group_id), 'MP_PROOF_REQUIRED');
+            assert(
+                self
+                    .verified_multi_pair_solution_commitments
+                    .read(group_id) == multi_pair_commitment,
+                'MP_COMMITMENT',
+            );
+            let recomputed_commitment = public_multi_pair_settlement_commitment(
+                group_id,
+                batch_epoch,
+                batch_binding_root,
+                protocol_fee_recipient,
+                output_bundle_ref,
+                multi_pair_commitment,
+                prior_note_root,
+                prior_nullifier_root,
+                prior_renewal_root,
+                prior_fee_root,
+                consumed_note_root,
+                consumed_nullifier_root,
+                renewal_child_root,
+                output_note_root,
+                fee_root,
+                new_note_root,
+                new_nullifier_root,
+                new_renewal_root,
+                new_fee_root,
+            );
+            assert(recomputed_commitment == transcript_commitment, 'MP_SETTLEMENT_BINDING');
+            let expected_statement_message = native_multi_pair_settlement_message_hash(
+                get_contract_address(), transcript_commitment,
+            );
+            assert(proof_artifact_commitment == expected_statement_message, 'PROOF_COMMITMENT');
+            let expected_messages = array![
+                multi_pair_settlement_proof_message_hash_from_statement(
+                    self.proof_program.read(), expected_statement_message,
+                ),
+            ];
+            assert_valid_proof_facts_messages(
+                @self, expected_messages.span(), STATEMENT_MULTI_PAIR_SETTLEMENT,
+            );
+            settle_verified_multi_pair_group(
+                ref self,
+                group_id,
+                batch_ids,
+                transcript_commitment,
+                output_bundle_ref,
+                output_note_root,
+                new_note_root,
+                new_nullifier_root,
+                new_renewal_root,
+                new_fee_root,
+            );
+            clear_root_transition(ref self, group_id);
         }
 
         fn submit_note_consolidation_with_proof_facts(
@@ -1027,7 +1379,9 @@ pub mod AuctionVerifier {
                     self.proof_program.read(), expected_statement_message,
                 ),
             ];
-            assert_valid_proof_facts_messages(@self, expected_messages.span());
+            assert_valid_proof_facts_messages(
+                @self, expected_messages.span(), STATEMENT_NOTE_CONSOLIDATION,
+            );
 
             self.settled_consolidations.write(consolidation_id, true);
             self.settled_at_unix_seconds.write(consolidation_id, current_block_timestamp());
@@ -1051,103 +1405,14 @@ pub mod AuctionVerifier {
             assert_no_pending_root_transition(@self);
             let settlement_count = aggregate_settlement_count(settlement_inputs);
             assert(settlement_count != 0, 'EMPTY_AGGREGATE');
+            assert(settlement_count <= MAX_AGGREGATE_SETTLEMENTS, 'TOO_MANY_AGG');
             let expected_messages = aggregate_expected_messages(
                 @self, settlement_inputs, settlement_count,
             );
-            assert_valid_proof_facts_messages(@self, expected_messages.span());
+            assert_valid_proof_facts_messages(
+                @self, expected_messages.span(), STATEMENT_AGGREGATE_SETTLEMENT,
+            );
             settle_aggregate_verified_batches(ref self, settlement_inputs, settlement_count);
-        }
-
-        fn withdraw_settlement_output_with_proof_facts(
-            ref self: ContractState,
-            batch_id: felt252,
-            proof_artifact_commitment: felt252,
-            prior_nullifier_root: felt252,
-            consumed_nullifier_root: felt252,
-            new_nullifier_root: felt252,
-            note_commitment: felt252,
-            asset_id: felt252,
-            amount: u128,
-            withdraw_authority: felt252,
-            merkle_path: Span<felt252>,
-            merkle_directions: Span<felt252>,
-            withdraw_authorization_r: felt252,
-            withdraw_authorization_s: felt252,
-            recipient: ContractAddress,
-        ) -> (felt252, u128) {
-            assert_not_paused(@self);
-            assert_no_pending_root_transition(@self);
-            assert(batch_id != 0, 'BAD_BATCH');
-            assert(proof_artifact_commitment != 0, 'BAD_PROOF');
-            assert(consumed_nullifier_root != 0, 'BAD_CONSUMED_NULLS');
-            assert(new_nullifier_root != 0, 'NEW_NULLIFIER_ROOT');
-            assert(note_commitment != 0, 'BAD_COMMITMENT');
-            assert(asset_id != 0, 'BAD_ASSET');
-            assert(amount > 0, 'BAD_AMOUNT');
-            assert(withdraw_authority != 0, 'BAD_AUTHORITY');
-            assert(withdraw_authorization_r != 0, 'BAD_WITHDRAW_SIG');
-            assert(withdraw_authorization_s != 0, 'BAD_WITHDRAW_SIG');
-            assert(!recipient.is_zero(), 'BAD_RECIPIENT');
-            assert(
-                prior_nullifier_root == self.current_nullifier_root.read(), 'NULLIFIER_ROOT_STALE',
-            );
-            let settled = self.settled_batches.read(batch_id);
-            let consolidated = self.settled_consolidations.read(batch_id);
-            assert(settled == true || consolidated == true, 'UNKNOWN_SETTLEMENT');
-            assert_output_claim_window_open(@self, batch_id);
-            let already_withdrawn = self.withdrawn_output_notes.read(note_commitment);
-            assert(already_withdrawn == false, 'OUTPUT_WITHDRAWN');
-            let output_note_root = self.output_note_roots.read(batch_id);
-            let recomputed_root = verify_output_note_path(
-                note_commitment,
-                asset_id,
-                amount,
-                withdraw_authority,
-                merkle_path,
-                merkle_directions,
-            );
-            assert(recomputed_root == output_note_root, 'OUTPUT_NOTE_PROOF');
-
-            let withdrawal_commitment = public_note_withdrawal_commitment(
-                batch_id,
-                note_commitment,
-                asset_id,
-                amount,
-                withdraw_authority,
-                prior_nullifier_root,
-                consumed_nullifier_root,
-                new_nullifier_root,
-            );
-            let expected_statement_message = native_withdrawal_message_hash(
-                get_contract_address(), withdrawal_commitment,
-            );
-            assert(proof_artifact_commitment == expected_statement_message, 'PROOF_COMMITMENT');
-            let expected_messages = array![
-                withdrawal_proof_message_hash_from_statement(
-                    self.proof_program.read(), expected_statement_message,
-                ),
-            ];
-            assert_valid_proof_facts_messages(@self, expected_messages.span());
-
-            let adapter_address = self.shielded_asset_adapter.read();
-            assert(!adapter_address.is_zero(), 'BAD_ADAPTER');
-            assert(
-                check_ecdsa_signature(
-                    output_withdrawal_message_hash(
-                        adapter_address, batch_id, note_commitment, asset_id, amount, recipient,
-                    ),
-                    withdraw_authority,
-                    withdraw_authorization_r,
-                    withdraw_authorization_s,
-                ),
-                'BAD_WITHDRAW_SIG',
-            );
-
-            self.current_nullifier_root.write(new_nullifier_root);
-            self.withdrawn_output_notes.write(note_commitment, true);
-            let adapter = IShieldedAssetAdapterDispatcher { contract_address: adapter_address };
-            adapter.withdraw_verified_note(asset_id, amount, note_commitment, recipient);
-            (asset_id, amount)
         }
 
         fn withdraw_settlement_output_to_strk20_with_proof_facts(
@@ -1185,7 +1450,11 @@ pub mod AuctionVerifier {
             );
             let settled = self.settled_batches.read(batch_id);
             let consolidated = self.settled_consolidations.read(batch_id);
-            assert(settled == true || consolidated == true, 'UNKNOWN_SETTLEMENT');
+            let multi_pair_group = self.settled_multi_pair_groups.read(batch_id);
+            assert(
+                settled == true || consolidated == true || multi_pair_group == true,
+                'UNKNOWN_SETTLEMENT',
+            );
             assert_output_claim_window_open(@self, batch_id);
             let already_withdrawn = self.withdrawn_output_notes.read(note_commitment);
             assert(already_withdrawn == false, 'OUTPUT_WITHDRAWN');
@@ -1219,7 +1488,9 @@ pub mod AuctionVerifier {
                     self.proof_program.read(), expected_statement_message,
                 ),
             ];
-            assert_valid_proof_facts_messages(@self, expected_messages.span());
+            assert_valid_proof_facts_messages(
+                @self, expected_messages.span(), STATEMENT_WITHDRAWAL,
+            );
 
             let adapter_address = self.shielded_asset_adapter.read();
             assert(!adapter_address.is_zero(), 'BAD_ADAPTER');
@@ -1258,6 +1529,16 @@ pub mod AuctionVerifier {
             self.settled_consolidations.read(consolidation_id)
         }
 
+        fn is_multi_pair_group_settled(self: @ContractState, group_id: felt252) -> bool {
+            self.settled_multi_pair_groups.read(group_id)
+        }
+
+        fn verified_multi_pair_settlement_transcript(
+            self: @ContractState, group_id: felt252,
+        ) -> felt252 {
+            self.verified_multi_pair_settlement_transcripts.read(group_id)
+        }
+
         fn verified_admission_root(self: @ContractState, batch_id: felt252) -> felt252 {
             self.verified_admission_roots.read(batch_id)
         }
@@ -1279,26 +1560,26 @@ pub mod AuctionVerifier {
             )
         }
 
+        fn verified_multi_pair_solution(
+            self: @ContractState, batch_id: felt252,
+        ) -> (felt252, bool) {
+            (
+                self.verified_multi_pair_solution_commitments.read(batch_id),
+                self.verified_multi_pair_solution_active.read(batch_id),
+            )
+        }
+
         fn renewal_cancel_marker_recorded(self: @ContractState, cancel_marker: felt252) -> bool {
             self.renewal_cancel_markers.read(cancel_marker)
         }
 
-        fn pair_fee_config(self: @ContractState, pair_id: felt252) -> (u128, u128, u128, bool) {
-            (
-                self.pair_taker_fee_bps.read(pair_id),
-                self.pair_maker_fee_bps.read(pair_id),
-                self.pair_relay_fee_bps.read(pair_id),
-                self.pair_fee_configured.read(pair_id),
-            )
+        fn pair_fee_config(self: @ContractState, pair_id: felt252) -> (u128, bool) {
+            (self.pair_taker_fee_bps.read(pair_id), self.pair_fee_configured.read(pair_id))
         }
 
-        fn pending_pair_fee_config(
-            self: @ContractState, pair_id: felt252,
-        ) -> (u128, u128, u128, u64, bool) {
+        fn pending_pair_fee_config(self: @ContractState, pair_id: felt252) -> (u128, u64, bool) {
             (
                 self.pending_pair_taker_fee_bps.read(pair_id),
-                self.pending_pair_maker_fee_bps.read(pair_id),
-                self.pending_pair_relay_fee_bps.read(pair_id),
                 self.pending_pair_fee_config_eta.read(pair_id),
                 self.pending_pair_fee_config_active.read(pair_id),
             )
@@ -1337,18 +1618,6 @@ pub mod AuctionVerifier {
                 self.pending_protocol_fee_recipient.read(),
                 self.pending_protocol_fee_recipient_eta.read(),
                 self.pending_protocol_fee_recipient_active.read(),
-            )
-        }
-
-        fn relay_fee_recipient(self: @ContractState) -> felt252 {
-            self.relay_fee_recipient.read()
-        }
-
-        fn pending_relay_fee_recipient(self: @ContractState) -> (felt252, u64, bool) {
-            (
-                self.pending_relay_fee_recipient.read(),
-                self.pending_relay_fee_recipient_eta.read(),
-                self.pending_relay_fee_recipient_active.read(),
             )
         }
 
@@ -1404,6 +1673,30 @@ pub mod AuctionVerifier {
             );
             withdrawal_proof_message_hash_from_statement(proof_program, statement_message_hash)
         }
+
+        fn multi_pair_proof_message_hash(
+            self: @ContractState, batch_id: felt252, multi_pair_commitment: felt252,
+        ) -> felt252 {
+            let proof_program = self.proof_program.read();
+            assert(!proof_program.is_zero(), 'PROOF_PROGRAM_UNSET');
+            let statement_message_hash = native_multi_pair_message_hash(
+                get_contract_address(), batch_id, multi_pair_commitment,
+            );
+            multi_pair_proof_message_hash_from_statement(proof_program, statement_message_hash)
+        }
+
+        fn multi_pair_settlement_proof_message_hash(
+            self: @ContractState, transcript_commitment: felt252,
+        ) -> felt252 {
+            let proof_program = self.proof_program.read();
+            assert(!proof_program.is_zero(), 'PROOF_PROGRAM_UNSET');
+            let statement_message_hash = native_multi_pair_settlement_message_hash(
+                get_contract_address(), transcript_commitment,
+            );
+            multi_pair_settlement_proof_message_hash_from_statement(
+                proof_program, statement_message_hash,
+            )
+        }
     }
 
     fn assert_admin(self: @ContractState) {
@@ -1451,7 +1744,38 @@ pub mod AuctionVerifier {
         assert(get_caller_address() == self.deposit_root_registrar.read(), 'UNAUTHORIZED');
     }
 
-    fn assert_valid_proof_facts_messages(self: @ContractState, expected_messages: Span<felt252>) {
+    fn statement_proof_hash_or_default(self: @ContractState, statement_kind: felt252) -> felt252 {
+        let statement_hash = self.statement_proof_program_hashes.read(statement_kind);
+        if statement_hash == 0 {
+            self.proof_program_hash.read()
+        } else {
+            statement_hash
+        }
+    }
+
+    fn assert_statement_proof_hash_configured(self: @ContractState, statement_kind: felt252) {
+        assert(self.statement_proof_program_hashes.read(statement_kind) != 0, 'PROOF_HASH_UNSET');
+    }
+
+    fn assert_required_statement_proof_hashes(self: @ContractState) {
+        assert_statement_proof_hash_configured(self, STATEMENT_ADMISSION);
+        assert_statement_proof_hash_configured(self, STATEMENT_AUCTION_RESULT);
+        assert_statement_proof_hash_configured(self, STATEMENT_NULLIFIER);
+        assert_statement_proof_hash_configured(self, STATEMENT_RENEWAL);
+        assert_statement_proof_hash_configured(self, STATEMENT_SETTLEMENT);
+        assert_statement_proof_hash_configured(self, STATEMENT_SETTLEMENT_ORDER);
+        assert_statement_proof_hash_configured(self, STATEMENT_SETTLEMENT_INPUT_MEMBERSHIP);
+        assert_statement_proof_hash_configured(self, STATEMENT_SETTLEMENT_OUTPUT_RECOVERY);
+        assert_statement_proof_hash_configured(self, STATEMENT_NOTE_CONSOLIDATION);
+        assert_statement_proof_hash_configured(self, STATEMENT_AGGREGATE_SETTLEMENT);
+        assert_statement_proof_hash_configured(self, STATEMENT_WITHDRAWAL);
+        assert_statement_proof_hash_configured(self, STATEMENT_MULTI_PAIR);
+        assert_statement_proof_hash_configured(self, STATEMENT_MULTI_PAIR_SETTLEMENT);
+    }
+
+    fn assert_valid_proof_facts_messages(
+        self: @ContractState, expected_messages: Span<felt252>, statement_kind: felt252,
+    ) {
         let execution_info = get_execution_info_v3_syscall().unwrap_syscall();
         let current_block_number = execution_info.block_info.block_number;
         let mut proof_facts_serialized = execution_info.tx_info.proof_facts;
@@ -1467,7 +1791,7 @@ pub mod AuctionVerifier {
         assert(expected_os_config_hash != 0, 'OS_CONFIG_UNSET');
         assert(proof_facts.starknet_os_config_hash == expected_os_config_hash, 'BAD_OS_CONFIG');
         let proof_program = self.proof_program.read();
-        let proof_program_hash = self.proof_program_hash.read();
+        let proof_program_hash = statement_proof_hash_or_default(self, statement_kind);
         assert(!proof_program.is_zero(), 'PROOF_PROGRAM_UNSET');
         assert(proof_program_hash != 0, 'PROOF_HASH_UNSET');
         assert(proof_facts.virtual_program_hash == proof_program_hash, 'BAD_PROOF_HASH');
@@ -1525,7 +1849,7 @@ pub mod AuctionVerifier {
             if cursor == settlement_count {
                 break;
             }
-            read_next(data, ref index);
+            let batch_id = read_next(data, ref index);
             read_next(data, ref index);
             read_next(data, ref index);
             let transcript_commitment = read_next(data, ref index);
@@ -1533,11 +1857,9 @@ pub mod AuctionVerifier {
             read_next_u128(data, ref index);
             read_next_u128(data, ref index);
             read_next_u128(data, ref index);
-            read_next_u128(data, ref index);
-            read_next_u128(data, ref index);
             read_next(data, ref index);
             read_next(data, ref index);
-            read_next(data, ref index);
+            let multi_pair_commitment = read_next(data, ref index);
             read_next(data, ref index);
             let prior_nullifier_root = read_next(data, ref index);
             let prior_renewal_root = read_next(data, ref index);
@@ -1587,6 +1909,17 @@ pub mod AuctionVerifier {
                         ),
                     ),
                 );
+            if multi_pair_commitment != 0 {
+                expected_messages
+                    .append(
+                        multi_pair_proof_message_hash_from_statement(
+                            self.proof_program.read(),
+                            native_multi_pair_message_hash(
+                                get_contract_address(), batch_id, multi_pair_commitment,
+                            ),
+                        ),
+                    );
+            }
             cursor += 1;
         }
         assert(index == data.len(), 'TRAILING_AGG_INPUT');
@@ -1612,11 +1945,9 @@ pub mod AuctionVerifier {
             let clearing_price = read_next_u128(data, ref index);
             let price_base_scale = read_next_u128(data, ref index);
             let taker_fee_bps = read_next_u128(data, ref index);
-            let maker_fee_bps = read_next_u128(data, ref index);
-            let relay_fee_bps = read_next_u128(data, ref index);
             let protocol_fee_recipient = read_next(data, ref index);
-            let relay_fee_recipient = read_next(data, ref index);
             let output_bundle_ref = read_next(data, ref index);
+            let multi_pair_commitment = read_next(data, ref index);
             let prior_note_root = read_next(data, ref index);
             let prior_nullifier_root = read_next(data, ref index);
             let prior_renewal_root = read_next(data, ref index);
@@ -1644,11 +1975,9 @@ pub mod AuctionVerifier {
                 clearing_price,
                 price_base_scale,
                 taker_fee_bps,
-                maker_fee_bps,
-                relay_fee_bps,
                 protocol_fee_recipient,
-                relay_fee_recipient,
                 output_bundle_ref,
+                multi_pair_commitment,
                 prior_note_root,
                 prior_nullifier_root,
                 prior_renewal_root,
@@ -1695,6 +2024,20 @@ pub mod AuctionVerifier {
         array![RENEWAL_MESSAGE_DOMAIN, statement_message_hash]
     }
 
+    fn settlement_order_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![SETTLEMENT_ORDER_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
+    fn settlement_input_membership_proof_payload(
+        statement_message_hash: felt252,
+    ) -> Array<felt252> {
+        array![SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
+    fn settlement_output_recovery_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
     fn note_consolidation_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![NOTE_CONSOLIDATION_MESSAGE_DOMAIN, statement_message_hash]
     }
@@ -1709,6 +2052,14 @@ pub mod AuctionVerifier {
 
     fn auction_result_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![AUCTION_RESULT_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
+    fn multi_pair_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![MULTI_PAIR_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
+    fn multi_pair_settlement_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![MULTI_PAIR_SETTLEMENT_MESSAGE_DOMAIN, statement_message_hash]
     }
 
     fn settlement_proof_message_hash_from_statement(
@@ -1734,6 +2085,33 @@ pub mod AuctionVerifier {
     ) -> felt252 {
         let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
         let payload = renewal_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn settlement_order_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = settlement_order_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn settlement_input_membership_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = settlement_input_membership_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn settlement_output_recovery_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = settlement_output_recovery_proof_payload(statement_message_hash);
         payload.serialize(ref l1_message_data);
         poseidon_hash_span(l1_message_data.span())
     }
@@ -1770,6 +2148,24 @@ pub mod AuctionVerifier {
     ) -> felt252 {
         let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
         let payload = auction_result_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn multi_pair_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = multi_pair_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn multi_pair_settlement_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = multi_pair_settlement_proof_payload(statement_message_hash);
         payload.serialize(ref l1_message_data);
         poseidon_hash_span(l1_message_data.span())
     }
@@ -1817,6 +2213,57 @@ pub mod AuctionVerifier {
         state = poseidon_hash2(state, prior_renewal_root);
         state = poseidon_hash2(state, renewal_child_root);
         state = poseidon_hash2(state, new_renewal_root);
+        state
+    }
+
+    fn native_multi_pair_message_hash(
+        auction_verifier_address: ContractAddress,
+        batch_id: felt252,
+        multi_pair_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(MULTI_PAIR_MESSAGE_DOMAIN, auction_verifier_address.into());
+        state = poseidon_hash2(state, batch_id);
+        state = poseidon_hash2(state, multi_pair_commitment);
+        state
+    }
+
+    fn native_multi_pair_settlement_message_hash(
+        auction_verifier_address: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            MULTI_PAIR_SETTLEMENT_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
+        state = poseidon_hash2(state, transcript_commitment);
+        state
+    }
+
+    fn native_settlement_order_message_hash(
+        auction_verifier_address: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            SETTLEMENT_ORDER_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
+        state = poseidon_hash2(state, transcript_commitment);
+        state
+    }
+
+    fn native_settlement_input_membership_message_hash(
+        auction_verifier_address: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
+        state = poseidon_hash2(state, transcript_commitment);
+        state
+    }
+
+    fn native_settlement_output_recovery_message_hash(
+        auction_verifier_address: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
+        state = poseidon_hash2(state, transcript_commitment);
         state
     }
 
@@ -1868,6 +2315,245 @@ pub mod AuctionVerifier {
         state
     }
 
+    fn assert_multi_pair_member_batch_bindings(
+        self: @ContractState,
+        batch_epoch: u64,
+        batch_ids: Span<felt252>,
+        pair_ids: Span<felt252>,
+        order_commitment_roots: Span<felt252>,
+        encrypted_order_set_commitments: Span<felt252>,
+        base_asset_ids: Span<felt252>,
+        quote_asset_ids: Span<felt252>,
+        price_base_scales: Span<felt252>,
+        taker_fee_bps_values: Span<felt252>,
+        protocol_fee_recipient: felt252,
+    ) {
+        assert_multi_pair_batch_vector_lengths(
+            batch_ids,
+            pair_ids,
+            order_commitment_roots,
+            encrypted_order_set_commitments,
+            base_asset_ids,
+            quote_asset_ids,
+            price_base_scales,
+            taker_fee_bps_values,
+        );
+        assert(batch_ids.len() != 0, 'MP_EMPTY_BATCHES');
+        assert(batch_ids.len() <= MAX_AGGREGATE_SETTLEMENTS, 'MP_TOO_MANY_BATCHES');
+        assert_unique_nonzero(batch_ids, 'MP_BATCH_ID_DUP');
+
+        let batch_registry = IBatchRegistryDispatcher {
+            contract_address: self.batch_registry.read(),
+        };
+        let mut index: usize = 0;
+        loop {
+            if index == batch_ids.len() {
+                break;
+            }
+            let batch_id = *batch_ids.at(index);
+            assert(self.settled_batches.read(batch_id) == false, 'MP_BATCH_SETTLED');
+            assert(self.settled_consolidations.read(batch_id) == false, 'MP_BATCH_CONSOL');
+            assert(self.settled_multi_pair_groups.read(batch_id) == false, 'MP_BATCH_GROUP');
+            let batch = batch_registry.get_batch(batch_id);
+            assert(batch.status == BatchStatus::Prepared, 'MP_BATCH_NOT_PREP');
+            assert(batch.pair_id == *pair_ids.at(index), 'MP_PAIR_BINDING');
+            assert(batch.epoch_id == batch_epoch, 'MP_EPOCH_BINDING');
+            assert(
+                batch.order_commitment_root == *order_commitment_roots.at(index),
+                'MP_ORDER_ROOT_BIND',
+            );
+            assert(
+                batch.encrypted_order_set_commitment == *encrypted_order_set_commitments.at(index),
+                'MP_ENC_ROOT_BIND',
+            );
+            assert(self.verified_admission_roots.read(batch_id) != 0, 'MP_ADMISSION_REQUIRED');
+            assert(*base_asset_ids.at(index) != 0, 'MP_BASE_ASSET');
+            assert(*quote_asset_ids.at(index) != 0, 'MP_QUOTE_ASSET');
+            assert(*base_asset_ids.at(index) != *quote_asset_ids.at(index), 'MP_PAIR_ASSETS');
+            let price_base_scale: u128 = (*price_base_scales.at(index))
+                .try_into()
+                .expect('MP_PRICE_SCALE');
+            let taker_fee_bps: u128 = (*taker_fee_bps_values.at(index))
+                .try_into()
+                .expect('MP_TAKER_FEE');
+            assert(price_base_scale != 0, 'MP_PRICE_SCALE');
+            assert_pair_fee_config(self, batch.pair_id, taker_fee_bps, protocol_fee_recipient);
+            index += 1;
+        }
+    }
+
+    fn assert_multi_pair_batch_vector_lengths(
+        batch_ids: Span<felt252>,
+        pair_ids: Span<felt252>,
+        order_commitment_roots: Span<felt252>,
+        encrypted_order_set_commitments: Span<felt252>,
+        base_asset_ids: Span<felt252>,
+        quote_asset_ids: Span<felt252>,
+        price_base_scales: Span<felt252>,
+        taker_fee_bps_values: Span<felt252>,
+    ) {
+        assert(batch_ids.len() == pair_ids.len(), 'MP_BIND_LEN');
+        assert(batch_ids.len() == order_commitment_roots.len(), 'MP_BIND_LEN');
+        assert(batch_ids.len() == encrypted_order_set_commitments.len(), 'MP_BIND_LEN');
+        assert(batch_ids.len() == base_asset_ids.len(), 'MP_BIND_LEN');
+        assert(batch_ids.len() == quote_asset_ids.len(), 'MP_BIND_LEN');
+        assert(batch_ids.len() == price_base_scales.len(), 'MP_BIND_LEN');
+        assert(batch_ids.len() == taker_fee_bps_values.len(), 'MP_BIND_LEN');
+    }
+
+    fn assert_unique_nonzero(values: Span<felt252>, error: felt252) {
+        let mut i: usize = 0;
+        loop {
+            if i == values.len() {
+                break;
+            }
+            let value = *values.at(i);
+            assert(value != 0, error);
+            let mut j = i + 1;
+            loop {
+                if j == values.len() {
+                    break;
+                }
+                assert(value != *values.at(j), error);
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+
+    fn multi_pair_batch_binding_root(
+        batch_ids: Span<felt252>,
+        pair_ids: Span<felt252>,
+        batch_epoch: u64,
+        order_commitment_roots: Span<felt252>,
+        encrypted_order_set_commitments: Span<felt252>,
+        base_asset_ids: Span<felt252>,
+        quote_asset_ids: Span<felt252>,
+        price_base_scales: Span<felt252>,
+        taker_fee_bps_values: Span<felt252>,
+    ) -> felt252 {
+        assert_multi_pair_batch_vector_lengths(
+            batch_ids,
+            pair_ids,
+            order_commitment_roots,
+            encrypted_order_set_commitments,
+            base_asset_ids,
+            quote_asset_ids,
+            price_base_scales,
+            taker_fee_bps_values,
+        );
+        let mut state = MULTI_PAIR_BATCH_ROOT_DOMAIN;
+        let mut index: usize = 0;
+        loop {
+            if index == batch_ids.len() {
+                break;
+            }
+            state = poseidon_hash2(state, *batch_ids.at(index));
+            state = poseidon_hash2(state, *pair_ids.at(index));
+            state = poseidon_hash2(state, batch_epoch.into());
+            state = poseidon_hash2(state, *order_commitment_roots.at(index));
+            state = poseidon_hash2(state, *encrypted_order_set_commitments.at(index));
+            state = poseidon_hash2(state, *base_asset_ids.at(index));
+            state = poseidon_hash2(state, *quote_asset_ids.at(index));
+            state = poseidon_hash2(state, *price_base_scales.at(index));
+            state = poseidon_hash2(state, *taker_fee_bps_values.at(index));
+            index += 1;
+        }
+        poseidon_hash2(state, batch_ids.len().into())
+    }
+
+    fn public_multi_pair_settlement_commitment(
+        group_id: felt252,
+        batch_epoch: u64,
+        batch_binding_root: felt252,
+        protocol_fee_recipient: felt252,
+        output_bundle_ref: felt252,
+        multi_pair_commitment: felt252,
+        prior_note_root: felt252,
+        prior_nullifier_root: felt252,
+        prior_renewal_root: felt252,
+        prior_fee_root: felt252,
+        consumed_note_root: felt252,
+        consumed_nullifier_root: felt252,
+        renewal_child_root: felt252,
+        output_note_root: felt252,
+        fee_root: felt252,
+        new_note_root: felt252,
+        new_nullifier_root: felt252,
+        new_renewal_root: felt252,
+        new_fee_root: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(PUBLIC_MULTI_PAIR_SETTLEMENT_DOMAIN, group_id);
+        state = poseidon_hash2(state, batch_epoch.into());
+        state = poseidon_hash2(state, batch_binding_root);
+        state = poseidon_hash2(state, protocol_fee_recipient);
+        state = poseidon_hash2(state, output_bundle_ref);
+        state = poseidon_hash2(state, multi_pair_commitment);
+        state = poseidon_hash2(state, prior_note_root);
+        state = poseidon_hash2(state, prior_nullifier_root);
+        state = poseidon_hash2(state, prior_renewal_root);
+        state = poseidon_hash2(state, prior_fee_root);
+        state = poseidon_hash2(state, consumed_note_root);
+        state = poseidon_hash2(state, consumed_nullifier_root);
+        state = poseidon_hash2(state, renewal_child_root);
+        state = poseidon_hash2(state, output_note_root);
+        state = poseidon_hash2(state, fee_root);
+        state = poseidon_hash2(state, new_note_root);
+        state = poseidon_hash2(state, new_nullifier_root);
+        state = poseidon_hash2(state, new_renewal_root);
+        state = poseidon_hash2(state, new_fee_root);
+        state
+    }
+
+    fn settle_verified_multi_pair_group(
+        ref self: ContractState,
+        group_id: felt252,
+        batch_ids: Span<felt252>,
+        transcript_commitment: felt252,
+        output_bundle_ref: felt252,
+        output_note_root: felt252,
+        new_note_root: felt252,
+        new_nullifier_root: felt252,
+        new_renewal_root: felt252,
+        new_fee_root: felt252,
+    ) {
+        let batch_registry = IBatchRegistryDispatcher {
+            contract_address: self.batch_registry.read(),
+        };
+        let settled_at = current_block_timestamp();
+        let mut index: usize = 0;
+        loop {
+            if index == batch_ids.len() {
+                break;
+            }
+            let batch_id = *batch_ids.at(index);
+            batch_registry
+                .record_settlement_metadata(batch_id, transcript_commitment, 0, output_bundle_ref);
+            self.settled_batches.write(batch_id, true);
+            self.settled_at_unix_seconds.write(batch_id, settled_at);
+            self.verified_auction_transcripts.write(batch_id, 0);
+            self.verified_multi_pair_solution_active.write(batch_id, false);
+            index += 1;
+        }
+
+        self.settled_multi_pair_groups.write(group_id, true);
+        self.settled_at_unix_seconds.write(group_id, settled_at);
+        self.output_note_roots.write(group_id, output_note_root);
+        self.verified_multi_pair_settlement_transcripts.write(group_id, transcript_commitment);
+        self.current_note_root.write(new_note_root);
+        self.current_nullifier_root.write(new_nullifier_root);
+        self.current_renewal_root.write(new_renewal_root);
+        self.current_fee_root.write(new_fee_root);
+        self.verified_multi_pair_solution_active.write(group_id, false);
+        record_note_root_transition(
+            ref self,
+            NOTE_ROOT_TRANSITION_MULTI_PAIR_SETTLEMENT,
+            group_id,
+            output_note_root,
+            new_note_root,
+        );
+    }
+
     fn settle_verified_batch(
         ref self: ContractState,
         batch_id: felt252,
@@ -1877,11 +2563,9 @@ pub mod AuctionVerifier {
         clearing_price: u128,
         price_base_scale: u128,
         taker_fee_bps: u128,
-        maker_fee_bps: u128,
-        relay_fee_bps: u128,
         protocol_fee_recipient: felt252,
-        relay_fee_recipient: felt252,
         output_bundle_ref: felt252,
+        multi_pair_commitment: felt252,
         prior_note_root: felt252,
         prior_nullifier_root: felt252,
         prior_renewal_root: felt252,
@@ -1904,10 +2588,7 @@ pub mod AuctionVerifier {
         assert(prior_fee_root == self.current_fee_root.read(), 'FEE_ROOT_STALE');
         assert(price_base_scale != 0, 'BAD_PRICE_SCALE');
         assert(taker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_TAKER_FEE');
-        assert(maker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_MAKER_FEE');
-        assert(relay_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_RELAY_FEE');
         assert(protocol_fee_recipient != 0, 'BAD_FEE_RECIPIENT');
-        assert(relay_fee_recipient != 0, 'BAD_RELAY_RECIPIENT');
         assert(
             new_note_root == state_transition_root(prior_note_root, output_note_root),
             'NEW_NOTE_ROOT',
@@ -1926,15 +2607,7 @@ pub mod AuctionVerifier {
             batch.encrypted_order_set_commitment == encrypted_order_set_commitment,
             'ENC_SET_BINDING',
         );
-        assert_pair_fee_config(
-            @self,
-            batch.pair_id,
-            taker_fee_bps,
-            maker_fee_bps,
-            relay_fee_bps,
-            protocol_fee_recipient,
-            relay_fee_recipient,
-        );
+        assert_pair_fee_config(@self, batch.pair_id, taker_fee_bps, protocol_fee_recipient);
 
         let recomputed_commitment = public_settlement_commitment(
             batch_id,
@@ -1945,11 +2618,9 @@ pub mod AuctionVerifier {
             clearing_price,
             price_base_scale,
             taker_fee_bps,
-            maker_fee_bps,
-            relay_fee_bps,
             protocol_fee_recipient,
-            relay_fee_recipient,
             output_bundle_ref,
+            multi_pair_commitment,
             prior_note_root,
             prior_nullifier_root,
             prior_renewal_root,
@@ -1983,6 +2654,7 @@ pub mod AuctionVerifier {
         self.current_nullifier_root.write(new_nullifier_root);
         self.current_renewal_root.write(new_renewal_root);
         self.current_fee_root.write(new_fee_root);
+        self.verified_multi_pair_solution_active.write(batch_id, false);
         record_note_root_transition(
             ref self, NOTE_ROOT_TRANSITION_SETTLEMENT, batch_id, output_note_root, new_note_root,
         );
@@ -1997,11 +2669,9 @@ pub mod AuctionVerifier {
         clearing_price: u128,
         price_base_scale: u128,
         taker_fee_bps: u128,
-        maker_fee_bps: u128,
-        relay_fee_bps: u128,
         protocol_fee_recipient: felt252,
-        relay_fee_recipient: felt252,
         output_bundle_ref: felt252,
+        multi_pair_commitment: felt252,
         prior_note_root: felt252,
         prior_nullifier_root: felt252,
         prior_renewal_root: felt252,
@@ -2026,11 +2696,9 @@ pub mod AuctionVerifier {
         state = poseidon_hash2(state, clearing_price.into());
         state = poseidon_hash2(state, price_base_scale.into());
         state = poseidon_hash2(state, taker_fee_bps.into());
-        state = poseidon_hash2(state, maker_fee_bps.into());
-        state = poseidon_hash2(state, relay_fee_bps.into());
         state = poseidon_hash2(state, protocol_fee_recipient);
-        state = poseidon_hash2(state, relay_fee_recipient);
         state = poseidon_hash2(state, output_bundle_ref);
+        state = poseidon_hash2(state, multi_pair_commitment);
         state = poseidon_hash2(state, prior_note_root);
         state = poseidon_hash2(state, prior_nullifier_root);
         state = poseidon_hash2(state, prior_renewal_root);
@@ -2102,19 +2770,13 @@ pub mod AuctionVerifier {
         self: @ContractState,
         pair_id: felt252,
         taker_fee_bps: u128,
-        maker_fee_bps: u128,
-        relay_fee_bps: u128,
         protocol_fee_recipient: felt252,
-        relay_fee_recipient: felt252,
     ) {
         assert(self.pair_fee_configured.read(pair_id), 'PAIR_FEE_UNSET');
         assert(self.pair_taker_fee_bps.read(pair_id) == taker_fee_bps, 'TAKER_FEE_BINDING');
-        assert(self.pair_maker_fee_bps.read(pair_id) == maker_fee_bps, 'MAKER_FEE_BINDING');
-        assert(self.pair_relay_fee_bps.read(pair_id) == relay_fee_bps, 'RELAY_FEE_BINDING');
         assert(
             self.protocol_fee_recipient.read() == protocol_fee_recipient, 'FEE_RECIPIENT_BINDING',
         );
-        assert(self.relay_fee_recipient.read() == relay_fee_recipient, 'RELAY_RECIP_BINDING');
     }
 
     fn single_field_root(domain: felt252, values: Span<felt252>) -> felt252 {
@@ -2147,7 +2809,7 @@ pub mod AuctionVerifier {
     ) -> felt252 {
         assert(entry != 0, 'BAD_RENEWAL_ENTRY');
         assert(entry == key_low.into() + key_high.into() * TWO_POW_128, 'RENEWAL_KEY_BIND');
-        assert(key_high < RENEWAL_KEY_HIGH_BOUND, 'RENEWAL_KEY_HIGH');
+        assert_renewal_sparse_key_in_field(key_low, key_high);
         assert(merkle_path.len() == merkle_directions.len(), 'RENEWAL_PATH_LEN');
         if prior_root == 0 {
             assert(merkle_path.len() == 0, 'RENEWAL_EMPTY_PATH');
@@ -2210,6 +2872,13 @@ pub mod AuctionVerifier {
         poseidon_hash2(state, right)
     }
 
+    fn assert_renewal_sparse_key_in_field(key_low: u128, key_high: u128) {
+        assert(
+            key_high < SPARSE_KEY_HIGH_MAX || (key_high == SPARSE_KEY_HIGH_MAX && key_low == 0),
+            'RENEWAL_KEY_FIELD',
+        );
+    }
+
     fn output_note_leaf(
         note_commitment: felt252, asset_id: felt252, amount: u128, withdraw_authority: felt252,
     ) -> felt252 {
@@ -2249,25 +2918,6 @@ pub mod AuctionVerifier {
             index += 1;
         }
         root
-    }
-
-    fn output_withdrawal_message_hash(
-        adapter_address: ContractAddress,
-        batch_id: felt252,
-        note_commitment: felt252,
-        asset_id: felt252,
-        amount: u128,
-        recipient: ContractAddress,
-    ) -> felt252 {
-        let tx_info = starknet::get_tx_info().unbox();
-        let mut state = poseidon_hash2(OUTPUT_WITHDRAWAL_DOMAIN, tx_info.chain_id);
-        state = poseidon_hash2(state, get_contract_address().into());
-        state = poseidon_hash2(state, adapter_address.into());
-        state = poseidon_hash2(state, batch_id);
-        state = poseidon_hash2(state, note_commitment);
-        state = poseidon_hash2(state, asset_id);
-        state = poseidon_hash2(state, amount.into());
-        poseidon_hash2(state, recipient.into())
     }
 
     fn output_strk20_exit_message_hash(

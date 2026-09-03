@@ -5,6 +5,46 @@ pub trait ISettlementStatementProgram<TContractState> {
     fn verify_settlement_statement(
         ref self: TContractState, serialized_settlement_witness: Span<felt252>,
     ) -> felt252;
+    fn verify_settlement_note_fee_statement(
+        ref self: TContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+    fn verify_settlement_order_statement(
+        ref self: TContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+    fn verify_settlement_output_recovery_statement(
+        ref self: TContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+    fn verify_settlement_input_membership_statement(
+        ref self: TContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
+pub trait ISettlementNoteFeeStatementProgram<TContractState> {
+    fn verify_settlement_note_fee_statement(
+        ref self: TContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
+pub trait ISettlementOrderStatementProgram<TContractState> {
+    fn verify_settlement_order_statement(
+        ref self: TContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
+pub trait ISettlementOutputRecoveryStatementProgram<TContractState> {
+    fn verify_settlement_output_recovery_statement(
+        ref self: TContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
+pub trait ISettlementInputMembershipStatementProgram<TContractState> {
+    fn verify_settlement_input_membership_statement(
+        ref self: TContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
 }
 
 #[starknet::interface]
@@ -22,6 +62,48 @@ pub trait IRenewalStatementProgram<TContractState> {
 }
 
 #[starknet::interface]
+pub trait IMultiPairStatementProgram<TContractState> {
+    fn verify_multi_pair_statement(
+        ref self: TContractState, serialized_multi_pair_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
+pub trait IMultiPairSettlementStatementProgram<TContractState> {
+    fn verify_multi_pair_settlement_statement(
+        ref self: TContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
+pub trait IMultiPairSettlementPublicStatementProgram<TContractState> {
+    fn verify_multi_pair_settlement_public_statement(
+        ref self: TContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
+pub trait IMultiPairSettlementOrderStateStatementProgram<TContractState> {
+    fn verify_multi_pair_settlement_order_state_statement(
+        ref self: TContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
+pub trait IMultiPairSettlementCompletionStatementProgram<TContractState> {
+    fn verify_multi_pair_settlement_completion_statement(
+        ref self: TContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
+pub trait IMultiPairSettlementFeeRecoveryStatementProgram<TContractState> {
+    fn verify_multi_pair_settlement_fee_recovery_statement(
+        ref self: TContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+    ) -> felt252;
+}
+
+#[starknet::interface]
 pub trait INoteConsolidationStatementProgram<TContractState> {
     fn verify_note_consolidation_statement(
         ref self: TContractState, serialized_note_consolidation_witness: Span<felt252>,
@@ -33,6 +115,20 @@ pub trait IWithdrawalStatementProgram<TContractState> {
     fn verify_withdrawal_statement(
         ref self: TContractState, serialized_withdrawal_witness: Span<felt252>,
     ) -> felt252;
+}
+
+#[starknet::interface]
+pub trait IAdmissionStatementProgram<TContractState> {
+    fn verify_admission_statement(
+        ref self: TContractState, serialized_admission_witness: Span<felt252>,
+    ) -> (felt252, felt252, felt252);
+}
+
+#[starknet::interface]
+pub trait IAuctionResultStatementProgram<TContractState> {
+    fn verify_auction_result_statement(
+        ref self: TContractState, serialized_private_auction_witness: Span<felt252>,
+    ) -> (felt252, felt252, felt252, felt252);
 }
 
 #[starknet::interface]
@@ -48,6 +144,21 @@ pub trait IAuctionProofProgram<TContractState> {
         serialized_settlement_witness: Span<felt252>,
     ) -> felt252;
     fn compile_renewal_proof(
+        ref self: TContractState,
+        auction_verifier: ContractAddress,
+        serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+    fn compile_settlement_order_proof(
+        ref self: TContractState,
+        auction_verifier: ContractAddress,
+        serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+    fn compile_settlement_input_membership_proof(
+        ref self: TContractState,
+        auction_verifier: ContractAddress,
+        serialized_settlement_witness: Span<felt252>,
+    ) -> felt252;
+    fn compile_settlement_output_recovery_proof(
         ref self: TContractState,
         auction_verifier: ContractAddress,
         serialized_settlement_witness: Span<felt252>,
@@ -72,6 +183,16 @@ pub trait IAuctionProofProgram<TContractState> {
         auction_verifier: ContractAddress,
         serialized_private_auction_witness: Span<felt252>,
     ) -> felt252;
+    fn compile_multi_pair_proof(
+        ref self: TContractState,
+        auction_verifier: ContractAddress,
+        serialized_multi_pair_witness: Span<felt252>,
+    ) -> felt252;
+    fn compile_multi_pair_settlement_proof(
+        ref self: TContractState,
+        auction_verifier: ContractAddress,
+        serialized_multi_pair_settlement_witness: Span<felt252>,
+    ) -> felt252;
     fn compile_settlement_aggregate_proof(
         ref self: TContractState,
         auction_verifier: ContractAddress,
@@ -86,18 +207,188 @@ pub trait IAuctionProofProgram<TContractState> {
 }
 
 #[starknet::contract]
-pub mod SettlementStatementProgram {
-    use zylith_settlement_statement::verify_settlement_statement as verify_settlement_statement_impl;
+pub mod SettlementNoteFeeStatementProgram {
+    use zylith_settlement_statement::verify_settlement_note_fee_statement as verify_settlement_note_fee_statement_impl;
 
     #[storage]
     struct Storage {}
+
+    #[abi(embed_v0)]
+    impl SettlementNoteFeeStatementProgramImpl of super::ISettlementNoteFeeStatementProgram<
+        ContractState,
+    > {
+        fn verify_settlement_note_fee_statement(
+            ref self: ContractState, serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_settlement_note_fee_statement_impl(serialized_settlement_witness)
+        }
+    }
+}
+
+#[starknet::contract]
+pub mod SettlementOrderStatementProgram {
+    use zylith_settlement_statement::verify_settlement_order_statement as verify_settlement_order_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl SettlementOrderStatementProgramImpl of super::ISettlementOrderStatementProgram<
+        ContractState,
+    > {
+        fn verify_settlement_order_statement(
+            ref self: ContractState, serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_settlement_order_statement_impl(serialized_settlement_witness)
+        }
+    }
+}
+
+#[starknet::contract]
+pub mod SettlementOutputRecoveryStatementProgram {
+    use zylith_settlement_statement::verify_settlement_output_recovery_statement as verify_settlement_output_recovery_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl SettlementOutputRecoveryStatementProgramImpl of super::ISettlementOutputRecoveryStatementProgram<
+        ContractState,
+    > {
+        fn verify_settlement_output_recovery_statement(
+            ref self: ContractState, serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_settlement_output_recovery_statement_impl(serialized_settlement_witness)
+        }
+    }
+}
+
+#[starknet::contract]
+pub mod SettlementInputMembershipStatementProgram {
+    use zylith_settlement_statement::verify_settlement_input_membership_statement as verify_settlement_input_membership_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl SettlementInputMembershipStatementProgramImpl of super::ISettlementInputMembershipStatementProgram<
+        ContractState,
+    > {
+        fn verify_settlement_input_membership_statement(
+            ref self: ContractState, serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_settlement_input_membership_statement_impl(serialized_settlement_witness)
+        }
+    }
+}
+
+#[starknet::contract]
+pub mod SettlementStatementProgram {
+    use core::num::traits::Zero;
+    use starknet::ContractAddress;
+    use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
+    use zylith_settlement_statement::{
+        verify_settlement_input_membership_statement as verify_settlement_input_membership_statement_impl,
+        verify_settlement_note_fee_statement as verify_settlement_note_fee_statement_impl,
+        verify_settlement_order_statement as verify_settlement_order_statement_impl,
+        verify_settlement_output_recovery_statement as verify_settlement_output_recovery_statement_impl,
+    };
+    use super::{
+        ISettlementInputMembershipStatementProgramDispatcher,
+        ISettlementInputMembershipStatementProgramDispatcherTrait,
+        ISettlementNoteFeeStatementProgramDispatcher,
+        ISettlementNoteFeeStatementProgramDispatcherTrait,
+        ISettlementOrderStatementProgramDispatcher, ISettlementOrderStatementProgramDispatcherTrait,
+        ISettlementOutputRecoveryStatementProgramDispatcher,
+        ISettlementOutputRecoveryStatementProgramDispatcherTrait,
+    };
+
+    #[storage]
+    struct Storage {
+        settlement_note_fee_statement_program: ContractAddress,
+        settlement_order_statement_program: ContractAddress,
+        settlement_input_membership_statement_program: ContractAddress,
+        settlement_output_recovery_statement_program: ContractAddress,
+    }
+
+    #[constructor]
+    fn constructor(
+        ref self: ContractState,
+        settlement_note_fee_statement_program: ContractAddress,
+        settlement_order_statement_program: ContractAddress,
+        settlement_input_membership_statement_program: ContractAddress,
+        settlement_output_recovery_statement_program: ContractAddress,
+    ) {
+        assert(!settlement_note_fee_statement_program.is_zero(), 'BAD_NOTE_FEE');
+        assert(!settlement_order_statement_program.is_zero(), 'BAD_ORDER');
+        assert(!settlement_input_membership_statement_program.is_zero(), 'BAD_MEMBERSHIP');
+        assert(!settlement_output_recovery_statement_program.is_zero(), 'BAD_RECOVERY');
+        self.settlement_note_fee_statement_program.write(settlement_note_fee_statement_program);
+        self.settlement_order_statement_program.write(settlement_order_statement_program);
+        self
+            .settlement_input_membership_statement_program
+            .write(settlement_input_membership_statement_program);
+        self
+            .settlement_output_recovery_statement_program
+            .write(settlement_output_recovery_statement_program);
+    }
 
     #[abi(embed_v0)]
     impl SettlementStatementProgramImpl of super::ISettlementStatementProgram<ContractState> {
         fn verify_settlement_statement(
             ref self: ContractState, serialized_settlement_witness: Span<felt252>,
         ) -> felt252 {
-            verify_settlement_statement_impl(serialized_settlement_witness)
+            let settlement_note_fee_statement_program =
+                ISettlementNoteFeeStatementProgramDispatcher {
+                contract_address: self.settlement_note_fee_statement_program.read(),
+            };
+            let transcript_commitment = settlement_note_fee_statement_program
+                .verify_settlement_note_fee_statement(serialized_settlement_witness);
+            let settlement_order_statement_program = ISettlementOrderStatementProgramDispatcher {
+                contract_address: self.settlement_order_statement_program.read(),
+            };
+            let order_transcript_commitment = settlement_order_statement_program
+                .verify_settlement_order_statement(serialized_settlement_witness);
+            assert(order_transcript_commitment == transcript_commitment, 'ORDER_BINDING');
+            let settlement_input_membership_statement_program =
+                ISettlementInputMembershipStatementProgramDispatcher {
+                contract_address: self.settlement_input_membership_statement_program.read(),
+            };
+            let membership_transcript_commitment = settlement_input_membership_statement_program
+                .verify_settlement_input_membership_statement(serialized_settlement_witness);
+            assert(membership_transcript_commitment == transcript_commitment, 'MEM_BINDING');
+            let settlement_output_recovery_statement_program =
+                ISettlementOutputRecoveryStatementProgramDispatcher {
+                contract_address: self.settlement_output_recovery_statement_program.read(),
+            };
+            let recovery_transcript_commitment = settlement_output_recovery_statement_program
+                .verify_settlement_output_recovery_statement(serialized_settlement_witness);
+            assert(recovery_transcript_commitment == transcript_commitment, 'REC_BINDING');
+            transcript_commitment
+        }
+
+        fn verify_settlement_note_fee_statement(
+            ref self: ContractState, serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_settlement_note_fee_statement_impl(serialized_settlement_witness)
+        }
+
+        fn verify_settlement_order_statement(
+            ref self: ContractState, serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_settlement_order_statement_impl(serialized_settlement_witness)
+        }
+
+        fn verify_settlement_output_recovery_statement(
+            ref self: ContractState, serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_settlement_output_recovery_statement_impl(serialized_settlement_witness)
+        }
+
+        fn verify_settlement_input_membership_statement(
+            ref self: ContractState, serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_settlement_input_membership_statement_impl(serialized_settlement_witness)
         }
     }
 }
@@ -132,6 +423,195 @@ pub mod RenewalStatementProgram {
             ref self: ContractState, serialized_settlement_witness: Span<felt252>,
         ) -> (felt252, felt252, felt252, felt252) {
             verify_renewal_statement_impl(serialized_settlement_witness)
+        }
+    }
+}
+
+#[starknet::contract]
+pub mod MultiPairStatementProgram {
+    use zylith_settlement_statement::verify_multi_pair_statement as verify_multi_pair_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl MultiPairStatementProgramImpl of super::IMultiPairStatementProgram<ContractState> {
+        fn verify_multi_pair_statement(
+            ref self: ContractState, serialized_multi_pair_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_multi_pair_statement_impl(serialized_multi_pair_witness)
+        }
+    }
+}
+
+#[starknet::contract]
+pub mod MultiPairSettlementStatementProgram {
+    use core::num::traits::Zero;
+    use starknet::ContractAddress;
+    use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
+    use super::{
+        IMultiPairSettlementCompletionStatementProgramDispatcher,
+        IMultiPairSettlementCompletionStatementProgramDispatcherTrait,
+        IMultiPairSettlementFeeRecoveryStatementProgramDispatcher,
+        IMultiPairSettlementFeeRecoveryStatementProgramDispatcherTrait,
+        IMultiPairSettlementOrderStateStatementProgramDispatcher,
+        IMultiPairSettlementOrderStateStatementProgramDispatcherTrait,
+        IMultiPairSettlementPublicStatementProgramDispatcher,
+        IMultiPairSettlementPublicStatementProgramDispatcherTrait,
+    };
+
+    #[storage]
+    struct Storage {
+        public_statement_program: ContractAddress,
+        order_state_statement_program: ContractAddress,
+        completion_statement_program: ContractAddress,
+        fee_recovery_statement_program: ContractAddress,
+    }
+
+    #[constructor]
+    fn constructor(
+        ref self: ContractState,
+        public_statement_program: ContractAddress,
+        order_state_statement_program: ContractAddress,
+        completion_statement_program: ContractAddress,
+        fee_recovery_statement_program: ContractAddress,
+    ) {
+        assert(!public_statement_program.is_zero(), 'BAD_MP_PUBLIC');
+        assert(!order_state_statement_program.is_zero(), 'BAD_MP_ORDER');
+        assert(!completion_statement_program.is_zero(), 'BAD_MP_COMPLETE');
+        assert(!fee_recovery_statement_program.is_zero(), 'BAD_MP_FEE');
+        self.public_statement_program.write(public_statement_program);
+        self.order_state_statement_program.write(order_state_statement_program);
+        self.completion_statement_program.write(completion_statement_program);
+        self.fee_recovery_statement_program.write(fee_recovery_statement_program);
+    }
+
+    #[abi(embed_v0)]
+    impl MultiPairSettlementStatementProgramImpl of super::IMultiPairSettlementStatementProgram<
+        ContractState,
+    > {
+        fn verify_multi_pair_settlement_statement(
+            ref self: ContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            let public_statement_program = IMultiPairSettlementPublicStatementProgramDispatcher {
+                contract_address: self.public_statement_program.read(),
+            };
+            let transcript_commitment = public_statement_program
+                .verify_multi_pair_settlement_public_statement(
+                    serialized_multi_pair_settlement_witness,
+                );
+            let order_state_statement_program =
+                IMultiPairSettlementOrderStateStatementProgramDispatcher {
+                contract_address: self.order_state_statement_program.read(),
+            };
+            let order_transcript = order_state_statement_program
+                .verify_multi_pair_settlement_order_state_statement(
+                    serialized_multi_pair_settlement_witness,
+                );
+            assert(order_transcript == transcript_commitment, 'MP_ORDER_BIND');
+            let completion_statement_program =
+                IMultiPairSettlementCompletionStatementProgramDispatcher {
+                contract_address: self.completion_statement_program.read(),
+            };
+            let completion_transcript = completion_statement_program
+                .verify_multi_pair_settlement_completion_statement(
+                    serialized_multi_pair_settlement_witness,
+                );
+            assert(completion_transcript == transcript_commitment, 'MP_COMPLETE_BIND');
+            let fee_recovery_statement_program =
+                IMultiPairSettlementFeeRecoveryStatementProgramDispatcher {
+                contract_address: self.fee_recovery_statement_program.read(),
+            };
+            let fee_recovery_transcript = fee_recovery_statement_program
+                .verify_multi_pair_settlement_fee_recovery_statement(
+                    serialized_multi_pair_settlement_witness,
+                );
+            assert(fee_recovery_transcript == transcript_commitment, 'MP_FEE_BIND');
+            transcript_commitment
+        }
+    }
+}
+
+#[starknet::contract]
+pub mod MultiPairSettlementPublicStatementProgram {
+    use zylith_settlement_statement::verify_multi_pair_settlement_public_statement as verify_multi_pair_settlement_public_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl MultiPairSettlementPublicStatementProgramImpl of super::IMultiPairSettlementPublicStatementProgram<
+        ContractState,
+    > {
+        fn verify_multi_pair_settlement_public_statement(
+            ref self: ContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_multi_pair_settlement_public_statement_impl(
+                serialized_multi_pair_settlement_witness,
+            )
+        }
+    }
+}
+
+#[starknet::contract]
+pub mod MultiPairSettlementOrderStateStatementProgram {
+    use zylith_settlement_statement::verify_multi_pair_settlement_order_state_statement as verify_multi_pair_settlement_order_state_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl MultiPairSettlementOrderStateStatementProgramImpl of super::IMultiPairSettlementOrderStateStatementProgram<
+        ContractState,
+    > {
+        fn verify_multi_pair_settlement_order_state_statement(
+            ref self: ContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_multi_pair_settlement_order_state_statement_impl(
+                serialized_multi_pair_settlement_witness,
+            )
+        }
+    }
+}
+
+#[starknet::contract]
+pub mod MultiPairSettlementCompletionStatementProgram {
+    use zylith_settlement_statement::verify_multi_pair_settlement_completion_statement as verify_multi_pair_settlement_completion_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl MultiPairSettlementCompletionStatementProgramImpl of super::IMultiPairSettlementCompletionStatementProgram<
+        ContractState,
+    > {
+        fn verify_multi_pair_settlement_completion_statement(
+            ref self: ContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_multi_pair_settlement_completion_statement_impl(
+                serialized_multi_pair_settlement_witness,
+            )
+        }
+    }
+}
+
+#[starknet::contract]
+pub mod MultiPairSettlementFeeRecoveryStatementProgram {
+    use zylith_settlement_statement::verify_multi_pair_settlement_fee_recovery_statement as verify_multi_pair_settlement_fee_recovery_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl MultiPairSettlementFeeRecoveryStatementProgramImpl of super::IMultiPairSettlementFeeRecoveryStatementProgram<
+        ContractState,
+    > {
+        fn verify_multi_pair_settlement_fee_recovery_statement(
+            ref self: ContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            verify_multi_pair_settlement_fee_recovery_statement_impl(
+                serialized_multi_pair_settlement_witness,
+            )
         }
     }
 }
@@ -173,6 +653,40 @@ pub mod WithdrawalStatementProgram {
 }
 
 #[starknet::contract]
+pub mod AdmissionStatementProgram {
+    use zylith_settlement_statement::verify_admission_statement as verify_admission_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl AdmissionStatementProgramImpl of super::IAdmissionStatementProgram<ContractState> {
+        fn verify_admission_statement(
+            ref self: ContractState, serialized_admission_witness: Span<felt252>,
+        ) -> (felt252, felt252, felt252) {
+            verify_admission_statement_impl(serialized_admission_witness)
+        }
+    }
+}
+
+#[starknet::contract]
+pub mod AuctionResultStatementProgram {
+    use zylith_settlement_statement::verify_auction_result_statement as verify_auction_result_statement_impl;
+
+    #[storage]
+    struct Storage {}
+
+    #[abi(embed_v0)]
+    impl AuctionResultStatementProgramImpl of super::IAuctionResultStatementProgram<ContractState> {
+        fn verify_auction_result_statement(
+            ref self: ContractState, serialized_private_auction_witness: Span<felt252>,
+        ) -> (felt252, felt252, felt252, felt252) {
+            verify_auction_result_statement_impl(serialized_private_auction_witness)
+        }
+    }
+}
+
+#[starknet::contract]
 pub mod AuctionProofProgram {
     use core::array::{Array, ArrayTrait, SpanTrait};
     use core::num::traits::Zero;
@@ -180,9 +694,12 @@ pub mod AuctionProofProgram {
     use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
     use starknet::syscalls::send_message_to_l1_syscall;
     use starknet::{ContractAddress, SyscallResultTrait, get_contract_address};
-    use zylith_settlement_statement::{verify_admission_statement, verify_auction_result_statement};
     use super::{
-        INoteConsolidationStatementProgramDispatcher,
+        IAdmissionStatementProgramDispatcher, IAdmissionStatementProgramDispatcherTrait,
+        IAuctionResultStatementProgramDispatcher, IAuctionResultStatementProgramDispatcherTrait,
+        IMultiPairSettlementStatementProgramDispatcher,
+        IMultiPairSettlementStatementProgramDispatcherTrait, IMultiPairStatementProgramDispatcher,
+        IMultiPairStatementProgramDispatcherTrait, INoteConsolidationStatementProgramDispatcher,
         INoteConsolidationStatementProgramDispatcherTrait, INullifierStatementProgramDispatcher,
         INullifierStatementProgramDispatcherTrait, IRenewalStatementProgramDispatcher,
         IRenewalStatementProgramDispatcherTrait, ISettlementStatementProgramDispatcher,
@@ -193,10 +710,15 @@ pub mod AuctionProofProgram {
     const SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_settle_v1';
     const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
     const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
+    const SETTLEMENT_ORDER_MESSAGE_DOMAIN: felt252 = 'zylith_ord_v1';
+    const SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN: felt252 = 'zylith_inmem_v1';
+    const SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN: felt252 = 'zylith_outrec_v1';
     const NOTE_CONSOLIDATION_MESSAGE_DOMAIN: felt252 = 'zylith_consol_v1';
     const WITHDRAWAL_MESSAGE_DOMAIN: felt252 = 'zylith_withdraw_v1';
     const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
     const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
+    const MULTI_PAIR_MESSAGE_DOMAIN: felt252 = 'zylith_mpair_v1';
+    const MULTI_PAIR_SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_mp_settle_v1';
     const SETTLEMENT_PROOF_MESSAGE_TO: felt252 = 0;
     const AGGREGATE_RETURN_DOMAIN: felt252 = 'zylith_agg_v1';
 
@@ -207,6 +729,10 @@ pub mod AuctionProofProgram {
         renewal_statement_program: ContractAddress,
         note_consolidation_statement_program: ContractAddress,
         withdrawal_statement_program: ContractAddress,
+        admission_statement_program: ContractAddress,
+        auction_result_statement_program: ContractAddress,
+        multi_pair_statement_program: ContractAddress,
+        multi_pair_settlement_statement_program: ContractAddress,
     }
 
     #[constructor]
@@ -217,17 +743,29 @@ pub mod AuctionProofProgram {
         renewal_statement_program: ContractAddress,
         note_consolidation_statement_program: ContractAddress,
         withdrawal_statement_program: ContractAddress,
+        admission_statement_program: ContractAddress,
+        auction_result_statement_program: ContractAddress,
+        multi_pair_statement_program: ContractAddress,
+        multi_pair_settlement_statement_program: ContractAddress,
     ) {
         assert(!settlement_statement_program.is_zero(), 'BAD_STMT_PROGRAM');
         assert(!nullifier_statement_program.is_zero(), 'BAD_NULL_PROGRAM');
         assert(!renewal_statement_program.is_zero(), 'BAD_RENEW_PROGRAM');
         assert(!note_consolidation_statement_program.is_zero(), 'BAD_CONSOL_PROGRAM');
         assert(!withdrawal_statement_program.is_zero(), 'BAD_WITHDRAW_PROGRAM');
+        assert(!admission_statement_program.is_zero(), 'BAD_ADMIT_PROGRAM');
+        assert(!auction_result_statement_program.is_zero(), 'BAD_RESULT_PROGRAM');
+        assert(!multi_pair_statement_program.is_zero(), 'BAD_MULTIPAIR_PROGRAM');
+        assert(!multi_pair_settlement_statement_program.is_zero(), 'BAD_MP_SETTLE_PROGRAM');
         self.settlement_statement_program.write(settlement_statement_program);
         self.nullifier_statement_program.write(nullifier_statement_program);
         self.renewal_statement_program.write(renewal_statement_program);
         self.note_consolidation_statement_program.write(note_consolidation_statement_program);
         self.withdrawal_statement_program.write(withdrawal_statement_program);
+        self.admission_statement_program.write(admission_statement_program);
+        self.auction_result_statement_program.write(auction_result_statement_program);
+        self.multi_pair_statement_program.write(multi_pair_statement_program);
+        self.multi_pair_settlement_statement_program.write(multi_pair_settlement_statement_program);
     }
 
     #[abi(embed_v0)]
@@ -242,7 +780,7 @@ pub mod AuctionProofProgram {
                 contract_address: self.settlement_statement_program.read(),
             };
             let transcript_commitment = settlement_statement_program
-                .verify_settlement_statement(serialized_settlement_witness);
+                .verify_settlement_note_fee_statement(serialized_settlement_witness);
             emit_settlement_proof_message(auction_verifier, transcript_commitment)
         }
 
@@ -293,6 +831,48 @@ pub mod AuctionProofProgram {
             )
         }
 
+        fn compile_settlement_order_proof(
+            ref self: ContractState,
+            auction_verifier: ContractAddress,
+            serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
+            let settlement_statement_program = ISettlementStatementProgramDispatcher {
+                contract_address: self.settlement_statement_program.read(),
+            };
+            let transcript_commitment = settlement_statement_program
+                .verify_settlement_order_statement(serialized_settlement_witness);
+            emit_settlement_order_proof_message(auction_verifier, transcript_commitment)
+        }
+
+        fn compile_settlement_input_membership_proof(
+            ref self: ContractState,
+            auction_verifier: ContractAddress,
+            serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
+            let settlement_statement_program = ISettlementStatementProgramDispatcher {
+                contract_address: self.settlement_statement_program.read(),
+            };
+            let transcript_commitment = settlement_statement_program
+                .verify_settlement_input_membership_statement(serialized_settlement_witness);
+            emit_settlement_input_membership_proof_message(auction_verifier, transcript_commitment)
+        }
+
+        fn compile_settlement_output_recovery_proof(
+            ref self: ContractState,
+            auction_verifier: ContractAddress,
+            serialized_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
+            let settlement_statement_program = ISettlementStatementProgramDispatcher {
+                contract_address: self.settlement_statement_program.read(),
+            };
+            let transcript_commitment = settlement_statement_program
+                .verify_settlement_output_recovery_statement(serialized_settlement_witness);
+            emit_settlement_output_recovery_proof_message(auction_verifier, transcript_commitment)
+        }
+
         fn compile_note_consolidation_proof(
             ref self: ContractState,
             auction_verifier: ContractAddress,
@@ -328,9 +908,11 @@ pub mod AuctionProofProgram {
             serialized_admission_witness: Span<felt252>,
         ) -> felt252 {
             assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
-            let (batch_id, order_commitment_root, admission_root) = verify_admission_statement(
-                serialized_admission_witness,
-            );
+            let (batch_id, order_commitment_root, admission_root) =
+                IAdmissionStatementProgramDispatcher {
+                contract_address: self.admission_statement_program.read(),
+            }
+                .verify_admission_statement(serialized_admission_witness);
             emit_admission_proof_message(
                 auction_verifier, batch_id, order_commitment_root, admission_root,
             )
@@ -343,7 +925,10 @@ pub mod AuctionProofProgram {
         ) -> felt252 {
             assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
             let (batch_id, order_commitment_root, admission_root, transcript_commitment) =
-                verify_auction_result_statement(serialized_private_auction_witness);
+                IAuctionResultStatementProgramDispatcher {
+                contract_address: self.auction_result_statement_program.read(),
+            }
+                .verify_auction_result_statement(serialized_private_auction_witness);
             emit_auction_result_proof_message(
                 auction_verifier,
                 batch_id,
@@ -351,6 +936,35 @@ pub mod AuctionProofProgram {
                 admission_root,
                 transcript_commitment,
             )
+        }
+
+        fn compile_multi_pair_proof(
+            ref self: ContractState,
+            auction_verifier: ContractAddress,
+            serialized_multi_pair_witness: Span<felt252>,
+        ) -> felt252 {
+            assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
+            let multi_pair_statement_program = IMultiPairStatementProgramDispatcher {
+                contract_address: self.multi_pair_statement_program.read(),
+            };
+            let multi_pair_commitment = multi_pair_statement_program
+                .verify_multi_pair_statement(serialized_multi_pair_witness);
+            let batch_id = multi_pair_witness_batch_id(serialized_multi_pair_witness);
+            emit_multi_pair_proof_message(auction_verifier, batch_id, multi_pair_commitment)
+        }
+
+        fn compile_multi_pair_settlement_proof(
+            ref self: ContractState,
+            auction_verifier: ContractAddress,
+            serialized_multi_pair_settlement_witness: Span<felt252>,
+        ) -> felt252 {
+            assert(!auction_verifier.is_zero(), 'BAD_VERIFIER');
+            let multi_pair_statement_program = IMultiPairSettlementStatementProgramDispatcher {
+                contract_address: self.multi_pair_settlement_statement_program.read(),
+            };
+            let transcript_commitment = multi_pair_statement_program
+                .verify_multi_pair_settlement_statement(serialized_multi_pair_settlement_witness);
+            emit_multi_pair_settlement_proof_message(auction_verifier, transcript_commitment)
         }
 
         fn compile_settlement_aggregate_proof(
@@ -506,6 +1120,48 @@ pub mod AuctionProofProgram {
         renewal_proof_message_hash_from_statement(get_contract_address(), statement_message_hash)
     }
 
+    fn emit_settlement_order_proof_message(
+        auction_verifier: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let statement_message_hash = native_settlement_order_message_hash(
+            auction_verifier, transcript_commitment,
+        );
+        let payload = settlement_order_proof_payload(statement_message_hash);
+        send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
+            .unwrap_syscall();
+        settlement_order_proof_message_hash_from_statement(
+            get_contract_address(), statement_message_hash,
+        )
+    }
+
+    fn emit_settlement_input_membership_proof_message(
+        auction_verifier: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let statement_message_hash = native_settlement_input_membership_message_hash(
+            auction_verifier, transcript_commitment,
+        );
+        let payload = settlement_input_membership_proof_payload(statement_message_hash);
+        send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
+            .unwrap_syscall();
+        settlement_input_membership_proof_message_hash_from_statement(
+            get_contract_address(), statement_message_hash,
+        )
+    }
+
+    fn emit_settlement_output_recovery_proof_message(
+        auction_verifier: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let statement_message_hash = native_settlement_output_recovery_message_hash(
+            auction_verifier, transcript_commitment,
+        );
+        let payload = settlement_output_recovery_proof_payload(statement_message_hash);
+        send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
+            .unwrap_syscall();
+        settlement_output_recovery_proof_message_hash_from_statement(
+            get_contract_address(), statement_message_hash,
+        )
+    }
+
     fn emit_note_consolidation_proof_message(
         auction_verifier: ContractAddress, consolidation_commitment: felt252,
     ) -> felt252 {
@@ -569,6 +1225,40 @@ pub mod AuctionProofProgram {
         )
     }
 
+    fn emit_multi_pair_proof_message(
+        auction_verifier: ContractAddress, batch_id: felt252, multi_pair_commitment: felt252,
+    ) -> felt252 {
+        let statement_message_hash = native_multi_pair_message_hash(
+            auction_verifier, batch_id, multi_pair_commitment,
+        );
+        let payload = multi_pair_proof_payload(statement_message_hash);
+        send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
+            .unwrap_syscall();
+        multi_pair_proof_message_hash_from_statement(get_contract_address(), statement_message_hash)
+    }
+
+    fn emit_multi_pair_settlement_proof_message(
+        auction_verifier: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let statement_message_hash = native_multi_pair_settlement_message_hash(
+            auction_verifier, transcript_commitment,
+        );
+        let payload = multi_pair_settlement_proof_payload(statement_message_hash);
+        send_message_to_l1_syscall(to_address: SETTLEMENT_PROOF_MESSAGE_TO, payload: payload.span())
+            .unwrap_syscall();
+        multi_pair_settlement_proof_message_hash_from_statement(
+            get_contract_address(), statement_message_hash,
+        )
+    }
+
+    fn multi_pair_witness_batch_id(serialized_multi_pair_witness: Span<felt252>) -> felt252 {
+        assert(serialized_multi_pair_witness.len() >= 2, 'BAD_MPAIR_WITNESS');
+        assert(*serialized_multi_pair_witness.at(0) == 8, 'BAD_MPAIR_TYPE');
+        let batch_id = *serialized_multi_pair_witness.at(1);
+        assert(batch_id != 0, 'BAD_MPAIR_BATCH');
+        batch_id
+    }
+
     fn read_next(data: Span<felt252>, ref index: usize) -> felt252 {
         assert(index < data.len(), 'INPUT_TOO_SHORT');
         let value = *data.at(index);
@@ -603,6 +1293,20 @@ pub mod AuctionProofProgram {
         array![RENEWAL_MESSAGE_DOMAIN, statement_message_hash]
     }
 
+    fn settlement_order_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![SETTLEMENT_ORDER_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
+    fn settlement_input_membership_proof_payload(
+        statement_message_hash: felt252,
+    ) -> Array<felt252> {
+        array![SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
+    fn settlement_output_recovery_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
     fn note_consolidation_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![NOTE_CONSOLIDATION_MESSAGE_DOMAIN, statement_message_hash]
     }
@@ -617,6 +1321,14 @@ pub mod AuctionProofProgram {
 
     fn auction_result_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![AUCTION_RESULT_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
+    fn multi_pair_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![MULTI_PAIR_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
+    fn multi_pair_settlement_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
+        array![MULTI_PAIR_SETTLEMENT_MESSAGE_DOMAIN, statement_message_hash]
     }
 
     fn settlement_proof_message_hash_from_statement(
@@ -642,6 +1354,33 @@ pub mod AuctionProofProgram {
     ) -> felt252 {
         let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
         let payload = renewal_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn settlement_order_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = settlement_order_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn settlement_input_membership_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = settlement_input_membership_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn settlement_output_recovery_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = settlement_output_recovery_proof_payload(statement_message_hash);
         payload.serialize(ref l1_message_data);
         poseidon_hash_span(l1_message_data.span())
     }
@@ -678,6 +1417,24 @@ pub mod AuctionProofProgram {
     ) -> felt252 {
         let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
         let payload = auction_result_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn multi_pair_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = multi_pair_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
+    fn multi_pair_settlement_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = multi_pair_settlement_proof_payload(statement_message_hash);
         payload.serialize(ref l1_message_data);
         poseidon_hash_span(l1_message_data.span())
     }
@@ -728,6 +1485,36 @@ pub mod AuctionProofProgram {
         state
     }
 
+    fn native_settlement_order_message_hash(
+        auction_verifier_address: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            SETTLEMENT_ORDER_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
+        state = poseidon_hash2(state, transcript_commitment);
+        state
+    }
+
+    fn native_settlement_input_membership_message_hash(
+        auction_verifier_address: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
+        state = poseidon_hash2(state, transcript_commitment);
+        state
+    }
+
+    fn native_settlement_output_recovery_message_hash(
+        auction_verifier_address: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
+        state = poseidon_hash2(state, transcript_commitment);
+        state
+    }
+
     fn native_note_consolidation_message_hash(
         auction_verifier_address: ContractAddress, consolidation_commitment: felt252,
     ) -> felt252 {
@@ -772,6 +1559,27 @@ pub mod AuctionProofProgram {
         state = poseidon_hash2(state, batch_id);
         state = poseidon_hash2(state, order_commitment_root);
         state = poseidon_hash2(state, admission_root);
+        state = poseidon_hash2(state, transcript_commitment);
+        state
+    }
+
+    fn native_multi_pair_message_hash(
+        auction_verifier_address: ContractAddress,
+        batch_id: felt252,
+        multi_pair_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(MULTI_PAIR_MESSAGE_DOMAIN, auction_verifier_address.into());
+        state = poseidon_hash2(state, batch_id);
+        state = poseidon_hash2(state, multi_pair_commitment);
+        state
+    }
+
+    fn native_multi_pair_settlement_message_hash(
+        auction_verifier_address: ContractAddress, transcript_commitment: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            MULTI_PAIR_SETTLEMENT_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
         state = poseidon_hash2(state, transcript_commitment);
         state
     }

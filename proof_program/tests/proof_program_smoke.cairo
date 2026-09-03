@@ -7,13 +7,49 @@ use zylith_proof_program::{IAuctionProofProgramDispatcher, IAuctionProofProgramD
 const SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_settle_v1';
 const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
 const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
+const SETTLEMENT_ORDER_MESSAGE_DOMAIN: felt252 = 'zylith_ord_v1';
+const SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN: felt252 = 'zylith_inmem_v1';
+const SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN: felt252 = 'zylith_outrec_v1';
 const NOTE_CONSOLIDATION_MESSAGE_DOMAIN: felt252 = 'zylith_consol_v1';
 const WITHDRAWAL_MESSAGE_DOMAIN: felt252 = 'zylith_withdraw_v1';
 const SETTLEMENT_PROOF_MESSAGE_TO: felt252 = 0;
 const AGGREGATE_RETURN_DOMAIN: felt252 = 'zylith_agg_v1';
+const MULTI_PAIR_MESSAGE_DOMAIN: felt252 = 'zylith_mpair_v1';
+const MULTI_PAIR_SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_mp_settle_v1';
 const NATIVE_SETTLEMENT_DOMAIN: felt252 =
     0x326c16c927e3e9e1e2cb23ce296a3e7f3d21e798e34d6cac00f9b1241fdfc3a;
 const WITHDRAWAL_MESSAGE_DOMAIN_NATIVE: felt252 = 'zylith_withdraw_v1';
+const STATE_TRANSITION_ROOT_DOMAIN: felt252 =
+    0x01f14f0555b0b80fd6af9553623a021c472d8c930dfcb5b204b35b26f0d2b1b2;
+const STATEMENT_TYPE_SETTLEMENT: felt252 = 1;
+const NOTE_COMMITMENT_DOMAIN: felt252 =
+    0x43aeae569e031a74671a28c60a017d2a53bbb5ffa6f6a7711c076348fb186c;
+const SPEND_AUTHORITY_DOMAIN: felt252 =
+    0x21b92fb580b0e2cb7898509d56df3d7b51d6f68f17b50aa02e93e0227b15f3b;
+const NULLIFIER_DOMAIN: felt252 = 0x6cd79aee4dd094aadf944f50e83fad66ce717a58d59d73a92df351aac6d14e3;
+const ORDER_COMMITMENT_DOMAIN: felt252 =
+    0x7cd5dda33869da7da5ccb3afbc70fc766fb0cbe3d560c2bfb3bdbab8a4b844d;
+const PUBLIC_SETTLEMENT_DOMAIN: felt252 =
+    0x0283f626418aa97a073f64500f7e35dd8bf7c01ff8611917c3c38e5be92eb205;
+const CONSUMED_NOTE_ROOT_DOMAIN: felt252 =
+    0x5ca3bbd6a01ed8e6017182aa4b43ec8d9e4055d9d4133b008c3ea9916b347dd;
+const CONSUMED_NULLIFIER_ROOT_DOMAIN: felt252 =
+    0x52259833b97a525483b8fff0635ce1f9fdfd08b5a8db2486d4a05378989b0f0;
+const RENEWAL_CHILD_ROOT_DOMAIN: felt252 =
+    0x7fa9bd33f1b9cd81a22d77d4dc7ea4d33abd249f7585d0e451b0fafa39dfc3d;
+const OUTPUT_NOTE_ROOT_DOMAIN: felt252 =
+    0x322d8a4d6fe2953496989824ec66bcb9d011aa052bb4be4593670c1ea7908dc;
+const FEE_ROOT_DOMAIN: felt252 = 0x79a9e0b9d4a6b4cac728c0e5f6298e37533fa1348f020f3575a78c5adf7d44b;
+const NULLIFIER_SPARSE_LEAF_DOMAIN_CANONICAL: felt252 =
+    0x03fd7c748b95292c230aa528dc391912cd4557ad3e157e94ab06b22af433f967;
+const NULLIFIER_SPARSE_NODE_DOMAIN_CANONICAL: felt252 =
+    0x02de7e98b8f1ba580329d7cfcf51a36f6eb4f8611cae6f82b34e116bb9c2588c;
+const OUTPUT_RECOVERY_BUNDLE_DOMAIN: felt252 = 0x7a796c6974685f6f75745f62756e646c655f7631;
+const PAIR_ID_STRK_USDC: felt252 =
+    0x116ee836b759d809a28dfcf84de04ce4d7ba6aca96741019ffcbbbbcaa8b29e;
+const ASSET_ID_STRK: felt252 = 0x8926041840302bbb1edfd15c98ffaf0f2a9e8ba0ac43bfd446942d708b7b7c;
+const ASSET_ID_USDC: felt252 = 0x1e565426a7cff134da7e67f4587da64258d8e50b249f60444b53d8aebb4987c;
+const ASSET_SCALE_18: felt252 = 1000000000000000000;
 
 fn as_address(value: felt252) -> ContractAddress {
     value.try_into().unwrap()
@@ -31,27 +67,81 @@ fn deploy_auction_proof_program(statement_program: ContractAddress) -> ContractA
         statement_program,
         statement_program,
         statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
     )
 }
 
 fn deploy_mock_statement_programs() -> (
-    ContractAddress, ContractAddress, ContractAddress, ContractAddress, ContractAddress,
+    ContractAddress,
+    ContractAddress,
+    ContractAddress,
+    ContractAddress,
+    ContractAddress,
+    ContractAddress,
+    ContractAddress,
+    ContractAddress,
+    ContractAddress,
 ) {
     let settlement = declare("MockSettlementStatementProgram").unwrap().contract_class();
     let nullifier = declare("MockNullifierStatementProgram").unwrap().contract_class();
     let renewal = declare("MockRenewalStatementProgram").unwrap().contract_class();
     let consolidation = declare("MockNoteConsolidationStatementProgram").unwrap().contract_class();
     let withdrawal = declare("MockWithdrawalStatementProgram").unwrap().contract_class();
+    let admission = declare("MockAdmissionStatementProgram").unwrap().contract_class();
+    let auction_result = declare("MockAuctionResultStatementProgram").unwrap().contract_class();
+    let multi_pair = declare("MockMultiPairStatementProgram").unwrap().contract_class();
     let calldata = array![];
     let (settlement_address, _) = settlement.deploy(@calldata).unwrap_syscall();
     let (nullifier_address, _) = nullifier.deploy(@calldata).unwrap_syscall();
     let (renewal_address, _) = renewal.deploy(@calldata).unwrap_syscall();
     let (consolidation_address, _) = consolidation.deploy(@calldata).unwrap_syscall();
     let (withdrawal_address, _) = withdrawal.deploy(@calldata).unwrap_syscall();
+    let (admission_address, _) = admission.deploy(@calldata).unwrap_syscall();
+    let (auction_result_address, _) = auction_result.deploy(@calldata).unwrap_syscall();
+    let (multi_pair_address, _) = multi_pair.deploy(@calldata).unwrap_syscall();
+    let multi_pair_settlement_address = deploy_mock_multi_pair_settlement_coordinator();
     (
-        settlement_address, nullifier_address, renewal_address, consolidation_address,
+        settlement_address,
+        nullifier_address,
+        renewal_address,
+        consolidation_address,
         withdrawal_address,
+        admission_address,
+        auction_result_address,
+        multi_pair_address,
+        multi_pair_settlement_address,
     )
+}
+
+fn deploy_mock_multi_pair_settlement_coordinator() -> ContractAddress {
+    let public_statement = declare("MockMultiPairSettlementPublicStatementProgram")
+        .unwrap()
+        .contract_class();
+    let order_state_statement = declare("MockMultiPairSettlementOrderStateStatementProgram")
+        .unwrap()
+        .contract_class();
+    let completion_statement = declare("MockMultiPairSettlementCompletionStatementProgram")
+        .unwrap()
+        .contract_class();
+    let fee_recovery_statement = declare("MockMultiPairSettlementFeeRecoveryStatementProgram")
+        .unwrap()
+        .contract_class();
+    let empty_calldata = array![];
+    let (public_address, _) = public_statement.deploy(@empty_calldata).unwrap_syscall();
+    let (order_state_address, _) = order_state_statement.deploy(@empty_calldata).unwrap_syscall();
+    let (completion_address, _) = completion_statement.deploy(@empty_calldata).unwrap_syscall();
+    let (fee_recovery_address, _) = fee_recovery_statement.deploy(@empty_calldata).unwrap_syscall();
+
+    let coordinator = declare("MultiPairSettlementStatementProgram").unwrap().contract_class();
+    let coordinator_calldata = array![
+        public_address.into(), order_state_address.into(), completion_address.into(),
+        fee_recovery_address.into(),
+    ];
+    let (coordinator_address, _) = coordinator.deploy(@coordinator_calldata).unwrap_syscall();
+    coordinator_address
 }
 
 fn deploy_auction_proof_program_with(
@@ -60,12 +150,18 @@ fn deploy_auction_proof_program_with(
     renewal_statement_program: ContractAddress,
     note_consolidation_statement_program: ContractAddress,
     withdrawal_statement_program: ContractAddress,
+    admission_statement_program: ContractAddress,
+    auction_result_statement_program: ContractAddress,
+    multi_pair_statement_program: ContractAddress,
+    multi_pair_settlement_statement_program: ContractAddress,
 ) -> ContractAddress {
     let class = declare("AuctionProofProgram").unwrap().contract_class();
     let calldata = array![
         settlement_statement_program.into(), nullifier_statement_program.into(),
         renewal_statement_program.into(), note_consolidation_statement_program.into(),
-        withdrawal_statement_program.into(),
+        withdrawal_statement_program.into(), admission_statement_program.into(),
+        auction_result_statement_program.into(), multi_pair_statement_program.into(),
+        multi_pair_settlement_statement_program.into(),
     ];
     let (address, _) = class.deploy(@calldata).unwrap_syscall();
     address
@@ -133,13 +229,51 @@ fn expected_renewal_proof_message_hash(
     expected_l1_message_hash(proof_program_address, RENEWAL_MESSAGE_DOMAIN, statement_hash)
 }
 
+fn expected_multi_pair_proof_message_hash(
+    proof_program_address: ContractAddress,
+    auction_verifier: ContractAddress,
+    batch_id: felt252,
+    multi_pair_commitment: felt252,
+) -> felt252 {
+    let mut statement_hash = poseidon_hash2(MULTI_PAIR_MESSAGE_DOMAIN, auction_verifier.into());
+    statement_hash = poseidon_hash2(statement_hash, batch_id);
+    statement_hash = poseidon_hash2(statement_hash, multi_pair_commitment);
+    expected_l1_message_hash(proof_program_address, MULTI_PAIR_MESSAGE_DOMAIN, statement_hash)
+}
+
+fn expected_multi_pair_settlement_proof_message_hash(
+    proof_program_address: ContractAddress,
+    auction_verifier: ContractAddress,
+    transcript_commitment: felt252,
+) -> felt252 {
+    let mut statement_hash = poseidon_hash2(
+        MULTI_PAIR_SETTLEMENT_MESSAGE_DOMAIN, auction_verifier.into(),
+    );
+    statement_hash = poseidon_hash2(statement_hash, transcript_commitment);
+    expected_l1_message_hash(
+        proof_program_address, MULTI_PAIR_SETTLEMENT_MESSAGE_DOMAIN, statement_hash,
+    )
+}
+
+fn expected_settlement_component_proof_message_hash(
+    proof_program_address: ContractAddress,
+    auction_verifier: ContractAddress,
+    transcript_commitment: felt252,
+    domain: felt252,
+) -> felt252 {
+    let mut statement_hash = poseidon_hash2(domain, auction_verifier.into());
+    statement_hash = poseidon_hash2(statement_hash, transcript_commitment);
+    expected_l1_message_hash(proof_program_address, domain, statement_hash)
+}
+
 fn expected_note_consolidation_proof_message_hash(
     proof_program_address: ContractAddress,
     auction_verifier: ContractAddress,
     consolidation_commitment: felt252,
 ) -> felt252 {
-    let mut statement_hash =
-        poseidon_hash2(NOTE_CONSOLIDATION_MESSAGE_DOMAIN, auction_verifier.into());
+    let mut statement_hash = poseidon_hash2(
+        NOTE_CONSOLIDATION_MESSAGE_DOMAIN, auction_verifier.into(),
+    );
     statement_hash = poseidon_hash2(statement_hash, consolidation_commitment);
     expected_l1_message_hash(
         proof_program_address, NOTE_CONSOLIDATION_MESSAGE_DOMAIN, statement_hash,
@@ -147,7 +281,9 @@ fn expected_note_consolidation_proof_message_hash(
 }
 
 fn expected_l1_message_hash(
-    proof_program_address: ContractAddress, payload_domain: felt252, statement_message_hash: felt252,
+    proof_program_address: ContractAddress,
+    payload_domain: felt252,
+    statement_message_hash: felt252,
 ) -> felt252 {
     let payload = array![payload_domain, statement_message_hash];
     let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
@@ -156,9 +292,29 @@ fn expected_l1_message_hash(
 }
 
 fn deploy_proof_program_with_mock_statements() -> ContractAddress {
-    let (settlement, nullifier, renewal, consolidation, withdrawal) =
+    let (
+        settlement,
+        nullifier,
+        renewal,
+        consolidation,
+        withdrawal,
+        admission,
+        auction_result,
+        multi_pair,
+        multi_pair_settlement,
+    ) =
         deploy_mock_statement_programs();
-    deploy_auction_proof_program_with(settlement, nullifier, renewal, consolidation, withdrawal)
+    deploy_auction_proof_program_with(
+        settlement,
+        nullifier,
+        renewal,
+        consolidation,
+        withdrawal,
+        admission,
+        auction_result,
+        multi_pair,
+        multi_pair_settlement,
+    )
 }
 
 #[test]
@@ -236,6 +392,51 @@ fn compile_renewal_proof_accepts_known_good_statement_fixture() {
 }
 
 #[test]
+fn compile_settlement_order_proof_accepts_known_good_statement_fixture() {
+    let proof_program_address = deploy_proof_program_with_mock_statements();
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let auction_verifier = as_address(0x456);
+    let empty_witness = array![];
+
+    let actual = proof_program
+        .compile_settlement_order_proof(auction_verifier, empty_witness.span());
+    let expected = expected_settlement_component_proof_message_hash(
+        proof_program_address, auction_verifier, 0xaaa, SETTLEMENT_ORDER_MESSAGE_DOMAIN,
+    );
+    assert(actual == expected, 'BAD_COMPILE_ORDER');
+}
+
+#[test]
+fn compile_settlement_input_membership_proof_accepts_known_good_statement_fixture() {
+    let proof_program_address = deploy_proof_program_with_mock_statements();
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let auction_verifier = as_address(0x456);
+    let empty_witness = array![];
+
+    let actual = proof_program
+        .compile_settlement_input_membership_proof(auction_verifier, empty_witness.span());
+    let expected = expected_settlement_component_proof_message_hash(
+        proof_program_address, auction_verifier, 0xaaa, SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN,
+    );
+    assert(actual == expected, 'BAD_COMPILE_MEM');
+}
+
+#[test]
+fn compile_settlement_output_recovery_proof_accepts_known_good_statement_fixture() {
+    let proof_program_address = deploy_proof_program_with_mock_statements();
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let auction_verifier = as_address(0x456);
+    let empty_witness = array![];
+
+    let actual = proof_program
+        .compile_settlement_output_recovery_proof(auction_verifier, empty_witness.span());
+    let expected = expected_settlement_component_proof_message_hash(
+        proof_program_address, auction_verifier, 0xaaa, SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN,
+    );
+    assert(actual == expected, 'BAD_COMPILE_REC');
+}
+
+#[test]
 fn compile_note_consolidation_proof_accepts_known_good_statement_fixture() {
     let proof_program_address = deploy_proof_program_with_mock_statements();
     let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
@@ -265,14 +466,56 @@ fn compile_withdrawal_proof_accepts_known_good_statement_fixture() {
 }
 
 #[test]
+fn compile_multi_pair_proof_accepts_known_good_statement_fixture() {
+    let proof_program_address = deploy_proof_program_with_mock_statements();
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let auction_verifier = as_address(0x456);
+    let batch_id = 0xabc;
+    let empty_witness = array![8, batch_id];
+
+    let actual = proof_program.compile_multi_pair_proof(auction_verifier, empty_witness.span());
+    let expected = expected_multi_pair_proof_message_hash(
+        proof_program_address, auction_verifier, batch_id, 0xddd,
+    );
+    assert(actual == expected, 'BAD_COMPILE_MPAIR');
+}
+
+#[test]
+fn compile_multi_pair_settlement_proof_accepts_known_good_statement_fixture() {
+    let proof_program_address = deploy_proof_program_with_mock_statements();
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let auction_verifier = as_address(0x456);
+    let empty_witness = array![];
+
+    let actual = proof_program
+        .compile_multi_pair_settlement_proof(auction_verifier, empty_witness.span());
+    let expected = expected_multi_pair_settlement_proof_message_hash(
+        proof_program_address, auction_verifier, 0xeee,
+    );
+    assert(actual == expected, 'BAD_COMPILE_MP_SETTLE');
+}
+
+#[test]
+#[should_panic]
+fn compile_multi_pair_proof_rejects_missing_batch_id() {
+    let proof_program_address = deploy_proof_program_with_mock_statements();
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let auction_verifier = as_address(0x456);
+    let malformed_witness = array![];
+
+    proof_program.compile_multi_pair_proof(auction_verifier, malformed_witness.span());
+}
+
+#[test]
 fn compile_settlement_aggregate_proof_accepts_known_good_statement_fixture() {
     let proof_program_address = deploy_proof_program_with_mock_statements();
     let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
     let auction_verifier = as_address(0x456);
     let empty_witnesses = array![1, 0];
 
-    let settlement_message =
-        expected_settlement_proof_message_hash(proof_program_address, auction_verifier, 0xaaa);
+    let settlement_message = expected_settlement_proof_message_hash(
+        proof_program_address, auction_verifier, 0xaaa,
+    );
     let nullifier_message = expected_nullifier_proof_message_hash(
         proof_program_address, auction_verifier, 0xaaa, 0x101, 0x102, 0x103,
     );
@@ -291,10 +534,40 @@ fn compile_settlement_aggregate_proof_accepts_known_good_statement_fixture() {
 
 #[test]
 #[should_panic]
+fn compile_settlement_aggregate_proof_rejects_empty_native_fixture() {
+    let proof_program_address = deploy_proof_program_with_mock_statements();
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let auction_verifier = as_address(0x456);
+    let empty_witnesses = array![0];
+
+    proof_program.compile_settlement_aggregate_proof(auction_verifier, empty_witnesses.span());
+}
+
+#[test]
+#[should_panic]
+fn compile_settlement_aggregate_proof_rejects_trailing_native_fixture_data() {
+    let proof_program_address = deploy_proof_program_with_mock_statements();
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let auction_verifier = as_address(0x456);
+    let padded_witnesses = array![1, 0, 0xdead];
+
+    proof_program.compile_settlement_aggregate_proof(auction_verifier, padded_witnesses.span());
+}
+
+#[test]
+#[should_panic]
 fn auction_proof_program_rejects_zero_settlement_statement_program() {
     let statement_program = as_address(0x123);
     deploy_auction_proof_program_with(
-        as_address(0), statement_program, statement_program, statement_program, statement_program,
+        as_address(0),
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
     );
 }
 
@@ -303,7 +576,15 @@ fn auction_proof_program_rejects_zero_settlement_statement_program() {
 fn auction_proof_program_rejects_zero_nullifier_statement_program() {
     let statement_program = as_address(0x123);
     deploy_auction_proof_program_with(
-        statement_program, as_address(0), statement_program, statement_program, statement_program,
+        statement_program,
+        as_address(0),
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
     );
 }
 
@@ -312,7 +593,15 @@ fn auction_proof_program_rejects_zero_nullifier_statement_program() {
 fn auction_proof_program_rejects_zero_renewal_statement_program() {
     let statement_program = as_address(0x123);
     deploy_auction_proof_program_with(
-        statement_program, statement_program, as_address(0), statement_program, statement_program,
+        statement_program,
+        statement_program,
+        as_address(0),
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
     );
 }
 
@@ -321,7 +610,15 @@ fn auction_proof_program_rejects_zero_renewal_statement_program() {
 fn auction_proof_program_rejects_zero_consolidation_statement_program() {
     let statement_program = as_address(0x123);
     deploy_auction_proof_program_with(
-        statement_program, statement_program, statement_program, as_address(0), statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        as_address(0),
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
     );
 }
 
@@ -330,7 +627,83 @@ fn auction_proof_program_rejects_zero_consolidation_statement_program() {
 fn auction_proof_program_rejects_zero_withdrawal_statement_program() {
     let statement_program = as_address(0x123);
     deploy_auction_proof_program_with(
-        statement_program, statement_program, statement_program, statement_program, as_address(0),
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        as_address(0),
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+    );
+}
+
+#[test]
+#[should_panic]
+fn auction_proof_program_rejects_zero_admission_statement_program() {
+    let statement_program = as_address(0x123);
+    deploy_auction_proof_program_with(
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        as_address(0),
+        statement_program,
+        statement_program,
+        statement_program,
+    );
+}
+
+#[test]
+#[should_panic]
+fn auction_proof_program_rejects_zero_auction_result_statement_program() {
+    let statement_program = as_address(0x123);
+    deploy_auction_proof_program_with(
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        as_address(0),
+        statement_program,
+        statement_program,
+    );
+}
+
+#[test]
+#[should_panic]
+fn auction_proof_program_rejects_zero_multi_pair_statement_program() {
+    let statement_program = as_address(0x123);
+    deploy_auction_proof_program_with(
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        as_address(0),
+        statement_program,
+    );
+}
+
+#[test]
+#[should_panic]
+fn auction_proof_program_rejects_zero_multi_pair_settlement_statement_program() {
+    let statement_program = as_address(0x123);
+    deploy_auction_proof_program_with(
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        statement_program,
+        as_address(0),
     );
 }
 
@@ -389,6 +762,39 @@ fn compile_renewal_proof_rejects_zero_verifier_before_statement_dispatch() {
 
 #[test]
 #[should_panic]
+fn compile_settlement_order_proof_rejects_zero_verifier_before_statement_dispatch() {
+    let statement_program = as_address(0x123);
+    let proof_program_address = deploy_auction_proof_program(statement_program);
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let empty_witness = array![];
+
+    proof_program.compile_settlement_order_proof(as_address(0), empty_witness.span());
+}
+
+#[test]
+#[should_panic]
+fn compile_settlement_input_membership_proof_rejects_zero_verifier_before_statement_dispatch() {
+    let statement_program = as_address(0x123);
+    let proof_program_address = deploy_auction_proof_program(statement_program);
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let empty_witness = array![];
+
+    proof_program.compile_settlement_input_membership_proof(as_address(0), empty_witness.span());
+}
+
+#[test]
+#[should_panic]
+fn compile_settlement_output_recovery_proof_rejects_zero_verifier_before_statement_dispatch() {
+    let statement_program = as_address(0x123);
+    let proof_program_address = deploy_auction_proof_program(statement_program);
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let empty_witness = array![];
+
+    proof_program.compile_settlement_output_recovery_proof(as_address(0), empty_witness.span());
+}
+
+#[test]
+#[should_panic]
 fn compile_note_consolidation_proof_rejects_zero_verifier_before_statement_dispatch() {
     let statement_program = as_address(0x123);
     let proof_program_address = deploy_auction_proof_program(statement_program);
@@ -433,6 +839,28 @@ fn compile_auction_result_proof_rejects_zero_verifier_before_statement_dispatch(
 
 #[test]
 #[should_panic]
+fn compile_multi_pair_proof_rejects_zero_verifier_before_statement_dispatch() {
+    let statement_program = as_address(0x123);
+    let proof_program_address = deploy_auction_proof_program(statement_program);
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let empty_witness = array![];
+
+    proof_program.compile_multi_pair_proof(as_address(0), empty_witness.span());
+}
+
+#[test]
+#[should_panic]
+fn compile_multi_pair_settlement_proof_rejects_zero_verifier_before_statement_dispatch() {
+    let statement_program = as_address(0x123);
+    let proof_program_address = deploy_auction_proof_program(statement_program);
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let empty_witness = array![];
+
+    proof_program.compile_multi_pair_settlement_proof(as_address(0), empty_witness.span());
+}
+
+#[test]
+#[should_panic]
 fn compile_settlement_aggregate_proof_rejects_zero_verifier_before_statement_dispatch() {
     let statement_program = as_address(0x123);
     let proof_program_address = deploy_auction_proof_program(statement_program);
@@ -449,6 +877,42 @@ mod MockSettlementStatementProgram {
 
     #[external(v0)]
     fn verify_settlement_statement(
+        self: @ContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252 {
+        let _ = self;
+        let _ = serialized_settlement_witness;
+        0xaaa
+    }
+
+    #[external(v0)]
+    fn verify_settlement_note_fee_statement(
+        self: @ContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252 {
+        let _ = self;
+        let _ = serialized_settlement_witness;
+        0xaaa
+    }
+
+    #[external(v0)]
+    fn verify_settlement_order_statement(
+        self: @ContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252 {
+        let _ = self;
+        let _ = serialized_settlement_witness;
+        0xaaa
+    }
+
+    #[external(v0)]
+    fn verify_settlement_output_recovery_statement(
+        self: @ContractState, serialized_settlement_witness: Span<felt252>,
+    ) -> felt252 {
+        let _ = self;
+        let _ = serialized_settlement_witness;
+        0xaaa
+    }
+
+    #[external(v0)]
+    fn verify_settlement_input_membership_statement(
         self: @ContractState, serialized_settlement_witness: Span<felt252>,
     ) -> felt252 {
         let _ = self;
@@ -499,6 +963,111 @@ mod MockNoteConsolidationStatementProgram {
         let _ = self;
         let _ = serialized_note_consolidation_witness;
         0xbbb
+    }
+}
+
+#[starknet::contract]
+mod MockAdmissionStatementProgram {
+    #[storage]
+    struct Storage {}
+
+    #[external(v0)]
+    fn verify_admission_statement(
+        self: @ContractState, serialized_admission_witness: Span<felt252>,
+    ) -> (felt252, felt252, felt252) {
+        let _ = self;
+        let _ = serialized_admission_witness;
+        (0x111, 0x222, 0x333)
+    }
+}
+
+#[starknet::contract]
+mod MockAuctionResultStatementProgram {
+    #[storage]
+    struct Storage {}
+
+    #[external(v0)]
+    fn verify_auction_result_statement(
+        self: @ContractState, serialized_private_auction_witness: Span<felt252>,
+    ) -> (felt252, felt252, felt252, felt252) {
+        let _ = self;
+        let _ = serialized_private_auction_witness;
+        (0x111, 0x222, 0x333, 0xaaa)
+    }
+}
+
+#[starknet::contract]
+mod MockMultiPairStatementProgram {
+    #[storage]
+    struct Storage {}
+
+    #[external(v0)]
+    fn verify_multi_pair_statement(
+        self: @ContractState, serialized_multi_pair_witness: Span<felt252>,
+    ) -> felt252 {
+        let _ = self;
+        let _ = serialized_multi_pair_witness;
+        0xddd
+    }
+}
+
+#[starknet::contract]
+mod MockMultiPairSettlementPublicStatementProgram {
+    #[storage]
+    struct Storage {}
+
+    #[external(v0)]
+    fn verify_multi_pair_settlement_public_statement(
+        self: @ContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+    ) -> felt252 {
+        let _ = self;
+        let _ = serialized_multi_pair_settlement_witness;
+        0xeee
+    }
+}
+
+#[starknet::contract]
+mod MockMultiPairSettlementOrderStateStatementProgram {
+    #[storage]
+    struct Storage {}
+
+    #[external(v0)]
+    fn verify_multi_pair_settlement_order_state_statement(
+        self: @ContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+    ) -> felt252 {
+        let _ = self;
+        let _ = serialized_multi_pair_settlement_witness;
+        0xeee
+    }
+}
+
+#[starknet::contract]
+mod MockMultiPairSettlementCompletionStatementProgram {
+    #[storage]
+    struct Storage {}
+
+    #[external(v0)]
+    fn verify_multi_pair_settlement_completion_statement(
+        self: @ContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+    ) -> felt252 {
+        let _ = self;
+        let _ = serialized_multi_pair_settlement_witness;
+        0xeee
+    }
+}
+
+#[starknet::contract]
+mod MockMultiPairSettlementFeeRecoveryStatementProgram {
+    #[storage]
+    struct Storage {}
+
+    #[external(v0)]
+    fn verify_multi_pair_settlement_fee_recovery_statement(
+        self: @ContractState, serialized_multi_pair_settlement_witness: Span<felt252>,
+    ) -> felt252 {
+        let _ = self;
+        let _ = serialized_multi_pair_settlement_witness;
+        0xeee
     }
 }
 

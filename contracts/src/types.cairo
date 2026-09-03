@@ -29,12 +29,3 @@ pub struct DepositActivationRecord {
     pub deposit_root: felt252,
     pub encrypted_note_activation: felt252,
 }
-
-#[derive(Drop, Serde)]
-pub struct WithdrawalRecord {
-    pub withdrawal_id: u64,
-    pub asset_id: felt252,
-    pub amount: u128,
-    pub recipient: starknet::ContractAddress,
-    pub note_commitment: felt252,
-}
