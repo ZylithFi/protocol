@@ -1,0 +1,11 @@
+[package]
+name = "zylith-smoke"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json = "1"
+starknet-crypto = "0.8.1"
+zylith-core = { path = "../core" }

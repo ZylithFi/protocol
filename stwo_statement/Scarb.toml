@@ -7,9 +7,29 @@ edition = "2024_07"
 sierra = true
 
 [[target.executable]]
+name = "settlement"
 function = "zylith_settlement_statement::executable::main"
 
+[[target.executable]]
+name = "admission"
+function = "zylith_settlement_statement::admission_executable::main"
+
+[[target.executable]]
+name = "auction_result"
+function = "zylith_settlement_statement::auction_result_executable::main"
+
+[[target.executable]]
+name = "liquidity_position"
+function = "zylith_settlement_statement::liquidity_position_executable::main"
+
+[[target.executable]]
+name = "multi_pair"
+function = "zylith_settlement_statement::multi_pair_executable::main"
+
 [cairo]
+enable-gas = false
+
+[profile.dev.cairo]
 enable-gas = false
 
 [profile.snforge.cairo]

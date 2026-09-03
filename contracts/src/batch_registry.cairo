@@ -5,6 +5,7 @@ use zylith_protocol::types::{BatchStatus, BatchView};
 pub trait IBatchRegistry<TContractState> {
     fn propose_admin(ref self: TContractState, new_admin: ContractAddress);
     fn accept_admin(ref self: TContractState);
+    fn lock_config(ref self: TContractState);
     fn set_batch_registrar(ref self: TContractState, registrar: ContractAddress);
     fn set_auction_verifier(ref self: TContractState, verifier: ContractAddress);
     fn register_batch(
@@ -17,14 +18,6 @@ pub trait IBatchRegistry<TContractState> {
         order_commitment_root: felt252,
         encrypted_order_set_commitment: felt252,
     );
-    fn record_order_set_commitments(
-        ref self: TContractState,
-        batch_id: felt252,
-        order_count: u64,
-        order_commitment_root: felt252,
-        encrypted_order_set_commitment: felt252,
-    );
-    fn increment_order_count(ref self: TContractState, batch_id: felt252, delta: u64);
     fn transition_status(
         ref self: TContractState,
         batch_id: felt252,
@@ -43,6 +36,7 @@ pub trait IBatchRegistry<TContractState> {
     fn admin_address(self: @TContractState) -> ContractAddress;
     fn pending_admin_address(self: @TContractState) -> ContractAddress;
     fn admin_transfer_pending(self: @TContractState) -> bool;
+    fn config_is_locked(self: @TContractState) -> bool;
     fn batch_registrar_address(self: @TContractState) -> ContractAddress;
     fn auction_verifier_address(self: @TContractState) -> ContractAddress;
 }
@@ -62,6 +56,7 @@ pub mod BatchRegistry {
         admin: ContractAddress,
         pending_admin: ContractAddress,
         admin_transfer_pending: bool,
+        config_locked: bool,
         batch_registrar: ContractAddress,
         auction_verifier: ContractAddress,
         batch_exists: Map<felt252, bool>,
@@ -105,14 +100,24 @@ pub mod BatchRegistry {
             self.admin_transfer_pending.write(false);
         }
 
+        fn lock_config(ref self: ContractState) {
+            assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
+            assert(!self.batch_registrar.read().is_zero(), 'REGISTRAR_UNSET');
+            assert(!self.auction_verifier.read().is_zero(), 'VERIFIER_UNSET');
+            self.config_locked.write(true);
+        }
+
         fn set_batch_registrar(ref self: ContractState, registrar: ContractAddress) {
             assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
             assert(!registrar.is_zero(), 'BAD_REGISTRAR');
             self.batch_registrar.write(registrar);
         }
 
         fn set_auction_verifier(ref self: ContractState, verifier: ContractAddress) {
             assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
             assert(!verifier.is_zero(), 'BAD_AUCTION_VERIFIER');
             self.auction_verifier.write(verifier);
         }
@@ -131,6 +136,7 @@ pub mod BatchRegistry {
             assert(batch_id != 0, 'BAD_BATCH_ID');
             assert(pair_id != 0, 'BAD_PAIR_ID');
             assert(epoch_id != 0, 'BAD_EPOCH');
+            assert(close_time_unix_ms != 0, 'BAD_CLOSE_TIME');
             assert(order_commitment_root != 0, 'BAD_ORDER_ROOT');
             assert(encrypted_order_set_commitment != 0, 'BAD_ENC_SET');
             let exists = self.batch_exists.read(batch_id);
@@ -149,43 +155,6 @@ pub mod BatchRegistry {
             self.clearing_prices.write(batch_id, 0);
         }
 
-        fn record_order_set_commitments(
-            ref self: ContractState,
-            batch_id: felt252,
-            order_count: u64,
-            order_commitment_root: felt252,
-            encrypted_order_set_commitment: felt252,
-        ) {
-            assert_batch_registrar(@self);
-            assert(false, 'FINAL_BATCH_ONLY');
-            assert_batch_exists(@self, batch_id);
-            assert(order_commitment_root != 0, 'BAD_ORDER_ROOT');
-            assert(encrypted_order_set_commitment != 0, 'BAD_ENC_SET');
-            let status = self.statuses.read(batch_id);
-            assert(status == BatchStatus::Prepared, 'BATCH_NOT_PREPARED');
-            assert(self.order_counts.read(batch_id) == order_count, 'ORDER_COUNT_MISMATCH');
-            assert(
-                self.order_commitment_roots.read(batch_id) == order_commitment_root,
-                'ORDER_ROOT_MISMATCH',
-            );
-            assert(
-                self
-                    .encrypted_order_set_commitments
-                    .read(batch_id) == encrypted_order_set_commitment,
-                'ENC_SET_MISMATCH',
-            );
-        }
-
-        fn increment_order_count(ref self: ContractState, batch_id: felt252, delta: u64) {
-            assert_batch_registrar(@self);
-            assert(false, 'FINAL_BATCH_ONLY');
-            assert_batch_exists(@self, batch_id);
-            let status = self.statuses.read(batch_id);
-            assert(status == BatchStatus::Open, 'BATCH_NOT_OPEN');
-            let current = self.order_counts.read(batch_id);
-            self.order_counts.write(batch_id, current + delta);
-        }
-
         fn transition_status(
             ref self: ContractState,
             batch_id: felt252,
@@ -196,9 +165,7 @@ pub mod BatchRegistry {
             assert_batch_exists(@self, batch_id);
             let current = self.statuses.read(batch_id);
             assert(current == expected_status, 'BAD_BATCH_STATUS');
-            let valid_transition = if current == BatchStatus::Open {
-                next_status == BatchStatus::Prepared || next_status == BatchStatus::Cancelled
-            } else if current == BatchStatus::Prepared {
+            let valid_transition = if current == BatchStatus::Prepared {
                 next_status == BatchStatus::Cancelled
             } else {
                 false
@@ -255,6 +222,10 @@ pub mod BatchRegistry {
 
         fn admin_transfer_pending(self: @ContractState) -> bool {
             self.admin_transfer_pending.read()
+        }
+
+        fn config_is_locked(self: @ContractState) -> bool {
+            self.config_locked.read()
         }
 
         fn batch_registrar_address(self: @ContractState) -> ContractAddress {

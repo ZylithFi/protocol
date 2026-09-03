@@ -1,5 +1,4 @@
 use starknet::ContractAddress;
-use zylith_protocol::types::WithdrawalRecord;
 
 #[derive(Copy, Drop, Serde)]
 pub struct OpenNoteDeposit {
@@ -12,6 +11,7 @@ pub struct OpenNoteDeposit {
 pub trait IPrivacyDepositBridge<TContractState> {
     fn propose_admin(ref self: TContractState, new_admin: ContractAddress);
     fn accept_admin(ref self: TContractState);
+    fn lock_config(ref self: TContractState);
     fn set_auction_verifier(ref self: TContractState, verifier: ContractAddress);
     fn register_supported_asset(
         ref self: TContractState, asset_id: felt252, token_address: ContractAddress,
@@ -26,23 +26,6 @@ pub trait IPrivacyDepositBridge<TContractState> {
         amounts: Span<u128>,
         withdraw_authorities: Span<felt252>,
     ) -> Span<OpenNoteDeposit>;
-    fn register_funding_activation(
-        ref self: TContractState,
-        funding_commitments: Span<felt252>,
-        deposit_roots: Span<felt252>,
-        encrypted_note_activations: Span<felt252>,
-        note_commitments: Span<felt252>,
-        asset_ids: Span<felt252>,
-        amounts: Span<u128>,
-        withdraw_authorities: Span<felt252>,
-    );
-    fn withdraw_verified_note(
-        ref self: TContractState,
-        asset_id: felt252,
-        amount: u128,
-        note_commitment: felt252,
-        recipient: ContractAddress,
-    );
     fn stage_verified_note_strk20_exit(
         ref self: TContractState,
         asset_id: felt252,
@@ -55,12 +38,10 @@ pub trait IPrivacyDepositBridge<TContractState> {
     fn escrowed_asset_amount(self: @TContractState, asset_id: felt252) -> u128;
     fn asset_token(self: @TContractState, asset_id: felt252) -> ContractAddress;
     fn is_asset_supported(self: @TContractState, asset_id: felt252) -> bool;
-    fn withdrawal_recipient(self: @TContractState, note_commitment: felt252) -> ContractAddress;
-    fn withdrawal_count(self: @TContractState) -> u64;
-    fn withdrawal_record(self: @TContractState, withdrawal_id: u64) -> WithdrawalRecord;
     fn admin_address(self: @TContractState) -> ContractAddress;
     fn pending_admin_address(self: @TContractState) -> ContractAddress;
     fn admin_transfer_pending(self: @TContractState) -> bool;
+    fn config_is_locked(self: @TContractState) -> bool;
     fn auction_verifier_address(self: @TContractState) -> ContractAddress;
     fn commitment_registry_address(self: @TContractState) -> ContractAddress;
     fn privacy_pool_address(self: @TContractState) -> ContractAddress;
@@ -81,7 +62,6 @@ pub mod PrivacyDepositBridge {
         ICommitmentRegistryDispatcher, ICommitmentRegistryDispatcherTrait,
     };
     use zylith_protocol::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
-    use zylith_protocol::types::WithdrawalRecord;
 
     const STRK20_EXIT_CLAIM_DOMAIN: felt252 = 0x7a796c6974685f7374726b32305f636c61696d5f7631;
     const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
@@ -92,16 +72,12 @@ pub mod PrivacyDepositBridge {
         admin: ContractAddress,
         pending_admin: ContractAddress,
         admin_transfer_pending: bool,
+        config_locked: bool,
         auction_verifier: ContractAddress,
         commitment_registry: ContractAddress,
         privacy_pool: ContractAddress,
         asset_tokens: Map<felt252, ContractAddress>,
-        withdrawal_recipients: Map<felt252, ContractAddress>,
-        withdrawal_count: u64,
-        withdrawal_note_commitments: Map<u64, felt252>,
-        withdrawal_asset_ids: Map<u64, felt252>,
-        withdrawal_amounts: Map<u64, u128>,
-        withdrawal_recipients_by_id: Map<u64, ContractAddress>,
+        supported_asset_count: u64,
         strk20_exit_asset_ids: Map<felt252, felt252>,
         strk20_exit_amounts: Map<felt252, u128>,
         strk20_exit_note_commitments: Map<felt252, felt252>,
@@ -144,8 +120,17 @@ pub mod PrivacyDepositBridge {
             self.admin_transfer_pending.write(false);
         }
 
+        fn lock_config(ref self: ContractState) {
+            assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
+            assert(!self.auction_verifier.read().is_zero(), 'VERIFIER_UNSET');
+            assert(self.supported_asset_count.read() > 0, 'NO_ASSETS');
+            self.config_locked.write(true);
+        }
+
         fn set_auction_verifier(ref self: ContractState, verifier: ContractAddress) {
             assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
             assert(!verifier.is_zero(), 'BAD_AUCTION_VERIFIER');
             self.auction_verifier.write(verifier);
         }
@@ -154,12 +139,14 @@ pub mod PrivacyDepositBridge {
             ref self: ContractState, asset_id: felt252, token_address: ContractAddress,
         ) {
             assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
             assert(asset_id != 0, 'BAD_ASSET');
             assert(!token_address.is_zero(), 'BAD_TOKEN');
 
             let existing = self.asset_tokens.read(asset_id);
             if existing.is_zero() {
                 self.asset_tokens.write(asset_id, token_address);
+                self.supported_asset_count.write(self.supported_asset_count.read() + 1);
             } else {
                 assert(existing == token_address, 'ASSET_IMMUTABLE');
             }
@@ -202,72 +189,6 @@ pub mod PrivacyDepositBridge {
             open_note_deposits.span()
         }
 
-        fn register_funding_activation(
-            ref self: ContractState,
-            funding_commitments: Span<felt252>,
-            deposit_roots: Span<felt252>,
-            encrypted_note_activations: Span<felt252>,
-            note_commitments: Span<felt252>,
-            asset_ids: Span<felt252>,
-            amounts: Span<u128>,
-            withdraw_authorities: Span<felt252>,
-        ) {
-            register_funding_activation_internal(
-                ref self,
-                funding_commitments,
-                deposit_roots,
-                encrypted_note_activations,
-                note_commitments,
-                asset_ids,
-                amounts,
-                withdraw_authorities,
-            );
-        }
-
-        fn withdraw_verified_note(
-            ref self: ContractState,
-            asset_id: felt252,
-            amount: u128,
-            note_commitment: felt252,
-            recipient: ContractAddress,
-        ) {
-            assert_auction_verifier(@self);
-            assert(asset_id != 0, 'BAD_ASSET');
-            assert(amount > 0, 'BAD_AMOUNT');
-            assert(note_commitment != 0, 'BAD_COMMITMENT');
-            assert(!recipient.is_zero(), 'BAD_RECIPIENT');
-            assert(self.withdrawal_recipients.read(note_commitment).is_zero(), 'NOTE_WITHDRAWN');
-            assert(
-                self.strk20_exit_commitments_by_note.read(note_commitment) == 0, 'NOTE_WITHDRAWN',
-            );
-            let token_address = self.asset_tokens.read(asset_id);
-            assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
-            let escrowed = self.escrowed_asset_amounts.read(asset_id);
-            assert(escrowed >= amount, 'ESCROW_LOW');
-
-            self.withdrawal_recipients.write(note_commitment, recipient);
-
-            let withdrawal_id = self.withdrawal_count.read();
-            self.withdrawal_note_commitments.write(withdrawal_id, note_commitment);
-            self.withdrawal_asset_ids.write(withdrawal_id, asset_id);
-            self.withdrawal_amounts.write(withdrawal_id, amount);
-            self.withdrawal_recipients_by_id.write(withdrawal_id, recipient);
-            self.withdrawal_count.write(withdrawal_id + 1);
-
-            let token = IERC20Dispatcher { contract_address: token_address };
-            let vault_balance_before = checked_token_balance(token, get_contract_address());
-            let recipient_balance_before = checked_token_balance(token, recipient);
-            token.transfer(recipient, as_u256(amount));
-            let vault_balance_after = checked_token_balance(token, get_contract_address());
-            let recipient_balance_after = checked_token_balance(token, recipient);
-            assert(vault_balance_before == vault_balance_after + amount, 'TOKEN_TRANSFER_DELTA');
-            assert(
-                recipient_balance_after == recipient_balance_before + amount,
-                'TOKEN_TRANSFER_DELTA',
-            );
-            self.escrowed_asset_amounts.write(asset_id, escrowed - amount);
-        }
-
         fn stage_verified_note_strk20_exit(
             ref self: ContractState,
             asset_id: felt252,
@@ -284,7 +205,6 @@ pub mod PrivacyDepositBridge {
             assert(exit_commitment != 0, 'BAD_EXIT');
             assert(self.strk20_exit_amounts.read(exit_commitment) == 0, 'EXIT_EXISTS');
             assert(self.strk20_exit_note_commitments.read(exit_commitment) == 0, 'EXIT_EXISTS');
-            assert(self.withdrawal_recipients.read(note_commitment).is_zero(), 'NOTE_WITHDRAWN');
             assert(
                 self.strk20_exit_commitments_by_note.read(note_commitment) == 0, 'NOTE_WITHDRAWN',
             );
@@ -319,27 +239,6 @@ pub mod PrivacyDepositBridge {
             !self.asset_tokens.read(asset_id).is_zero()
         }
 
-        fn withdrawal_recipient(self: @ContractState, note_commitment: felt252) -> ContractAddress {
-            self.withdrawal_recipients.read(note_commitment)
-        }
-
-        fn withdrawal_count(self: @ContractState) -> u64 {
-            self.withdrawal_count.read()
-        }
-
-        fn withdrawal_record(self: @ContractState, withdrawal_id: u64) -> WithdrawalRecord {
-            let count = self.withdrawal_count.read();
-            assert(withdrawal_id < count, 'UNKNOWN_WITHDRAWAL');
-
-            WithdrawalRecord {
-                withdrawal_id,
-                asset_id: self.withdrawal_asset_ids.read(withdrawal_id),
-                amount: self.withdrawal_amounts.read(withdrawal_id),
-                recipient: self.withdrawal_recipients_by_id.read(withdrawal_id),
-                note_commitment: self.withdrawal_note_commitments.read(withdrawal_id),
-            }
-        }
-
         fn admin_address(self: @ContractState) -> ContractAddress {
             self.admin.read()
         }
@@ -350,6 +249,10 @@ pub mod PrivacyDepositBridge {
 
         fn admin_transfer_pending(self: @ContractState) -> bool {
             self.admin_transfer_pending.read()
+        }
+
+        fn config_is_locked(self: @ContractState) -> bool {
+            self.config_locked.read()
         }
 
         fn auction_verifier_address(self: @ContractState) -> ContractAddress {
@@ -493,8 +396,8 @@ pub mod PrivacyDepositBridge {
         let token = IERC20Dispatcher { contract_address: token_address };
         let bridge_balance = checked_token_balance(token, get_contract_address());
         assert(bridge_balance >= amount, 'TOKEN_BALANCE_LOW');
-        // The STRK20 pool consumes the returned OpenNoteDeposit from privacy_invoke and
-        // pulls this approved amount while applying the proven Invoke server action.
+        // The STRK20 pool consumes the returned OpenNoteDeposit from privacy_invoke
+        // and pulls this approved amount in the same transaction.
         token.approve(privacy_pool, as_u256(amount));
         super::OpenNoteDeposit { note_id: open_note_id, token: token_address, amount }
     }

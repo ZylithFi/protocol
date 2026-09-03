@@ -25,9 +25,6 @@ use zylith_protocol::privacy_deposit_bridge::{
 use zylith_protocol::privacy_proof_signer::{
     IPrivacyProofSignerDispatcher, IPrivacyProofSignerDispatcherTrait,
 };
-use zylith_protocol::shielded_asset_adapter::{
-    IShieldedAssetAdapterDispatcher, IShieldedAssetAdapterDispatcherTrait,
-};
 use zylith_protocol::types::BatchStatus;
 use crate::mock_erc20::{
     IConfigurableMockERC20Dispatcher, IConfigurableMockERC20DispatcherTrait, IMockERC20Dispatcher,
@@ -39,7 +36,7 @@ const NOTE_COMMITMENT: felt252 = 0x12345;
 const PRIVACY_POOL: felt252 = 0x999;
 const VIRTUAL_SNOS: felt252 = 'VIRTUAL_SNOS';
 const VIRTUAL_SNOS0: felt252 = 'VIRTUAL_SNOS0';
-const TEST_PROOF_VERSION: felt252 = 'PROOF0';
+const TEST_PROOF_VERSION: felt252 = 'PROOF1';
 const TEST_PROOF_PROGRAM_HASH: felt252 = 0x987654321;
 const TEST_BASE_BLOCK_HASH: felt252 = 0xabcdef123;
 const TEST_OS_CONFIG_HASH: felt252 = 0x123456789abcdef;
@@ -47,14 +44,34 @@ const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
 const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
 const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
 const RENEWAL_MESSAGE_DOMAIN: felt252 = 'zylith_renew_v1';
+const LIQUIDITY_POSITION_MESSAGE_DOMAIN: felt252 = 'zylith_lp_v1';
+const SETTLEMENT_ORDER_MESSAGE_DOMAIN: felt252 = 'zylith_ord_v1';
+const SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN: felt252 = 'zylith_inmem_v1';
+const SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN: felt252 = 'zylith_outrec_v1';
 const NOTE_CONSOLIDATION_MESSAGE_DOMAIN: felt252 = 'zylith_consol_v1';
 const WITHDRAWAL_MESSAGE_DOMAIN: felt252 = 'zylith_withdraw_v1';
+const MULTI_PAIR_MESSAGE_DOMAIN: felt252 = 'zylith_mpair_v1';
+const STATEMENT_ADMISSION: felt252 = 'ADMISSION';
+const STATEMENT_AUCTION_RESULT: felt252 = 'AUCTION_RESULT';
+const STATEMENT_NULLIFIER: felt252 = 'NULLIFIER';
+const STATEMENT_RENEWAL: felt252 = 'RENEWAL';
+const STATEMENT_LIQUIDITY_POSITION: felt252 = 'LIQUIDITY_POSITION';
+const STATEMENT_SETTLEMENT: felt252 = 'SETTLEMENT';
+const STATEMENT_SETTLEMENT_ORDER: felt252 = 'SETTLEMENT_ORDER';
+const STATEMENT_SETTLEMENT_INPUT_MEMBERSHIP: felt252 = 'SETTLEMENT_INPUT_MEMBERSHIP';
+const STATEMENT_SETTLEMENT_OUTPUT_RECOVERY: felt252 = 'SETTLEMENT_OUTPUT_RECOVERY';
+const STATEMENT_NOTE_CONSOLIDATION: felt252 = 'NOTE_CONSOLIDATION';
+const STATEMENT_AGGREGATE_SETTLEMENT: felt252 = 'AGGREGATE_SETTLEMENT';
+const STATEMENT_WITHDRAWAL: felt252 = 'WITHDRAWAL';
+const STATEMENT_MULTI_PAIR: felt252 = 'MULTI_PAIR';
 const PUBLIC_NOTE_CONSOLIDATION_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f636f6e736f6c5f7631;
 const PUBLIC_NOTE_WITHDRAWAL_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f77697468647261775f7631;
 const RENEWAL_PARENT_CANCEL_DOMAIN: felt252 =
     0x26f84b60309c08d4030876815edb467f89f78e5a5f62823af4521f1be502ca3;
 const ROOT_ONLY_STATE_TRANSITION_DOMAIN: felt252 =
     0x01f14f0555b0b80fd6af9553623a021c472d8c930dfcb5b204b35b26f0d2b1b2;
+const LIQUIDITY_POSITION_TRANSITION_ROOT_DOMAIN: felt252 =
+    0x0301dfad9cc240f421fd32f6b74d72002abc7f4056b885950bc5bc779213e5f7;
 const RENEWAL_CHILD_ROOT_DOMAIN: felt252 =
     0x03fa9bd33f1b9d3e1a22d77d4dc7ea4d33abd249f7585d0e451b0fafa39dfc43;
 const RENEWAL_SPARSE_LEAF_DOMAIN: felt252 =
@@ -63,8 +80,6 @@ const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
     0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
 const OUTPUT_NOTE_NODE_DOMAIN: felt252 =
     0x03c6998f476a618431be1c1764a6724f13c0739be395bab4c1217bc0a65b2ee7;
-const OUTPUT_WITHDRAWAL_DOMAIN: felt252 =
-    0x031ff5b95d48149e26b5a946562ff5ea925eb8b3ea09d3b389b209b672a37b6e;
 const OUTPUT_WITHDRAWAL_STRK20_EXIT_DOMAIN: felt252 = 0x7a796c6974685f7374726b32305f657869745f7631;
 const STRK20_EXIT_CLAIM_DOMAIN: felt252 = 0x7a796c6974685f7374726b32305f636c61696d5f7631;
 const CONSUMED_NULLIFIER_ROOT_DOMAIN: felt252 =
@@ -74,7 +89,6 @@ const TEST_CHAIN_ID: felt252 = 'SN_SEPOLIA';
 const WRONG_CHAIN_ID: felt252 = 'SN_MAIN';
 const TEST_PRICE_BASE_SCALE: u128 = 1;
 const TEST_TAKER_FEE_BPS: u128 = 4;
-const TEST_MAKER_FEE_BPS: u128 = 0;
 const TEST_RELAY_FEE_BPS: u128 = 2;
 const TEST_PROTOCOL_FEE_RECIPIENT: felt252 =
     0x02478731e01081aa57abe958afa8c29dfa83032c10d647a63b0394c23beb6192;
@@ -120,13 +134,6 @@ fn deploy_mock_privacy_pool() -> ContractAddress {
     address
 }
 
-fn deploy_shielded_asset_adapter(admin: ContractAddress) -> ContractAddress {
-    let class = declare("ShieldedAssetAdapter").unwrap().contract_class();
-    let calldata = array![admin.into()];
-    let (address, _) = class.deploy(@calldata).unwrap_syscall();
-    address
-}
-
 fn deploy_batch_registry(
     admin: ContractAddress, batch_registrar: ContractAddress,
 ) -> ContractAddress {
@@ -158,25 +165,53 @@ fn deploy_privacy_proof_signer(signer_public_key: felt252) -> ContractAddress {
     address
 }
 
+fn configure_statement_proof_hashes(verifier: IAuctionVerifierDispatcher) {
+    configure_statement_proof_hashes_without_multi_pair(verifier);
+    verifier.set_statement_proof_program_hash(STATEMENT_MULTI_PAIR, TEST_PROOF_PROGRAM_HASH);
+}
+
+fn configure_statement_proof_hashes_without_multi_pair(verifier: IAuctionVerifierDispatcher) {
+    verifier.set_statement_proof_program_hash(STATEMENT_ADMISSION, TEST_PROOF_PROGRAM_HASH);
+    verifier.set_statement_proof_program_hash(STATEMENT_AUCTION_RESULT, TEST_PROOF_PROGRAM_HASH);
+    verifier.set_statement_proof_program_hash(STATEMENT_NULLIFIER, TEST_PROOF_PROGRAM_HASH);
+    verifier.set_statement_proof_program_hash(STATEMENT_RENEWAL, TEST_PROOF_PROGRAM_HASH);
+    verifier
+        .set_statement_proof_program_hash(STATEMENT_LIQUIDITY_POSITION, TEST_PROOF_PROGRAM_HASH);
+    verifier.set_statement_proof_program_hash(STATEMENT_SETTLEMENT, TEST_PROOF_PROGRAM_HASH);
+    verifier.set_statement_proof_program_hash(STATEMENT_SETTLEMENT_ORDER, TEST_PROOF_PROGRAM_HASH);
+    verifier
+        .set_statement_proof_program_hash(
+            STATEMENT_SETTLEMENT_INPUT_MEMBERSHIP, TEST_PROOF_PROGRAM_HASH,
+        );
+    verifier
+        .set_statement_proof_program_hash(
+            STATEMENT_SETTLEMENT_OUTPUT_RECOVERY, TEST_PROOF_PROGRAM_HASH,
+        );
+    verifier
+        .set_statement_proof_program_hash(STATEMENT_NOTE_CONSOLIDATION, TEST_PROOF_PROGRAM_HASH);
+    verifier
+        .set_statement_proof_program_hash(STATEMENT_AGGREGATE_SETTLEMENT, TEST_PROOF_PROGRAM_HASH);
+    verifier.set_statement_proof_program_hash(STATEMENT_WITHDRAWAL, TEST_PROOF_PROGRAM_HASH);
+}
+
 fn deploy_auction_verifier(
     admin: ContractAddress, batch_registry: ContractAddress,
 ) -> ContractAddress {
     let verifier_class = declare("AuctionVerifier").unwrap().contract_class();
-    let verifier_calldata = array![admin.into(), batch_registry.into()];
+    let verifier_calldata = array![admin.into(), batch_registry.into(), 0, 0, 0, 0];
     let (verifier_address, _) = verifier_class.deploy(@verifier_calldata).unwrap_syscall();
 
     let verifier = IAuctionVerifierDispatcher { contract_address: verifier_address };
     start_cheat_caller_address(verifier_address, admin);
     verifier.set_proof_program(verifier_address, TEST_PROOF_PROGRAM_HASH);
+    configure_statement_proof_hashes(verifier);
     verifier.set_expected_starknet_os_config_hash(TEST_OS_CONFIG_HASH);
     verifier.set_protocol_fee_recipient(TEST_PROTOCOL_FEE_RECIPIENT);
     verifier.set_relay_fee_recipient(TEST_RELAY_FEE_RECIPIENT);
-    verifier.set_pair_fee_config(0x888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
-    verifier.set_pair_fee_config(0x889, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
-    verifier
-        .set_pair_fee_config(0x1888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
-    verifier
-        .set_pair_fee_config(0x2888, TEST_TAKER_FEE_BPS, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
+    verifier.set_pair_fee_config(0x888, TEST_TAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
+    verifier.set_pair_fee_config(0x889, TEST_TAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
+    verifier.set_pair_fee_config(0x1888, TEST_TAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
+    verifier.set_pair_fee_config(0x2888, TEST_TAKER_FEE_BPS, TEST_RELAY_FEE_BPS);
     stop_cheat_caller_address(verifier_address);
     verifier_address
 }
@@ -185,9 +220,28 @@ fn deploy_auction_verifier_without_defaults(
     admin: ContractAddress, batch_registry: ContractAddress,
 ) -> ContractAddress {
     let verifier_class = declare("AuctionVerifier").unwrap().contract_class();
-    let verifier_calldata = array![admin.into(), batch_registry.into()];
+    let verifier_calldata = array![admin.into(), batch_registry.into(), 0, 0, 0, 0];
     let (verifier_address, _) = verifier_class.deploy(@verifier_calldata).unwrap_syscall();
     verifier_address
+}
+
+fn configure_operational_lock_prereqs(verifier: IAuctionVerifierDispatcher) {
+    verifier.set_authorized_settlement_account(as_address(0x22222));
+    verifier.set_shielded_asset_adapter(as_address(0x33333));
+    verifier.set_deposit_root_registrar(as_address(0x44444));
+    verifier.lock_proof_program();
+}
+
+#[test]
+fn auction_verifier_constructor_preserves_nonzero_initial_roots() {
+    let admin = as_address(0x111);
+    let batch_registry = as_address(0x444);
+    let verifier_class = declare("AuctionVerifier").unwrap().contract_class();
+    let verifier_calldata = array![admin.into(), batch_registry.into(), 0x11, 0x22, 0x33, 0x44];
+    let (verifier_address, _) = verifier_class.deploy(@verifier_calldata).unwrap_syscall();
+    let verifier = IAuctionVerifierDispatcher { contract_address: verifier_address };
+
+    assert(verifier.current_settlement_roots() == (0x11, 0x22, 0x33, 0x44), 'INITIAL_ROOTS');
 }
 
 #[test]
@@ -210,6 +264,17 @@ fn auction_verifier_guardian_can_pause_and_admin_can_unpause() {
     verifier.unpause();
     stop_cheat_caller_address(auction_verifier);
     assert(!verifier.is_paused(), 'STILL_PAUSED');
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_zero_pause_guardian() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_pause_guardian(as_address(0));
 }
 
 #[test]
@@ -260,6 +325,23 @@ fn auction_verifier_pause_blocks_renewal_parent_cancellation() {
             cancel_r,
             cancel_s,
         );
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_pause_blocks_deposit_root_activation() {
+    let admin = as_address(0x111);
+    let registrar = as_address(0x222);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_deposit_root_registrar(registrar);
+    verifier.pause();
+    stop_cheat_caller_address(auction_verifier);
+
+    start_cheat_caller_address(auction_verifier, registrar);
+    verifier.activate_deposit_root(FUNDING_COMMITMENT, deposit_root());
 }
 
 #[test]
@@ -346,21 +428,102 @@ fn commitment_registry_old_admin_loses_authority_after_rotation() {
 
 #[test]
 #[should_panic]
-fn shielded_asset_adapter_old_admin_loses_authority_after_rotation() {
+fn privacy_deposit_bridge_old_admin_loses_authority_after_rotation() {
     let admin = as_address(0x111);
     let new_admin = as_address(0x222);
-    let shielded_asset_adapter = deploy_shielded_asset_adapter(admin);
-    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
+    let commitment_registry = deploy_commitment_registry(admin);
+    let privacy_deposit_bridge = deploy_privacy_deposit_bridge(admin, commitment_registry);
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
 
-    start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.propose_admin(new_admin);
-    stop_cheat_caller_address(shielded_asset_adapter);
-    start_cheat_caller_address(shielded_asset_adapter, new_admin);
-    adapter.accept_admin();
-    stop_cheat_caller_address(shielded_asset_adapter);
+    start_cheat_caller_address(privacy_deposit_bridge, admin);
+    bridge.propose_admin(new_admin);
+    stop_cheat_caller_address(privacy_deposit_bridge);
+    start_cheat_caller_address(privacy_deposit_bridge, new_admin);
+    bridge.accept_admin();
+    stop_cheat_caller_address(privacy_deposit_bridge);
 
-    start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.set_auction_verifier(as_address(0x333));
+    start_cheat_caller_address(privacy_deposit_bridge, admin);
+    bridge.set_auction_verifier(as_address(0x333));
+}
+
+#[test]
+fn registry_and_bridge_config_locks_are_one_way() {
+    let admin = as_address(0x111);
+    let commitment_registry = deploy_commitment_registry(admin);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let privacy_deposit_bridge = deploy_privacy_deposit_bridge(admin, commitment_registry);
+    let token_address = deploy_mock_erc20();
+    let registry = ICommitmentRegistryDispatcher { contract_address: commitment_registry };
+    let batches = IBatchRegistryDispatcher { contract_address: batch_registry };
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
+    let verifier = as_address(0x444);
+
+    start_cheat_caller_address(commitment_registry, admin);
+    registry.set_batch_registrar(admin);
+    registry.set_privacy_deposit_bridge(privacy_deposit_bridge);
+    registry.set_auction_verifier(verifier);
+    registry.lock_config();
+    stop_cheat_caller_address(commitment_registry);
+
+    start_cheat_caller_address(batch_registry, admin);
+    batches.set_auction_verifier(verifier);
+    batches.lock_config();
+    stop_cheat_caller_address(batch_registry);
+
+    start_cheat_caller_address(privacy_deposit_bridge, admin);
+    bridge.set_auction_verifier(verifier);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    bridge.lock_config();
+    stop_cheat_caller_address(privacy_deposit_bridge);
+
+    assert(registry.config_is_locked(), 'REGISTRY_UNLOCKED');
+    assert(batches.config_is_locked(), 'BATCH_UNLOCKED');
+    assert(bridge.config_is_locked(), 'BRIDGE_UNLOCKED');
+}
+
+#[test]
+#[should_panic]
+fn batch_registry_lock_blocks_verifier_change() {
+    let admin = as_address(0x111);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let batches = IBatchRegistryDispatcher { contract_address: batch_registry };
+
+    start_cheat_caller_address(batch_registry, admin);
+    batches.set_auction_verifier(as_address(0x444));
+    batches.lock_config();
+    batches.set_auction_verifier(as_address(0x445));
+}
+
+#[test]
+#[should_panic]
+fn commitment_registry_lock_blocks_bridge_change() {
+    let admin = as_address(0x111);
+    let commitment_registry = deploy_commitment_registry(admin);
+    let registry = ICommitmentRegistryDispatcher { contract_address: commitment_registry };
+
+    start_cheat_caller_address(commitment_registry, admin);
+    registry.set_batch_registrar(admin);
+    registry.set_privacy_deposit_bridge(as_address(0x222));
+    registry.set_auction_verifier(as_address(0x333));
+    registry.lock_config();
+    registry.set_privacy_deposit_bridge(as_address(0x223));
+}
+
+#[test]
+#[should_panic]
+fn privacy_deposit_bridge_lock_blocks_asset_changes() {
+    let admin = as_address(0x111);
+    let commitment_registry = deploy_commitment_registry(admin);
+    let privacy_deposit_bridge = deploy_privacy_deposit_bridge(admin, commitment_registry);
+    let token_address = deploy_mock_erc20();
+    let other_token_address = deploy_mock_erc20();
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
+
+    start_cheat_caller_address(privacy_deposit_bridge, admin);
+    bridge.set_auction_verifier(as_address(0x444));
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    bridge.lock_config();
+    bridge.register_supported_asset(ASSET_ID + 1, other_token_address);
 }
 
 #[test]
@@ -371,7 +534,7 @@ fn auction_verifier_rejects_fee_config_above_protocol_cap() {
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
     start_cheat_caller_address(auction_verifier, admin);
-    verifier.set_pair_fee_config(0x888, 101, 0, 0);
+    verifier.set_pair_fee_config(0x888, 101, 0);
 }
 
 #[test]
@@ -382,7 +545,7 @@ fn auction_verifier_rejects_direct_pair_fee_reconfiguration() {
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
     start_cheat_caller_address(auction_verifier, admin);
-    verifier.set_pair_fee_config(0x888, 5, 0, TEST_RELAY_FEE_BPS);
+    verifier.set_pair_fee_config(0x888, 5, TEST_RELAY_FEE_BPS);
 }
 
 #[test]
@@ -394,7 +557,7 @@ fn auction_verifier_rejects_early_pair_fee_execution() {
 
     start_cheat_caller_address(auction_verifier, admin);
     cheat_block_timestamp(auction_verifier, 1_000, CheatSpan::TargetCalls(1));
-    verifier.propose_pair_fee_config(0x888, 5, 0, TEST_RELAY_FEE_BPS);
+    verifier.propose_pair_fee_config(0x888, 5, TEST_RELAY_FEE_BPS);
     cheat_block_timestamp(auction_verifier, 87_399, CheatSpan::TargetCalls(1));
     verifier.execute_pair_fee_config(0x888);
 }
@@ -407,13 +570,11 @@ fn auction_verifier_timelocks_pair_fee_reconfiguration() {
 
     start_cheat_caller_address(auction_verifier, admin);
     cheat_block_timestamp(auction_verifier, 1_000, CheatSpan::TargetCalls(1));
-    verifier.propose_pair_fee_config(0x888, 5, 0, TEST_RELAY_FEE_BPS);
+    verifier.propose_pair_fee_config(0x888, 5, TEST_RELAY_FEE_BPS);
     stop_cheat_caller_address(auction_verifier);
 
-    let (pending_taker, pending_maker, pending_relay, eta, active) = verifier
-        .pending_pair_fee_config(0x888);
+    let (pending_taker, pending_relay, eta, active) = verifier.pending_pair_fee_config(0x888);
     assert(pending_taker == 5, 'BAD_PENDING_TAKER');
-    assert(pending_maker == 0, 'BAD_PENDING_MAKER');
     assert(pending_relay == TEST_RELAY_FEE_BPS, 'BAD_PENDING_RELAY');
     assert(eta == 87_400, 'BAD_PAIR_FEE_ETA');
     assert(active, 'PAIR_FEE_NOT_PENDING');
@@ -423,12 +584,11 @@ fn auction_verifier_timelocks_pair_fee_reconfiguration() {
     verifier.execute_pair_fee_config(0x888);
     stop_cheat_caller_address(auction_verifier);
 
-    let (taker, maker, relay, configured) = verifier.pair_fee_config(0x888);
+    let (taker, relay, configured) = verifier.pair_fee_config(0x888);
     assert(taker == 5, 'BAD_TAKER');
-    assert(maker == 0, 'BAD_MAKER');
     assert(relay == TEST_RELAY_FEE_BPS, 'BAD_RELAY');
     assert(configured, 'PAIR_FEE_UNSET');
-    let (_pending_taker, _pending_maker, _pending_relay, _eta, active_after) = verifier
+    let (_pending_taker, _pending_relay, _eta, active_after) = verifier
         .pending_pair_fee_config(0x888);
     assert(!active_after, 'PAIR_FEE_STILL_PENDING');
 }
@@ -510,6 +670,20 @@ fn auction_verifier_rejects_proof_program_change_after_lock() {
 }
 
 #[test]
+#[should_panic(expected: ('PROOF_HASH_UNSET',))]
+fn auction_verifier_rejects_proof_program_lock_without_multi_pair_hash() {
+    let admin = as_address(0x111);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier_without_defaults(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_proof_program(auction_verifier, TEST_PROOF_PROGRAM_HASH);
+    configure_statement_proof_hashes_without_multi_pair(verifier);
+    verifier.lock_proof_program();
+}
+
+#[test]
 #[should_panic]
 fn auction_verifier_rejects_operational_lock_without_os_config() {
     let admin = as_address(0x111);
@@ -523,12 +697,40 @@ fn auction_verifier_rejects_operational_lock_without_os_config() {
 
 #[test]
 #[should_panic]
+fn auction_verifier_rejects_operational_lock_without_locked_proof_program() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(as_address(0x22222));
+    verifier.set_shielded_asset_adapter(as_address(0x33333));
+    verifier.set_deposit_root_registrar(as_address(0x44444));
+    verifier.lock_operational_config();
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_operational_lock_blocks_proof_program_change() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    configure_operational_lock_prereqs(verifier);
+    verifier.lock_operational_config();
+    verifier.set_proof_program(as_address(0x555), TEST_PROOF_PROGRAM_HASH + 1);
+}
+
+#[test]
+#[should_panic]
 fn auction_verifier_operational_lock_blocks_settlement_account_change() {
     let admin = as_address(0x111);
     let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
     start_cheat_caller_address(auction_verifier, admin);
+    configure_operational_lock_prereqs(verifier);
     verifier.lock_operational_config();
     verifier.set_authorized_settlement_account(as_address(0x333));
 }
@@ -541,8 +743,61 @@ fn auction_verifier_operational_lock_blocks_adapter_change() {
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
     start_cheat_caller_address(auction_verifier, admin);
+    configure_operational_lock_prereqs(verifier);
     verifier.lock_operational_config();
     verifier.set_shielded_asset_adapter(as_address(0x333));
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_operational_lock_blocks_proof_ttl_change() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    configure_operational_lock_prereqs(verifier);
+    verifier.lock_operational_config();
+    verifier.set_proof_validity_blocks(2);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_operational_lock_blocks_os_config_hash_change() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    configure_operational_lock_prereqs(verifier);
+    verifier.lock_operational_config();
+    verifier.set_expected_starknet_os_config_hash(TEST_OS_CONFIG_HASH + 1);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_operational_lock_blocks_deposit_registrar_change() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    configure_operational_lock_prereqs(verifier);
+    verifier.lock_operational_config();
+    verifier.set_deposit_root_registrar(as_address(0x333));
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_operational_lock_blocks_claim_delay_change() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    configure_operational_lock_prereqs(verifier);
+    verifier.lock_operational_config();
+    verifier.set_output_claim_delay_seconds(61);
 }
 
 #[test]
@@ -553,11 +808,9 @@ fn auction_verifier_operational_lock_blocks_pair_fee_reconfiguration() {
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
     start_cheat_caller_address(auction_verifier, admin);
+    configure_operational_lock_prereqs(verifier);
     verifier.lock_operational_config();
-    verifier
-        .propose_pair_fee_config(
-            0x888, TEST_TAKER_FEE_BPS + 1, TEST_MAKER_FEE_BPS, TEST_RELAY_FEE_BPS,
-        );
+    verifier.propose_pair_fee_config(0x888, TEST_TAKER_FEE_BPS + 1, TEST_RELAY_FEE_BPS);
 }
 
 #[test]
@@ -568,14 +821,75 @@ fn auction_verifier_operational_lock_blocks_fee_recipient_reconfiguration() {
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
     start_cheat_caller_address(auction_verifier, admin);
+    configure_operational_lock_prereqs(verifier);
     verifier.lock_operational_config();
     verifier.propose_protocol_fee_recipient(TEST_PROTOCOL_FEE_RECIPIENT + 1);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_operational_lock_blocks_relay_fee_recipient_reconfiguration() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    configure_operational_lock_prereqs(verifier);
+    verifier.lock_operational_config();
+    verifier.propose_relay_fee_recipient(TEST_RELAY_FEE_RECIPIENT + 1);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_operational_lock_blocks_pending_pair_fee_execution() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    cheat_block_timestamp(auction_verifier, 1_000, CheatSpan::TargetCalls(1));
+    verifier.propose_pair_fee_config(0x888, TEST_TAKER_FEE_BPS + 1, TEST_RELAY_FEE_BPS);
+    configure_operational_lock_prereqs(verifier);
+    verifier.lock_operational_config();
+    cheat_block_timestamp(auction_verifier, 87_400, CheatSpan::TargetCalls(1));
+    verifier.execute_pair_fee_config(0x888);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_operational_lock_blocks_pending_protocol_fee_recipient_execution() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    cheat_block_timestamp(auction_verifier, 1_000, CheatSpan::TargetCalls(1));
+    verifier.propose_protocol_fee_recipient(TEST_PROTOCOL_FEE_RECIPIENT + 1);
+    configure_operational_lock_prereqs(verifier);
+    verifier.lock_operational_config();
+    cheat_block_timestamp(auction_verifier, 605_800, CheatSpan::TargetCalls(1));
+    verifier.execute_protocol_fee_recipient();
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_operational_lock_blocks_pending_relay_fee_recipient_execution() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    cheat_block_timestamp(auction_verifier, 1_000, CheatSpan::TargetCalls(1));
+    verifier.propose_relay_fee_recipient(TEST_RELAY_FEE_RECIPIENT + 1);
+    configure_operational_lock_prereqs(verifier);
+    verifier.lock_operational_config();
+    cheat_block_timestamp(auction_verifier, 605_800, CheatSpan::TargetCalls(1));
+    verifier.execute_relay_fee_recipient();
 }
 
 fn authorize_privacy_deposit_bridge(
     admin: ContractAddress,
     commitment_registry: ContractAddress,
-    _shielded_asset_adapter: ContractAddress,
     privacy_deposit_bridge: ContractAddress,
 ) {
     let registry = ICommitmentRegistryDispatcher { contract_address: commitment_registry };
@@ -613,26 +927,6 @@ fn output_note_leaf(
 
 fn output_note_node(left: felt252, right: felt252) -> felt252 {
     poseidon_hash2(poseidon_hash2(OUTPUT_NOTE_NODE_DOMAIN, left), right)
-}
-
-fn output_withdrawal_message_hash_for_verifier(
-    auction_verifier: ContractAddress,
-    shielded_asset_adapter: ContractAddress,
-    chain_id: felt252,
-    batch_id: felt252,
-    note_commitment: felt252,
-    asset_id: felt252,
-    amount: u128,
-    recipient: ContractAddress,
-) -> felt252 {
-    let mut state = poseidon_hash2(OUTPUT_WITHDRAWAL_DOMAIN, chain_id);
-    state = poseidon_hash2(state, auction_verifier.into());
-    state = poseidon_hash2(state, shielded_asset_adapter.into());
-    state = poseidon_hash2(state, batch_id);
-    state = poseidon_hash2(state, note_commitment);
-    state = poseidon_hash2(state, asset_id);
-    state = poseidon_hash2(state, amount.into());
-    poseidon_hash2(state, recipient.into())
 }
 
 fn output_strk20_exit_message_hash_for_verifier(
@@ -682,18 +976,31 @@ fn setup_adapter_with_deposited_note(
 ) -> (ContractAddress, ContractAddress, ContractAddress, ContractAddress) {
     let admin = as_address(0x111);
     let owner = as_address(0x222);
+    let commitment_registry = deploy_commitment_registry(admin);
+    let privacy_pool = as_address(PRIVACY_POOL);
     let token_address = deploy_mock_erc20();
-    let shielded_asset_adapter = deploy_shielded_asset_adapter(admin);
-    let privacy_deposit_bridge = as_address(PRIVACY_POOL);
+    let privacy_deposit_bridge = deploy_privacy_deposit_bridge_with_pool(
+        admin, commitment_registry, privacy_pool,
+    );
     let token = IMockERC20Dispatcher { contract_address: token_address };
-    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
 
-    token.mint(shielded_asset_adapter, as_u256(1_000));
-    start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.register_supported_asset(ASSET_ID, token_address);
-    stop_cheat_caller_address(shielded_asset_adapter);
+    token.mint(privacy_deposit_bridge, as_u256(1_000));
+    start_cheat_caller_address(privacy_deposit_bridge, admin);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(privacy_deposit_bridge);
+    seed_bridge_escrow(
+        admin,
+        privacy_pool,
+        commitment_registry,
+        privacy_deposit_bridge,
+        bridge,
+        FUNDING_COMMITMENT + 0x700,
+        NOTE_COMMITMENT + 0x700,
+        1_000,
+    );
 
-    (token_address, shielded_asset_adapter, owner, privacy_deposit_bridge)
+    (token_address, privacy_deposit_bridge, owner, privacy_pool)
 }
 
 fn setup_privacy_activation_stack(
@@ -707,21 +1014,14 @@ fn setup_privacy_activation_stack(
     IAuctionVerifierDispatcher,
 ) {
     let commitment_registry = deploy_commitment_registry(admin);
-    let shielded_asset_adapter = deploy_shielded_asset_adapter(admin);
     let token_address = deploy_mock_erc20();
     let privacy_deposit_bridge = deploy_privacy_deposit_bridge(admin, commitment_registry);
     let batch_registry = deploy_batch_registry(admin, admin);
     let auction_verifier = deploy_auction_verifier(admin, batch_registry);
     let token = IMockERC20Dispatcher { contract_address: token_address };
-    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
     let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
-    authorize_privacy_deposit_bridge(
-        admin, commitment_registry, shielded_asset_adapter, privacy_deposit_bridge,
-    );
+    authorize_privacy_deposit_bridge(admin, commitment_registry, privacy_deposit_bridge);
     token.mint(privacy_deposit_bridge, as_u256(10_000));
-    start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.register_supported_asset(ASSET_ID, token_address);
-    stop_cheat_caller_address(shielded_asset_adapter);
     start_cheat_caller_address(privacy_deposit_bridge, admin);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(privacy_deposit_bridge);
@@ -744,7 +1044,7 @@ fn setup_privacy_activation_stack(
 
     (
         commitment_registry,
-        shielded_asset_adapter,
+        privacy_deposit_bridge,
         privacy_deposit_bridge,
         registry,
         bridge,
@@ -803,16 +1103,16 @@ fn seed_bridge_escrow(
 ) {
     let registry = ICommitmentRegistryDispatcher { contract_address: commitment_registry };
     let batch_registry = deploy_batch_registry(admin, admin);
-    let activation_verifier = deploy_auction_verifier(admin, batch_registry);
-    let verifier = IAuctionVerifierDispatcher { contract_address: activation_verifier };
+    let auction_verifier_for_activation = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier_for_activation };
 
-    start_cheat_caller_address(activation_verifier, admin);
+    start_cheat_caller_address(auction_verifier_for_activation, admin);
     verifier.set_deposit_root_registrar(commitment_registry);
-    stop_cheat_caller_address(activation_verifier);
+    stop_cheat_caller_address(auction_verifier_for_activation);
 
     start_cheat_caller_address(commitment_registry, admin);
     registry.set_privacy_deposit_bridge(bridge_address);
-    registry.set_auction_verifier(activation_verifier);
+    registry.set_auction_verifier(auction_verifier_for_activation);
     stop_cheat_caller_address(commitment_registry);
 
     let root = output_note_leaf(note_commitment, ASSET_ID, amount, DEPOSIT_WITHDRAW_AUTHORITY);
@@ -880,6 +1180,49 @@ fn native_renewal_message_hash(
     poseidon_hash2(state, new_renewal_root)
 }
 
+fn native_liquidity_position_message_hash(
+    auction_verifier_address: ContractAddress,
+    transcript_commitment: felt252,
+    prior_liquidity_position_root: felt252,
+    liquidity_position_transition_root: felt252,
+    new_liquidity_position_root: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(
+        LIQUIDITY_POSITION_MESSAGE_DOMAIN, auction_verifier_address.into(),
+    );
+    state = poseidon_hash2(state, transcript_commitment);
+    state = poseidon_hash2(state, prior_liquidity_position_root);
+    state = poseidon_hash2(state, liquidity_position_transition_root);
+    poseidon_hash2(state, new_liquidity_position_root)
+}
+
+fn native_settlement_order_message_hash(
+    auction_verifier_address: ContractAddress, transcript_commitment: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(
+        SETTLEMENT_ORDER_MESSAGE_DOMAIN, auction_verifier_address.into(),
+    );
+    poseidon_hash2(state, transcript_commitment)
+}
+
+fn native_settlement_input_membership_message_hash(
+    auction_verifier_address: ContractAddress, transcript_commitment: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(
+        SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN, auction_verifier_address.into(),
+    );
+    poseidon_hash2(state, transcript_commitment)
+}
+
+fn native_settlement_output_recovery_message_hash(
+    auction_verifier_address: ContractAddress, transcript_commitment: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(
+        SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN, auction_verifier_address.into(),
+    );
+    poseidon_hash2(state, transcript_commitment)
+}
+
 fn native_note_consolidation_message_hash(
     auction_verifier_address: ContractAddress, consolidation_commitment: felt252,
 ) -> felt252 {
@@ -908,6 +1251,13 @@ fn native_auction_result_message_hash(
     state = poseidon_hash2(state, order_commitment_root);
     state = poseidon_hash2(state, admission_root);
     poseidon_hash2(state, transcript_commitment)
+}
+
+fn native_multi_pair_message_hash(
+    auction_verifier_address: ContractAddress, multi_pair_commitment: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(MULTI_PAIR_MESSAGE_DOMAIN, auction_verifier_address.into());
+    poseidon_hash2(state, multi_pair_commitment)
 }
 
 fn native_admission_message_hash(
@@ -942,6 +1292,16 @@ fn auction_result_proof_message_hash(
     poseidon_hash_span(l1_message_data.span())
 }
 
+fn multi_pair_proof_message_hash(
+    proof_program_address: ContractAddress, statement_message_hash: felt252,
+) -> felt252 {
+    let mut l1_message_data = array![proof_program_address.into(), 0];
+    l1_message_data.append(2);
+    l1_message_data.append(MULTI_PAIR_MESSAGE_DOMAIN);
+    l1_message_data.append(statement_message_hash);
+    poseidon_hash_span(l1_message_data.span())
+}
+
 fn nullifier_proof_message_hash(
     proof_program_address: ContractAddress, statement_message_hash: felt252,
 ) -> felt252 {
@@ -960,6 +1320,61 @@ fn renewal_proof_message_hash(
     l1_message_data.append(RENEWAL_MESSAGE_DOMAIN);
     l1_message_data.append(statement_message_hash);
     poseidon_hash_span(l1_message_data.span())
+}
+
+fn liquidity_position_proof_message_hash(
+    proof_program_address: ContractAddress, statement_message_hash: felt252,
+) -> felt252 {
+    let mut l1_message_data = array![proof_program_address.into(), 0];
+    l1_message_data.append(2);
+    l1_message_data.append(LIQUIDITY_POSITION_MESSAGE_DOMAIN);
+    l1_message_data.append(statement_message_hash);
+    poseidon_hash_span(l1_message_data.span())
+}
+
+fn settlement_order_proof_message_hash(
+    proof_program_address: ContractAddress, statement_message_hash: felt252,
+) -> felt252 {
+    let mut l1_message_data = array![proof_program_address.into(), 0];
+    l1_message_data.append(2);
+    l1_message_data.append(SETTLEMENT_ORDER_MESSAGE_DOMAIN);
+    l1_message_data.append(statement_message_hash);
+    poseidon_hash_span(l1_message_data.span())
+}
+
+fn settlement_input_membership_proof_message_hash(
+    proof_program_address: ContractAddress, statement_message_hash: felt252,
+) -> felt252 {
+    let mut l1_message_data = array![proof_program_address.into(), 0];
+    l1_message_data.append(2);
+    l1_message_data.append(SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN);
+    l1_message_data.append(statement_message_hash);
+    poseidon_hash_span(l1_message_data.span())
+}
+
+fn settlement_output_recovery_proof_message_hash(
+    proof_program_address: ContractAddress, statement_message_hash: felt252,
+) -> felt252 {
+    let mut l1_message_data = array![proof_program_address.into(), 0];
+    l1_message_data.append(2);
+    l1_message_data.append(SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN);
+    l1_message_data.append(statement_message_hash);
+    poseidon_hash_span(l1_message_data.span())
+}
+
+fn empty_liquidity_position_proof_message(
+    auction_verifier: ContractAddress, transcript_commitment: felt252,
+) -> felt252 {
+    liquidity_position_proof_message_hash(
+        auction_verifier,
+        native_liquidity_position_message_hash(
+            auction_verifier,
+            transcript_commitment,
+            0,
+            empty_liquidity_position_transition_root(),
+            0,
+        ),
+    )
 }
 
 fn note_consolidation_proof_message_hash(
@@ -1048,6 +1463,63 @@ fn submit_note_consolidation_with_matching_proof(
             consumed_nullifier_root,
             output_note_root,
             new_note_root,
+            new_nullifier_root,
+        );
+}
+
+fn submit_note_consolidation_with_mutated_binding(
+    proof_consolidation_id: felt252,
+    call_consolidation_id: felt252,
+    proof_output_bundle_ref: felt252,
+    call_output_bundle_ref: felt252,
+    proof_output_note_root: felt252,
+    call_output_note_root: felt252,
+) {
+    let admin = as_address(0x111);
+    let prior_note_root = 0;
+    let prior_nullifier_root = 0;
+    let consumed_note_root = 0xabc;
+    let consumed_nullifier_root = 0xdef;
+    let proof_new_note_root = root_only_state_transition(prior_note_root, proof_output_note_root);
+    let call_new_note_root = root_only_state_transition(prior_note_root, call_output_note_root);
+    let new_nullifier_root = 0x5678;
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    let consolidation_commitment = public_note_consolidation_commitment(
+        proof_consolidation_id,
+        proof_output_bundle_ref,
+        prior_note_root,
+        prior_nullifier_root,
+        consumed_note_root,
+        consumed_nullifier_root,
+        proof_output_note_root,
+        proof_new_note_root,
+        new_nullifier_root,
+    );
+    let proof_artifact_commitment = native_note_consolidation_message_hash(
+        auction_verifier, consolidation_commitment,
+    );
+    let proof_message_hash = note_consolidation_proof_message_hash(
+        auction_verifier, proof_artifact_commitment,
+    );
+    let proof_facts = valid_proof_facts(99, proof_message_hash);
+
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, proof_facts.span(), CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(auction_verifier, as_address(0x333));
+    verifier
+        .submit_note_consolidation_with_proof_facts(
+            call_consolidation_id,
+            proof_artifact_commitment,
+            call_output_bundle_ref,
+            prior_note_root,
+            prior_nullifier_root,
+            consumed_note_root,
+            consumed_nullifier_root,
+            call_output_note_root,
+            call_new_note_root,
             new_nullifier_root,
         );
 }
@@ -1165,6 +1637,57 @@ fn record_root_transition_proofs(
             renewal_child_root,
             new_renewal_root,
         );
+
+    let liquidity_position_statement = native_liquidity_position_message_hash(
+        auction_verifier, transcript_commitment, 0, empty_liquidity_position_transition_root(), 0,
+    );
+    let liquidity_position_proof_message = liquidity_position_proof_message_hash(
+        auction_verifier, liquidity_position_statement,
+    );
+    let liquidity_position_proof_facts = valid_proof_facts(99, liquidity_position_proof_message);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(
+        auction_verifier, liquidity_position_proof_facts.span(), CheatSpan::TargetCalls(1),
+    );
+    verifier
+        .record_liquidity_position_roots_with_proof_facts(
+            batch_id, transcript_commitment, 0, empty_liquidity_position_transition_root(), 0,
+        );
+
+    let settlement_order_statement = native_settlement_order_message_hash(
+        auction_verifier, transcript_commitment,
+    );
+    let settlement_order_proof_message = settlement_order_proof_message_hash(
+        auction_verifier, settlement_order_statement,
+    );
+    let settlement_order_proof_facts = valid_proof_facts(99, settlement_order_proof_message);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(
+        auction_verifier, settlement_order_proof_facts.span(), CheatSpan::TargetCalls(1),
+    );
+    verifier.record_settlement_order_with_proof_facts(batch_id, transcript_commitment);
+
+    let membership_statement = native_settlement_input_membership_message_hash(
+        auction_verifier, transcript_commitment,
+    );
+    let membership_proof_message = settlement_input_membership_proof_message_hash(
+        auction_verifier, membership_statement,
+    );
+    let membership_proof_facts = valid_proof_facts(99, membership_proof_message);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, membership_proof_facts.span(), CheatSpan::TargetCalls(1));
+    verifier.record_settlement_input_membership_with_proof_facts(batch_id, transcript_commitment);
+
+    let recovery_statement = native_settlement_output_recovery_message_hash(
+        auction_verifier, transcript_commitment,
+    );
+    let recovery_proof_message = settlement_output_recovery_proof_message_hash(
+        auction_verifier, recovery_statement,
+    );
+    let recovery_proof_facts = valid_proof_facts(99, recovery_proof_message);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, recovery_proof_facts.span(), CheatSpan::TargetCalls(1));
+    verifier.record_settlement_output_recovery_with_proof_facts(batch_id, transcript_commitment);
     stop_cheat_caller_address(auction_verifier);
 }
 
@@ -1182,12 +1705,12 @@ fn settle_single_output_note_for_withdrawal(
     );
     let batch_registry = deploy_batch_registry(admin, admin);
     let auction_verifier = deploy_auction_verifier(admin, batch_registry);
-    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: shielded_asset_adapter };
     let batches = IBatchRegistryDispatcher { contract_address: batch_registry };
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
     start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.set_auction_verifier(auction_verifier);
+    bridge.set_auction_verifier(auction_verifier);
     stop_cheat_caller_address(shielded_asset_adapter);
 
     start_cheat_caller_address(batch_registry, admin);
@@ -1436,14 +1959,14 @@ fn submit_output_withdrawal_attempt(
     amount: u128,
     withdraw_secret: felt252,
     withdraw_authority: felt252,
-    recipient: ContractAddress,
-    signed_recipient: ContractAddress,
+    exit_commitment: felt252,
+    signed_exit_commitment: felt252,
     prior_nullifier_root: felt252,
     consumed_nullifier_root: felt252,
     new_nullifier_root: felt252,
 ) {
     let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(withdraw_secret);
-    let message = output_withdrawal_message_hash_for_verifier(
+    let message = output_strk20_exit_message_hash_for_verifier(
         auction_verifier,
         signed_adapter,
         signed_chain_id,
@@ -1451,7 +1974,7 @@ fn submit_output_withdrawal_attempt(
         note_commitment,
         asset_id,
         amount,
-        signed_recipient,
+        signed_exit_commitment,
     );
     let (r, s) = StarkCurveSignerImpl::sign(key_pair, message).unwrap();
     let path = array![];
@@ -1477,7 +2000,7 @@ fn submit_output_withdrawal_attempt(
     cheat_chain_id(auction_verifier, runtime_chain_id, CheatSpan::TargetCalls(1));
     cheat_proof_facts(auction_verifier, withdrawal_proof_facts.span(), CheatSpan::TargetCalls(1));
     verifier
-        .withdraw_settlement_output_with_proof_facts(
+        .withdraw_settlement_output_to_strk20_with_proof_facts(
             batch_id,
             withdrawal_statement,
             prior_nullifier_root,
@@ -1491,7 +2014,7 @@ fn submit_output_withdrawal_attempt(
             directions.span(),
             r,
             s,
-            recipient,
+            exit_commitment,
         );
 }
 
@@ -1566,6 +2089,10 @@ fn empty_renewal_child_root() -> felt252 {
     single_field_root(RENEWAL_CHILD_ROOT_DOMAIN, empty.span())
 }
 
+fn empty_liquidity_position_transition_root() -> felt252 {
+    poseidon_hash2(LIQUIDITY_POSITION_TRANSITION_ROOT_DOMAIN, 0)
+}
+
 fn empty_fee_root() -> felt252 {
     poseidon_hash2(FEE_ROOT_DOMAIN, 0)
 }
@@ -1620,7 +2147,6 @@ fn root_only_public_settlement_commitment(
     state = poseidon_hash2(state, clearing_price.into());
     state = poseidon_hash2(state, TEST_PRICE_BASE_SCALE.into());
     state = poseidon_hash2(state, TEST_TAKER_FEE_BPS.into());
-    state = poseidon_hash2(state, TEST_MAKER_FEE_BPS.into());
     state = poseidon_hash2(state, TEST_RELAY_FEE_BPS.into());
     state = poseidon_hash2(state, TEST_PROTOCOL_FEE_RECIPIENT);
     state = poseidon_hash2(state, TEST_RELAY_FEE_RECIPIENT);
@@ -1629,6 +2155,7 @@ fn root_only_public_settlement_commitment(
     state = poseidon_hash2(state, prior_nullifier_root);
     state = poseidon_hash2(state, prior_renewal_root);
     state = poseidon_hash2(state, prior_fee_root);
+    state = poseidon_hash2(state, 0);
     state = poseidon_hash2(state, consumed_note_root);
     state = poseidon_hash2(state, consumed_nullifier_root);
     state = poseidon_hash2(state, renewal_child_root);
@@ -1638,6 +2165,7 @@ fn root_only_public_settlement_commitment(
     state = poseidon_hash2(state, new_nullifier_root);
     state = poseidon_hash2(state, new_renewal_root);
     state = poseidon_hash2(state, bound_new_fee_root);
+    state = poseidon_hash2(state, 0);
     state
 }
 
@@ -1676,7 +2204,6 @@ fn submit_root_settlement(
             clearing_price,
             TEST_PRICE_BASE_SCALE,
             TEST_TAKER_FEE_BPS,
-            TEST_MAKER_FEE_BPS,
             TEST_RELAY_FEE_BPS,
             TEST_PROTOCOL_FEE_RECIPIENT,
             TEST_RELAY_FEE_RECIPIENT,
@@ -1685,15 +2212,18 @@ fn submit_root_settlement(
             prior_nullifier_root,
             prior_renewal_root,
             prior_fee_root,
+            0,
             consumed_note_root,
             consumed_nullifier_root,
             renewal_child_root,
+            empty_liquidity_position_transition_root(),
             output_note_root,
             bound_fee_root,
             new_note_root,
             new_nullifier_root,
             new_renewal_root,
             bound_new_fee_root,
+            0,
         );
 }
 
@@ -1707,7 +2237,6 @@ fn submit_root_settlement_with_fee_config(
     clearing_price: u128,
     price_base_scale: u128,
     taker_fee_bps: u128,
-    maker_fee_bps: u128,
     relay_fee_bps: u128,
     protocol_fee_recipient: felt252,
     relay_fee_recipient: felt252,
@@ -1736,7 +2265,6 @@ fn submit_root_settlement_with_fee_config(
             clearing_price,
             price_base_scale,
             taker_fee_bps,
-            maker_fee_bps,
             relay_fee_bps,
             protocol_fee_recipient,
             relay_fee_recipient,
@@ -1745,15 +2273,18 @@ fn submit_root_settlement_with_fee_config(
             prior_nullifier_root,
             prior_renewal_root,
             prior_fee_root,
+            0,
             consumed_note_root,
             consumed_nullifier_root,
             renewal_child_root,
+            empty_liquidity_position_transition_root(),
             output_note_root,
             normalized_fee_root(fee_root),
             new_note_root,
             new_nullifier_root,
             new_renewal_root,
             normalized_new_fee_root(prior_fee_root, fee_root, new_fee_root),
+            0,
         );
 }
 
@@ -1952,6 +2483,7 @@ fn sample_single_aggregate_inputs(
                 auction_verifier, transcript_commitment, 0, empty_renewal_root, 0,
             ),
         ),
+        empty_liquidity_position_proof_message(auction_verifier, transcript_commitment),
     ];
     (inputs, messages)
 }
@@ -1989,7 +2521,6 @@ fn append_root_settlement_input(
     inputs.append(clearing_price.into());
     inputs.append(TEST_PRICE_BASE_SCALE.into());
     inputs.append(TEST_TAKER_FEE_BPS.into());
-    inputs.append(TEST_MAKER_FEE_BPS.into());
     inputs.append(TEST_RELAY_FEE_BPS.into());
     inputs.append(TEST_PROTOCOL_FEE_RECIPIENT);
     inputs.append(TEST_RELAY_FEE_RECIPIENT);
@@ -1998,15 +2529,18 @@ fn append_root_settlement_input(
     inputs.append(prior_nullifier_root);
     inputs.append(prior_renewal_root);
     inputs.append(prior_fee_root);
+    inputs.append(0);
     inputs.append(consumed_note_root);
     inputs.append(consumed_nullifier_root);
     inputs.append(renewal_child_root);
+    inputs.append(empty_liquidity_position_transition_root());
     inputs.append(output_note_root);
     inputs.append(bound_fee_root);
     inputs.append(new_note_root);
     inputs.append(new_nullifier_root);
     inputs.append(new_renewal_root);
     inputs.append(bound_new_fee_root);
+    inputs.append(0);
 }
 
 fn append_aggregate_record_copy(ref inputs: Array<felt252>, source: Span<felt252>) {
@@ -2197,6 +2731,7 @@ fn submit_two_batch_aggregate_with_roots_and_order(
                     ),
                 ),
             );
+        messages.append(empty_liquidity_position_proof_message(auction_verifier, transcript_2));
         messages.append(verifier.settlement_proof_message_hash(transcript_1));
         messages
             .append(
@@ -2224,6 +2759,7 @@ fn submit_two_batch_aggregate_with_roots_and_order(
                     ),
                 ),
             );
+        messages.append(empty_liquidity_position_proof_message(auction_verifier, transcript_1));
     } else {
         messages.append(verifier.settlement_proof_message_hash(transcript_1));
         messages
@@ -2252,6 +2788,7 @@ fn submit_two_batch_aggregate_with_roots_and_order(
                     ),
                 ),
             );
+        messages.append(empty_liquidity_position_proof_message(auction_verifier, transcript_1));
         messages.append(verifier.settlement_proof_message_hash(transcript_2));
         messages
             .append(
@@ -2279,6 +2816,7 @@ fn submit_two_batch_aggregate_with_roots_and_order(
                     ),
                 ),
             );
+        messages.append(empty_liquidity_position_proof_message(auction_verifier, transcript_2));
     }
     let proof_facts = valid_aggregate_proof_facts(99, messages.span());
     let mut aggregate_inputs = array![2];
@@ -2484,6 +3022,20 @@ fn proof_facts_for_message_with_version(
 }
 
 #[test]
+fn proof_facts_serialize_in_native_prover_order() {
+    let proof_facts = valid_proof_facts(99, 0xabc);
+    assert(*proof_facts.at(0) == TEST_PROOF_VERSION, 'BAD_VERSION_INDEX');
+    assert(*proof_facts.at(1) == VIRTUAL_SNOS, 'BAD_PROGRAM_INDEX');
+    assert(*proof_facts.at(2) == TEST_OS_CONFIG_HASH, 'BAD_OS_INDEX');
+    assert(*proof_facts.at(3) == VIRTUAL_SNOS0, 'BAD_OUTPUT_INDEX');
+    assert(*proof_facts.at(4) == 99, 'BAD_BLOCK_INDEX');
+    assert(*proof_facts.at(5) == TEST_BASE_BLOCK_HASH, 'BAD_BASE_HASH_INDEX');
+    assert(*proof_facts.at(6) == TEST_PROOF_PROGRAM_HASH, 'BAD_HASH_INDEX');
+    assert(*proof_facts.at(7) == 1, 'BAD_MESSAGE_COUNT');
+    assert(*proof_facts.at(8) == 0xabc, 'BAD_MESSAGE_INDEX');
+}
+
+#[test]
 fn batch_registry_registers_final_roots_as_prepared() {
     let admin = as_address(0x111);
     let batch_registry = deploy_batch_registry(admin, admin);
@@ -2501,18 +3053,6 @@ fn batch_registry_registers_final_roots_as_prepared() {
 
 #[test]
 #[should_panic]
-fn batch_registry_rejects_root_mutation_after_prepared() {
-    let admin = as_address(0x111);
-    let batch_registry = deploy_batch_registry(admin, admin);
-    let batches = IBatchRegistryDispatcher { contract_address: batch_registry };
-
-    start_cheat_caller_address(batch_registry, admin);
-    batches.register_batch(0xabc, 0xdef, 1, 2, 3, 0x111, 0x222);
-    batches.record_order_set_commitments(0xabc, 4, 0x333, 0x444);
-}
-
-#[test]
-#[should_panic]
 fn batch_registry_rejects_reopening_prepared_batches() {
     let admin = as_address(0x111);
     let batch_registry = deploy_batch_registry(admin, admin);
@@ -2521,6 +3061,21 @@ fn batch_registry_rejects_reopening_prepared_batches() {
     start_cheat_caller_address(batch_registry, admin);
     batches.register_batch(0xabc, 0xdef, 1, 2, 3, 0x111, 0x222);
     batches.transition_status(0xabc, BatchStatus::Prepared, BatchStatus::Open);
+}
+
+#[test]
+fn batch_registry_allows_cancelling_prepared_batches() {
+    let admin = as_address(0x111);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let batches = IBatchRegistryDispatcher { contract_address: batch_registry };
+
+    start_cheat_caller_address(batch_registry, admin);
+    batches.register_batch(0xabc, 0xdef, 1, 2, 3, 0x111, 0x222);
+    batches.transition_status(0xabc, BatchStatus::Prepared, BatchStatus::Cancelled);
+    stop_cheat_caller_address(batch_registry);
+
+    let batch = batches.get_batch(0xabc);
+    assert(batch.status == BatchStatus::Cancelled, 'NOT_CANCELLED');
 }
 
 #[test]
@@ -2533,6 +3088,50 @@ fn batch_registry_rejects_duplicate_batch_id() {
     start_cheat_caller_address(batch_registry, admin);
     batches.register_batch(0xabc, 0xdef, 1, 2, 3, 0x111, 0x222);
     batches.register_batch(0xabc, 0xdef, 1, 2, 3, 0x112, 0x223);
+}
+
+#[test]
+#[should_panic]
+fn batch_registry_rejects_zero_batch_id() {
+    let admin = as_address(0x111);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let batches = IBatchRegistryDispatcher { contract_address: batch_registry };
+
+    start_cheat_caller_address(batch_registry, admin);
+    batches.register_batch(0, 0xdef, 1, 2, 3, 0x111, 0x222);
+}
+
+#[test]
+#[should_panic]
+fn batch_registry_rejects_zero_pair_id() {
+    let admin = as_address(0x111);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let batches = IBatchRegistryDispatcher { contract_address: batch_registry };
+
+    start_cheat_caller_address(batch_registry, admin);
+    batches.register_batch(0xabc, 0, 1, 2, 3, 0x111, 0x222);
+}
+
+#[test]
+#[should_panic]
+fn batch_registry_rejects_zero_epoch_id() {
+    let admin = as_address(0x111);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let batches = IBatchRegistryDispatcher { contract_address: batch_registry };
+
+    start_cheat_caller_address(batch_registry, admin);
+    batches.register_batch(0xabc, 0xdef, 0, 2, 3, 0x111, 0x222);
+}
+
+#[test]
+#[should_panic]
+fn batch_registry_rejects_zero_close_time() {
+    let admin = as_address(0x111);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let batches = IBatchRegistryDispatcher { contract_address: batch_registry };
+
+    start_cheat_caller_address(batch_registry, admin);
+    batches.register_batch(0xabc, 0xdef, 1, 0, 3, 0x111, 0x222);
 }
 
 #[test]
@@ -2619,32 +3218,34 @@ fn commitment_registry_rejects_duplicate_order_commitment_across_batches() {
 }
 
 #[test]
-fn shielded_asset_adapter_allows_idempotent_asset_registration() {
+fn privacy_deposit_bridge_allows_idempotent_asset_registration() {
     let admin = as_address(0x111);
+    let commitment_registry = deploy_commitment_registry(admin);
     let token_address = deploy_mock_erc20();
-    let shielded_asset_adapter = deploy_shielded_asset_adapter(admin);
-    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
+    let privacy_deposit_bridge = deploy_privacy_deposit_bridge(admin, commitment_registry);
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
 
-    start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.register_supported_asset(ASSET_ID, token_address);
-    adapter.register_supported_asset(ASSET_ID, token_address);
-    stop_cheat_caller_address(shielded_asset_adapter);
+    start_cheat_caller_address(privacy_deposit_bridge, admin);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    stop_cheat_caller_address(privacy_deposit_bridge);
 
-    assert(adapter.asset_token(ASSET_ID) == token_address, 'BAD_TOKEN');
+    assert(bridge.asset_token(ASSET_ID) == token_address, 'BAD_TOKEN');
 }
 
 #[test]
 #[should_panic]
-fn shielded_asset_adapter_rejects_asset_mapping_mutation() {
+fn privacy_deposit_bridge_rejects_asset_mapping_mutation() {
     let admin = as_address(0x111);
+    let commitment_registry = deploy_commitment_registry(admin);
     let token_address = deploy_mock_erc20();
     let replacement_token_address = deploy_mock_erc20();
-    let shielded_asset_adapter = deploy_shielded_asset_adapter(admin);
-    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
+    let privacy_deposit_bridge = deploy_privacy_deposit_bridge(admin, commitment_registry);
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: privacy_deposit_bridge };
 
-    start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.register_supported_asset(ASSET_ID, token_address);
-    adapter.register_supported_asset(ASSET_ID, replacement_token_address);
+    start_cheat_caller_address(privacy_deposit_bridge, admin);
+    bridge.register_supported_asset(ASSET_ID, token_address);
+    bridge.register_supported_asset(ASSET_ID, replacement_token_address);
 }
 
 #[test]
@@ -2896,9 +3497,7 @@ fn privacy_deposit_bridge_rejects_activation_without_token_custody() {
     let registry = ICommitmentRegistryDispatcher { contract_address: commitment_registry };
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
-    authorize_privacy_deposit_bridge(
-        admin, commitment_registry, as_address(0), privacy_deposit_bridge,
-    );
+    authorize_privacy_deposit_bridge(admin, commitment_registry, privacy_deposit_bridge);
     start_cheat_caller_address(privacy_deposit_bridge, admin);
     bridge.register_supported_asset(ASSET_ID, token_address);
     bridge.set_auction_verifier(auction_verifier);
@@ -3154,6 +3753,138 @@ fn privacy_proof_signer_relays_single_token_approval() {
 
 #[test]
 #[should_panic]
+fn privacy_proof_signer_rejects_empty_relay_call_list() {
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let proof_signer = deploy_privacy_proof_signer(key_pair.public_key);
+    let signer = IPrivacyProofSignerDispatcher { contract_address: proof_signer };
+
+    signer.execute_from_relayer(array![].span(), 0x777, 1, 1);
+}
+
+#[test]
+#[should_panic]
+fn privacy_proof_signer_rejects_relay_signature_for_wrong_chain() {
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let proof_signer = deploy_privacy_proof_signer(key_pair.public_key);
+    let spender = as_address(0x456);
+    let token_address = deploy_mock_erc20();
+    let signer = IPrivacyProofSignerDispatcher { contract_address: proof_signer };
+    let calldata = array![spender.into(), 100, 0];
+    let calls = array![
+        Call { to: token_address, selector: selector!("approve"), calldata: calldata.span() },
+    ];
+    let nonce = 0x777;
+
+    cheat_chain_id(proof_signer, WRONG_CHAIN_ID, CheatSpan::TargetCalls(1));
+    let relay_message = signer.relay_message_hash(calls.span(), nonce);
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, relay_message).unwrap();
+    cheat_chain_id(proof_signer, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    signer.execute_from_relayer(calls.span(), nonce, r, s);
+}
+
+#[test]
+#[should_panic]
+fn privacy_proof_signer_rejects_relay_signature_for_wrong_signer_contract() {
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let signed_proof_signer = deploy_privacy_proof_signer(key_pair.public_key);
+    let replayed_proof_signer = deploy_privacy_proof_signer(key_pair.public_key);
+    let spender = as_address(0x456);
+    let token_address = deploy_mock_erc20();
+    let signed_signer = IPrivacyProofSignerDispatcher { contract_address: signed_proof_signer };
+    let replayed_signer = IPrivacyProofSignerDispatcher { contract_address: replayed_proof_signer };
+    let calldata = array![spender.into(), 100, 0];
+    let calls = array![
+        Call { to: token_address, selector: selector!("approve"), calldata: calldata.span() },
+    ];
+    let nonce = 0x777;
+
+    cheat_chain_id(signed_proof_signer, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    let relay_message = signed_signer.relay_message_hash(calls.span(), nonce);
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, relay_message).unwrap();
+    cheat_chain_id(replayed_proof_signer, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    replayed_signer.execute_from_relayer(calls.span(), nonce, r, s);
+}
+
+#[test]
+#[should_panic]
+fn privacy_proof_signer_rejects_relay_signature_for_changed_calldata() {
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let proof_signer = deploy_privacy_proof_signer(key_pair.public_key);
+    let spender = as_address(0x456);
+    let token_address = deploy_mock_erc20();
+    let signer = IPrivacyProofSignerDispatcher { contract_address: proof_signer };
+    let signed_calldata = array![spender.into(), 100, 0];
+    let signed_calls = array![
+        Call {
+            to: token_address, selector: selector!("approve"), calldata: signed_calldata.span(),
+        },
+    ];
+    let changed_calldata = array![spender.into(), 200, 0];
+    let changed_calls = array![
+        Call {
+            to: token_address, selector: selector!("approve"), calldata: changed_calldata.span(),
+        },
+    ];
+    let nonce = 0x777;
+
+    cheat_chain_id(proof_signer, TEST_CHAIN_ID, CheatSpan::TargetCalls(2));
+    let relay_message = signer.relay_message_hash(signed_calls.span(), nonce);
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, relay_message).unwrap();
+    signer.execute_from_relayer(changed_calls.span(), nonce, r, s);
+}
+
+#[test]
+#[should_panic]
+fn privacy_proof_signer_rejects_relay_signature_for_changed_target() {
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let proof_signer = deploy_privacy_proof_signer(key_pair.public_key);
+    let spender = as_address(0x456);
+    let signed_token_address = deploy_mock_erc20();
+    let changed_token_address = deploy_mock_erc20();
+    let signer = IPrivacyProofSignerDispatcher { contract_address: proof_signer };
+    let calldata = array![spender.into(), 100, 0];
+    let signed_calls = array![
+        Call {
+            to: signed_token_address, selector: selector!("approve"), calldata: calldata.span(),
+        },
+    ];
+    let changed_calls = array![
+        Call {
+            to: changed_token_address, selector: selector!("approve"), calldata: calldata.span(),
+        },
+    ];
+    let nonce = 0x777;
+
+    cheat_chain_id(proof_signer, TEST_CHAIN_ID, CheatSpan::TargetCalls(2));
+    let relay_message = signer.relay_message_hash(signed_calls.span(), nonce);
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, relay_message).unwrap();
+    signer.execute_from_relayer(changed_calls.span(), nonce, r, s);
+}
+
+#[test]
+#[should_panic]
+fn privacy_proof_signer_rejects_relay_signature_for_changed_selector() {
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let proof_signer = deploy_privacy_proof_signer(key_pair.public_key);
+    let token_address = deploy_mock_erc20();
+    let signer = IPrivacyProofSignerDispatcher { contract_address: proof_signer };
+    let calldata = array![as_address(0x456).into(), 100, 0];
+    let signed_calls = array![
+        Call { to: token_address, selector: selector!("approve"), calldata: calldata.span() },
+    ];
+    let changed_calls = array![
+        Call { to: token_address, selector: selector!("transfer"), calldata: calldata.span() },
+    ];
+    let nonce = 0x777;
+
+    cheat_chain_id(proof_signer, TEST_CHAIN_ID, CheatSpan::TargetCalls(2));
+    let relay_message = signer.relay_message_hash(signed_calls.span(), nonce);
+    let (r, s) = StarkCurveSignerImpl::sign(key_pair, relay_message).unwrap();
+    signer.execute_from_relayer(changed_calls.span(), nonce, r, s);
+}
+
+#[test]
+#[should_panic]
 fn privacy_proof_signer_rejects_replayed_relay_nonce() {
     let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
     let proof_signer = deploy_privacy_proof_signer(key_pair.public_key);
@@ -3201,29 +3932,6 @@ fn privacy_proof_signer_rejects_replayed_relay_nonce_with_different_calldata() {
     let second_message = signer.relay_message_hash(second_calls.span(), nonce);
     let (second_r, second_s) = StarkCurveSignerImpl::sign(key_pair, second_message).unwrap();
     signer.execute_from_relayer(second_calls.span(), nonce, second_r, second_s);
-}
-
-#[test]
-#[should_panic]
-fn shielded_asset_adapter_rejects_short_transfer_verified_withdrawal() {
-    let admin = as_address(0x111);
-    let auction_verifier = as_address(0x444);
-    let recipient = as_address(0x555);
-    let token_address = deploy_configurable_mock_erc20();
-    let shielded_asset_adapter = deploy_shielded_asset_adapter(admin);
-    let token = IConfigurableMockERC20Dispatcher { contract_address: token_address };
-    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
-
-    token.mint(shielded_asset_adapter, as_u256(500));
-
-    start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.set_auction_verifier(auction_verifier);
-    adapter.register_supported_asset(ASSET_ID, token_address);
-    stop_cheat_caller_address(shielded_asset_adapter);
-
-    token.set_short_transfer(true);
-    start_cheat_caller_address(shielded_asset_adapter, auction_verifier);
-    adapter.withdraw_verified_note(ASSET_ID, 200, NOTE_COMMITMENT + 0x100, recipient);
 }
 
 #[test]
@@ -3498,6 +4206,36 @@ fn auction_verifier_rejects_duplicate_renewal_parent_cancel_marker() {
 
 #[test]
 #[should_panic]
+fn auction_verifier_rejects_noncanonical_renewal_cancel_sparse_key() {
+    let admin = as_address(0x111);
+    let cancel_marker = 0xffffffffffffffffffffffffffffffff;
+    let cancel_marker_key_low: u128 = 0;
+    let noncanonical_key_high: u128 = 0x8000000000000110000000000000001;
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    let cancel_message = renewal_parent_cancel_marker_message_hash_for_verifier(
+        auction_verifier, TEST_CHAIN_ID, cancel_marker,
+    );
+    let (cancel_r, cancel_s) = StarkCurveSignerImpl::sign(key_pair, cancel_message).unwrap();
+    let empty_path = array![];
+
+    cheat_chain_id(auction_verifier, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
+    verifier
+        .cancel_renewal_parent_marker(
+            cancel_marker,
+            key_pair.public_key,
+            cancel_marker_key_low,
+            noncanonical_key_high,
+            empty_path.span(),
+            empty_path.span(),
+            cancel_r,
+            cancel_s,
+        );
+}
+
+#[test]
+#[should_panic]
 fn auction_verifier_rejects_unauthorized_submitters() {
     let admin = as_address(0x111);
     let attacker = as_address(0x222);
@@ -3648,21 +4386,8 @@ fn auction_verifier_pause_blocks_withdrawal() {
     stop_cheat_caller_address(auction_verifier);
 
     verifier
-        .withdraw_settlement_output_with_proof_facts(
-            1,
-            2,
-            3,
-            4,
-            5,
-            6,
-            ASSET_ID,
-            7,
-            8,
-            empty_path.span(),
-            empty_path.span(),
-            9,
-            10,
-            as_address(0x333),
+        .withdraw_settlement_output_to_strk20_with_proof_facts(
+            1, 2, 3, 4, 5, 6, ASSET_ID, 7, 8, empty_path.span(), empty_path.span(), 9, 10, 0x333,
         );
 }
 
@@ -4048,6 +4773,7 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
                 auction_verifier, transcript_1, 0, empty_renewal_root, first_new_renewal_root,
             ),
         ),
+        empty_liquidity_position_proof_message(auction_verifier, transcript_1),
         verifier.settlement_proof_message_hash(transcript_2),
         nullifier_proof_message_hash(
             auction_verifier,
@@ -4069,6 +4795,7 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
                 second_new_renewal_root,
             ),
         ),
+        empty_liquidity_position_proof_message(auction_verifier, transcript_2),
     ];
     let proof_facts = valid_aggregate_proof_facts(99, messages.span());
     let mut aggregate_inputs = array![2];
@@ -4182,6 +4909,22 @@ fn auction_verifier_rejects_aggregate_count_larger_than_records() {
     let (single_inputs, _) = sample_single_aggregate_inputs(auction_verifier, verifier);
     let mut inputs = array![2];
     append_aggregate_record_copy(ref inputs, single_inputs.span());
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    verifier.submit_aggregate_settlements_with_proof_facts(inputs.span());
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_too_large_aggregate_count() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+
+    let inputs = array![17];
     start_cheat_caller_address(auction_verifier, settlement_account);
     verifier.submit_aggregate_settlements_with_proof_facts(inputs.span());
 }
@@ -4492,7 +5235,7 @@ fn auction_verifier_accepts_root_only_nullifier_transition() {
 }
 
 #[test]
-fn auction_verifier_refreshes_unsettled_split_root_proofs() {
+fn auction_verifier_allows_idempotent_unsettled_split_root_proofs() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x222);
     let batch_id = 0x77a;
@@ -4567,32 +5310,11 @@ fn auction_verifier_refreshes_unsettled_split_root_proofs() {
         first_new_renewal_root,
     );
 
-    let second_consumed_nullifier_root = 0x102;
-    let second_new_nullifier_root = 0x202;
-    let second_renewal_child_root = 0x302;
-    let second_new_renewal_root = 0x402;
-    let second_transcript_commitment = root_only_public_settlement_commitment(
-        batch_id,
-        pair_id,
-        1,
-        order_commitment_root,
-        encrypted_order_set_commitment,
-        clearing_price,
-        output_bundle_ref,
-        0,
-        0,
-        0,
-        0,
-        0,
-        second_consumed_nullifier_root,
-        second_renewal_child_root,
-        0,
-        0,
-        root_only_state_transition(0, 0),
-        second_new_nullifier_root,
-        second_new_renewal_root,
-        root_only_state_transition(0, 0),
-    );
+    let second_consumed_nullifier_root = first_consumed_nullifier_root;
+    let second_new_nullifier_root = first_new_nullifier_root;
+    let second_renewal_child_root = first_renewal_child_root;
+    let second_new_renewal_root = first_new_renewal_root;
+    let second_transcript_commitment = first_transcript_commitment;
     let auction_statement = native_auction_result_message_hash(
         auction_verifier, batch_id, order_commitment_root, 0x339, second_transcript_commitment,
     );
@@ -4901,7 +5623,6 @@ fn auction_verifier_rejects_stale_fee_bps_at_settlement() {
         clearing_price,
         TEST_PRICE_BASE_SCALE,
         TEST_TAKER_FEE_BPS + 1,
-        TEST_MAKER_FEE_BPS,
         TEST_RELAY_FEE_BPS,
         TEST_PROTOCOL_FEE_RECIPIENT,
         TEST_RELAY_FEE_RECIPIENT,
@@ -4978,7 +5699,6 @@ fn auction_verifier_rejects_stale_fee_recipient_at_settlement() {
         clearing_price,
         TEST_PRICE_BASE_SCALE,
         TEST_TAKER_FEE_BPS,
-        TEST_MAKER_FEE_BPS,
         TEST_RELAY_FEE_BPS,
         TEST_PROTOCOL_FEE_RECIPIENT + 1,
         TEST_RELAY_FEE_RECIPIENT,
@@ -5055,7 +5775,6 @@ fn auction_verifier_rejects_stale_relay_fee_recipient_at_settlement() {
         clearing_price,
         TEST_PRICE_BASE_SCALE,
         TEST_TAKER_FEE_BPS,
-        TEST_MAKER_FEE_BPS,
         TEST_RELAY_FEE_BPS,
         TEST_PROTOCOL_FEE_RECIPIENT,
         TEST_RELAY_FEE_RECIPIENT + 1,
@@ -5505,6 +6224,24 @@ fn auction_verifier_accepts_permissionless_note_consolidation_proof_facts() {
 
 #[test]
 #[should_panic]
+fn auction_verifier_rejects_note_consolidation_mutated_output_root_proof_binding() {
+    submit_note_consolidation_with_mutated_binding(0x77a, 0x77a, 0x999, 0x999, 0x1234, 0x1235);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_note_consolidation_mutated_id_proof_binding() {
+    submit_note_consolidation_with_mutated_binding(0x77b, 0x77c, 0x999, 0x999, 0x1234, 0x1234);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_note_consolidation_mutated_output_bundle_proof_binding() {
+    submit_note_consolidation_with_mutated_binding(0x77d, 0x77d, 0x999, 0x99a, 0x1234, 0x1234);
+}
+
+#[test]
+#[should_panic]
 fn auction_verifier_rejects_duplicate_note_consolidation_id() {
     let admin = as_address(0x111);
     let consolidation_id = 0x783;
@@ -5864,7 +6601,7 @@ fn auction_verifier_rejects_wrong_proof_version() {
         auction_verifier, batch_id, order_commitment_root, admission_root,
     );
     let admission_message = admission_proof_message_hash(auction_verifier, admission_statement);
-    let proof_facts = proof_facts_for_message_with_version(99, admission_message, 1);
+    let proof_facts = proof_facts_for_message_with_version(99, admission_message, 'PROOF0');
     cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
     cheat_proof_facts(auction_verifier, proof_facts.span(), CheatSpan::TargetCalls(1));
     start_cheat_caller_address(auction_verifier, settlement_account);
@@ -6143,6 +6880,166 @@ fn auction_verifier_rejects_auction_result_for_wrong_transcript_commitment() {
 
 #[test]
 #[should_panic]
+fn auction_verifier_rejects_auction_result_overwrite_with_different_transcript() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let batch_id = 0x7fa;
+    let pair_id = 0x888;
+    let order_commitment_root = 0x111;
+    let admission_root = 0x333;
+    let transcript_commitment = 0x444;
+    let replacement_transcript_commitment = 0x446;
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    register_prepared_batch(
+        batch_registry, admin, auction_verifier, batch_id, pair_id, 1, order_commitment_root, 0x222,
+    );
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+
+    let admission_statement = native_admission_message_hash(
+        auction_verifier, batch_id, order_commitment_root, admission_root,
+    );
+    let admission_message = admission_proof_message_hash(auction_verifier, admission_statement);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(
+        auction_verifier,
+        valid_proof_facts(99, admission_message).span(),
+        CheatSpan::TargetCalls(1),
+    );
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    verifier
+        .record_admission_root_with_proof_facts(batch_id, order_commitment_root, admission_root);
+
+    let auction_statement = native_auction_result_message_hash(
+        auction_verifier, batch_id, order_commitment_root, admission_root, transcript_commitment,
+    );
+    let auction_message = auction_result_proof_message_hash(auction_verifier, auction_statement);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(
+        auction_verifier, valid_proof_facts(99, auction_message).span(), CheatSpan::TargetCalls(1),
+    );
+    verifier
+        .record_auction_result_with_proof_facts(
+            batch_id, order_commitment_root, admission_root, transcript_commitment,
+        );
+
+    let replacement_statement = native_auction_result_message_hash(
+        auction_verifier,
+        batch_id,
+        order_commitment_root,
+        admission_root,
+        replacement_transcript_commitment,
+    );
+    let replacement_message = auction_result_proof_message_hash(
+        auction_verifier, replacement_statement,
+    );
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(
+        auction_verifier,
+        valid_proof_facts(99, replacement_message).span(),
+        CheatSpan::TargetCalls(1),
+    );
+    verifier
+        .record_auction_result_with_proof_facts(
+            batch_id, order_commitment_root, admission_root, replacement_transcript_commitment,
+        );
+}
+
+#[test]
+fn auction_verifier_records_multi_pair_solution_with_valid_proof_facts() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let batch_id = 0x7fb;
+    let multi_pair_commitment = 0xabc123;
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+
+    let expected_statement = native_multi_pair_message_hash(
+        auction_verifier, multi_pair_commitment,
+    );
+    let expected_message = multi_pair_proof_message_hash(auction_verifier, expected_statement);
+    assert(
+        verifier.multi_pair_proof_message_hash(multi_pair_commitment) == expected_message,
+        'MP_HASH_VIEW',
+    );
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(
+        auction_verifier, valid_proof_facts(99, expected_message).span(), CheatSpan::TargetCalls(1),
+    );
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    verifier.record_multi_pair_solution_with_proof_facts(batch_id, multi_pair_commitment);
+
+    let (recorded_commitment, active) = verifier.verified_multi_pair_solution(batch_id);
+    assert(active, 'MP_NOT_ACTIVE');
+    assert(recorded_commitment == multi_pair_commitment, 'MP_COMMITMENT');
+    verifier.record_multi_pair_solution_with_proof_facts(batch_id, multi_pair_commitment);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_multi_pair_solution_with_wrong_proof_facts() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let batch_id = 0x7fc;
+    let multi_pair_commitment = 0xabc123;
+    let wrong_commitment = 0xabc124;
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+
+    let expected_statement = native_multi_pair_message_hash(
+        auction_verifier, multi_pair_commitment,
+    );
+    let expected_message = multi_pair_proof_message_hash(auction_verifier, expected_statement);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(
+        auction_verifier, valid_proof_facts(99, expected_message).span(), CheatSpan::TargetCalls(1),
+    );
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    verifier.record_multi_pair_solution_with_proof_facts(batch_id, wrong_commitment);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_multi_pair_overwrite_with_different_commitment() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let batch_id = 0x7fd;
+    let multi_pair_commitment = 0xabc123;
+    let replacement_commitment = 0xabc124;
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+
+    let expected_statement = native_multi_pair_message_hash(
+        auction_verifier, multi_pair_commitment,
+    );
+    let expected_message = multi_pair_proof_message_hash(auction_verifier, expected_statement);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(
+        auction_verifier, valid_proof_facts(99, expected_message).span(), CheatSpan::TargetCalls(1),
+    );
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    verifier.record_multi_pair_solution_with_proof_facts(batch_id, multi_pair_commitment);
+    verifier.record_multi_pair_solution_with_proof_facts(batch_id, replacement_commitment);
+}
+
+#[test]
+#[should_panic]
 fn auction_verifier_rejects_expired_proof_facts() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x222);
@@ -6170,191 +7067,6 @@ fn auction_verifier_rejects_expired_proof_facts() {
         4,
         5,
     );
-}
-
-#[test]
-fn auction_verifier_withdraws_settlement_output_with_nullifier_proof_facts() {
-    let admin = as_address(0x111);
-    let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
-    let batch_id = 0x777;
-    let pair_id = 0x888;
-    let output_note_commitment = 0xabc123;
-    let output_amount = 200_u128;
-    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
-    let withdraw_authority = key_pair.public_key;
-    let (token_address, shielded_asset_adapter, _, _) = setup_adapter_with_deposited_note(
-        NOTE_COMMITMENT, withdraw_authority,
-    );
-    let batch_registry = deploy_batch_registry(admin, admin);
-    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
-    let token = IERC20Dispatcher { contract_address: token_address };
-    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
-    let batches = IBatchRegistryDispatcher { contract_address: batch_registry };
-    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
-
-    start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.set_auction_verifier(auction_verifier);
-    stop_cheat_caller_address(shielded_asset_adapter);
-
-    start_cheat_caller_address(batch_registry, admin);
-    batches.set_auction_verifier(auction_verifier);
-    batches.register_batch(batch_id, pair_id, 1, 2, 0, 0x111, 0x222);
-    stop_cheat_caller_address(batch_registry);
-
-    start_cheat_caller_address(auction_verifier, admin);
-    verifier.set_authorized_settlement_account(settlement_account);
-    verifier.set_shielded_asset_adapter(shielded_asset_adapter);
-    stop_cheat_caller_address(auction_verifier);
-
-    let output_note_root = output_note_leaf(
-        output_note_commitment, ASSET_ID, output_amount, withdraw_authority,
-    );
-    let empty_nullifiers = array![];
-    let empty_nullifier_root = single_field_root(
-        CONSUMED_NULLIFIER_ROOT_DOMAIN, empty_nullifiers.span(),
-    );
-    let empty_renewal_root = empty_renewal_child_root();
-    let transcript_commitment = root_only_public_settlement_commitment(
-        batch_id,
-        pair_id,
-        1,
-        0x111,
-        0x222,
-        4,
-        0x999,
-        0,
-        0,
-        0,
-        0,
-        0,
-        empty_nullifier_root,
-        empty_renewal_root,
-        output_note_root,
-        0,
-        root_only_state_transition(0, output_note_root),
-        0,
-        0,
-        root_only_state_transition(0, 0),
-    );
-    let proof_artifact_commitment = native_settlement_message_hash(
-        auction_verifier, transcript_commitment,
-    );
-    record_split_auction_proofs(
-        auction_verifier,
-        verifier,
-        settlement_account,
-        batch_id,
-        0x111,
-        0x33a,
-        transcript_commitment,
-    );
-    record_root_transition_proofs(
-        auction_verifier,
-        verifier,
-        settlement_account,
-        batch_id,
-        transcript_commitment,
-        0,
-        empty_nullifier_root,
-        0,
-        0,
-        empty_renewal_root,
-        0,
-    );
-    let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
-    let proof_facts = valid_proof_facts(99, proof_message_hash);
-    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
-    cheat_proof_facts(auction_verifier, proof_facts.span(), CheatSpan::TargetCalls(1));
-    start_cheat_caller_address(auction_verifier, settlement_account);
-    submit_root_settlement(
-        verifier,
-        batch_id,
-        0x111,
-        0x222,
-        transcript_commitment,
-        proof_artifact_commitment,
-        4,
-        0x999,
-        0,
-        0,
-        0,
-        0,
-        0,
-        empty_nullifier_root,
-        empty_renewal_root,
-        output_note_root,
-        0,
-        root_only_state_transition(0, output_note_root),
-        0,
-        0,
-        root_only_state_transition(0, 0),
-    );
-    stop_cheat_caller_address(auction_verifier);
-
-    let message = output_withdrawal_message_hash_for_verifier(
-        auction_verifier,
-        shielded_asset_adapter,
-        TEST_CHAIN_ID,
-        batch_id,
-        output_note_commitment,
-        ASSET_ID,
-        output_amount,
-        recipient,
-    );
-    let (r, s) = StarkCurveSignerImpl::sign(key_pair, message).unwrap();
-    let path = array![];
-    let directions = array![];
-    let consumed_nullifiers = array![0xdeadbeef];
-    let consumed_nullifier_root = single_field_root(
-        CONSUMED_NULLIFIER_ROOT_DOMAIN, consumed_nullifiers.span(),
-    );
-    let new_nullifier_root = 0x5678;
-    let withdrawal_commitment = public_note_withdrawal_commitment(
-        batch_id,
-        output_note_commitment,
-        ASSET_ID,
-        output_amount,
-        withdraw_authority,
-        0,
-        consumed_nullifier_root,
-        new_nullifier_root,
-    );
-    let withdrawal_statement = native_withdrawal_message_hash(
-        auction_verifier, withdrawal_commitment,
-    );
-    let withdrawal_proof_message = withdrawal_proof_message_hash(
-        auction_verifier, withdrawal_statement,
-    );
-    let withdrawal_proof_facts = valid_proof_facts(99, withdrawal_proof_message);
-    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
-    cheat_chain_id(auction_verifier, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
-    cheat_proof_facts(auction_verifier, withdrawal_proof_facts.span(), CheatSpan::TargetCalls(1));
-    let (asset_id, amount) = verifier
-        .withdraw_settlement_output_with_proof_facts(
-            batch_id,
-            withdrawal_statement,
-            0,
-            consumed_nullifier_root,
-            new_nullifier_root,
-            output_note_commitment,
-            ASSET_ID,
-            output_amount,
-            withdraw_authority,
-            path.span(),
-            directions.span(),
-            r,
-            s,
-            recipient,
-        );
-
-    let recipient_balance = token.balance_of(recipient);
-    assert(asset_id == ASSET_ID, 'BAD_OUTPUT_ASSET');
-    assert(amount == output_amount, 'BAD_OUTPUT_AMOUNT');
-    assert(recipient_balance.low == output_amount, 'BAD_OUTPUT_BALANCE');
-    assert(adapter.withdrawal_recipient(output_note_commitment) == recipient, 'BAD_OUT_RECIPIENT');
-    let (_, current_nullifier_root, _, _) = verifier.current_settlement_roots();
-    assert(current_nullifier_root == new_nullifier_root, 'BAD_WITHDRAW_NULL_ROOT');
 }
 
 #[test]
@@ -6442,7 +7154,6 @@ fn auction_verifier_stages_strk20_open_note_withdrawal_with_nullifier_proof_fact
     assert(asset_id == ASSET_ID, 'BAD_STRK20_ASSET');
     assert(amount == output_amount, 'BAD_STRK20_AMOUNT');
     assert(staged_exit == exit_commitment, 'BAD_STAGED_EXIT');
-    assert(bridge.withdrawal_count() == 0, 'PUBLIC_WITHDRAWAL_RECORDED');
     let (_, current_nullifier_root, _, _) = verifier.current_settlement_roots();
     assert(current_nullifier_root == new_nullifier_root, 'BAD_STRK20_NULL_ROOT');
 
@@ -6569,10 +7280,9 @@ fn auction_verifier_rejects_strk20_withdrawal_signature_for_wrong_exit_commitmen
 
 #[test]
 #[should_panic]
-fn auction_verifier_rejects_normal_withdrawal_after_strk20_exit_stage() {
+fn auction_verifier_rejects_duplicate_strk20_withdrawal_after_exit_stage() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
     let batch_id = 0x7821;
     let pair_id = 0x888;
     let output_note_commitment = 0xabc201;
@@ -6648,7 +7358,8 @@ fn auction_verifier_rejects_normal_withdrawal_after_strk20_exit_stage() {
         CONSUMED_NULLIFIER_ROOT_DOMAIN, array![0xcafebabe].span(),
     );
     let second_new_nullifier_root = 0x6789;
-    let legacy_message = output_withdrawal_message_hash_for_verifier(
+    let second_exit_commitment = 0xeee201;
+    let second_exit_message = output_strk20_exit_message_hash_for_verifier(
         auction_verifier,
         bridge_address,
         TEST_CHAIN_ID,
@@ -6656,9 +7367,10 @@ fn auction_verifier_rejects_normal_withdrawal_after_strk20_exit_stage() {
         output_note_commitment,
         ASSET_ID,
         output_amount,
-        recipient,
+        second_exit_commitment,
     );
-    let (legacy_r, legacy_s) = StarkCurveSignerImpl::sign(key_pair, legacy_message).unwrap();
+    let (second_exit_r, second_exit_s) = StarkCurveSignerImpl::sign(key_pair, second_exit_message)
+        .unwrap();
     let second_withdrawal_commitment = public_note_withdrawal_commitment(
         batch_id,
         output_note_commitment,
@@ -6678,7 +7390,7 @@ fn auction_verifier_rejects_normal_withdrawal_after_strk20_exit_stage() {
     cheat_chain_id(auction_verifier, TEST_CHAIN_ID, CheatSpan::TargetCalls(1));
     cheat_proof_facts(auction_verifier, second_proof_facts.span(), CheatSpan::TargetCalls(1));
     verifier
-        .withdraw_settlement_output_with_proof_facts(
+        .withdraw_settlement_output_to_strk20_with_proof_facts(
             batch_id,
             second_statement,
             first_new_nullifier_root,
@@ -6690,9 +7402,9 @@ fn auction_verifier_rejects_normal_withdrawal_after_strk20_exit_stage() {
             withdraw_authority,
             path.span(),
             directions.span(),
-            legacy_r,
-            legacy_s,
-            recipient,
+            second_exit_r,
+            second_exit_s,
+            second_exit_commitment,
         );
 }
 
@@ -6701,14 +7413,13 @@ fn auction_verifier_rejects_normal_withdrawal_after_strk20_exit_stage() {
 fn auction_verifier_rejects_duplicate_settlement_output_withdrawal_replay() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
     let batch_id = 0x779;
     let pair_id = 0x888;
     let output_note_commitment = 0xabc125;
     let output_amount = 200_u128;
     let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
     let withdraw_authority = key_pair.public_key;
-    let (_, shielded_asset_adapter, auction_verifier) = settle_single_output_note_for_withdrawal(
+    let (_, bridge_address, _, auction_verifier) = settle_single_output_note_for_strk20_exit(
         admin,
         settlement_account,
         batch_id,
@@ -6718,15 +7429,16 @@ fn auction_verifier_rejects_duplicate_settlement_output_withdrawal_replay() {
         withdraw_authority,
     );
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
-    let message = output_withdrawal_message_hash_for_verifier(
+    let exit_commitment = 0xeee779;
+    let message = output_strk20_exit_message_hash_for_verifier(
         auction_verifier,
-        shielded_asset_adapter,
+        bridge_address,
         TEST_CHAIN_ID,
         batch_id,
         output_note_commitment,
         ASSET_ID,
         output_amount,
-        recipient,
+        exit_commitment,
     );
     let (r, s) = StarkCurveSignerImpl::sign(key_pair, message).unwrap();
     let path = array![];
@@ -6758,7 +7470,7 @@ fn auction_verifier_rejects_duplicate_settlement_output_withdrawal_replay() {
         auction_verifier, first_withdrawal_proof_facts.span(), CheatSpan::TargetCalls(1),
     );
     verifier
-        .withdraw_settlement_output_with_proof_facts(
+        .withdraw_settlement_output_to_strk20_with_proof_facts(
             batch_id,
             first_withdrawal_statement,
             0,
@@ -6772,7 +7484,7 @@ fn auction_verifier_rejects_duplicate_settlement_output_withdrawal_replay() {
             directions.span(),
             r,
             s,
-            recipient,
+            exit_commitment,
         );
 
     let second_consumed_root = single_field_root(
@@ -6802,7 +7514,7 @@ fn auction_verifier_rejects_duplicate_settlement_output_withdrawal_replay() {
         auction_verifier, second_withdrawal_proof_facts.span(), CheatSpan::TargetCalls(1),
     );
     verifier
-        .withdraw_settlement_output_with_proof_facts(
+        .withdraw_settlement_output_to_strk20_with_proof_facts(
             batch_id,
             second_withdrawal_statement,
             first_new_nullifier_root,
@@ -6816,7 +7528,7 @@ fn auction_verifier_rejects_duplicate_settlement_output_withdrawal_replay() {
             directions.span(),
             r,
             s,
-            recipient,
+            exit_commitment,
         );
 }
 
@@ -6825,7 +7537,6 @@ fn auction_verifier_rejects_duplicate_settlement_output_withdrawal_replay() {
 fn auction_verifier_rejects_withdrawal_for_wrong_verifier_statement() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
     let batch_id = 0x77a;
     let output_note_commitment = 0xabc126;
     let output_amount = 200_u128;
@@ -6857,8 +7568,8 @@ fn auction_verifier_rejects_withdrawal_for_wrong_verifier_statement() {
         output_amount,
         withdraw_secret,
         withdraw_authority,
-        recipient,
-        recipient,
+        0xeee77a,
+        0xeee77a,
         0,
         consumed_root,
         0x5679,
@@ -6870,7 +7581,6 @@ fn auction_verifier_rejects_withdrawal_for_wrong_verifier_statement() {
 fn auction_verifier_rejects_withdrawal_signature_for_wrong_adapter() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
     let batch_id = 0x77b;
     let output_note_commitment = 0xabc127;
     let output_amount = 200_u128;
@@ -6902,8 +7612,8 @@ fn auction_verifier_rejects_withdrawal_signature_for_wrong_adapter() {
         output_amount,
         withdraw_secret,
         withdraw_authority,
-        recipient,
-        recipient,
+        0xeee77b,
+        0xeee77b,
         0,
         consumed_root,
         0x5680,
@@ -6915,7 +7625,6 @@ fn auction_verifier_rejects_withdrawal_signature_for_wrong_adapter() {
 fn auction_verifier_rejects_withdrawal_signature_for_wrong_chain() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
     let batch_id = 0x77c;
     let output_note_commitment = 0xabc128;
     let output_amount = 200_u128;
@@ -6947,8 +7656,8 @@ fn auction_verifier_rejects_withdrawal_signature_for_wrong_chain() {
         output_amount,
         withdraw_secret,
         withdraw_authority,
-        recipient,
-        recipient,
+        0xeee77c,
+        0xeee77c,
         0,
         consumed_root,
         0x5681,
@@ -6957,10 +7666,9 @@ fn auction_verifier_rejects_withdrawal_signature_for_wrong_chain() {
 
 #[test]
 #[should_panic]
-fn auction_verifier_rejects_withdrawal_signature_for_wrong_recipient() {
+fn auction_verifier_rejects_withdrawal_signature_for_wrong_exit_commitment() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
     let batch_id = 0x77d;
     let output_note_commitment = 0xabc129;
     let output_amount = 200_u128;
@@ -6992,8 +7700,8 @@ fn auction_verifier_rejects_withdrawal_signature_for_wrong_recipient() {
         output_amount,
         withdraw_secret,
         withdraw_authority,
-        recipient,
-        as_address(0x445),
+        0xeee77d,
+        0xeee77e,
         0,
         consumed_root,
         0x5682,
@@ -7005,7 +7713,6 @@ fn auction_verifier_rejects_withdrawal_signature_for_wrong_recipient() {
 fn auction_verifier_rejects_withdrawal_for_wrong_batch() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
     let batch_id = 0x77e;
     let output_note_commitment = 0xabc12a;
     let output_amount = 200_u128;
@@ -7037,8 +7744,8 @@ fn auction_verifier_rejects_withdrawal_for_wrong_batch() {
         output_amount,
         withdraw_secret,
         withdraw_authority,
-        recipient,
-        recipient,
+        0xeee77f,
+        0xeee77f,
         0,
         consumed_root,
         0x5683,
@@ -7050,7 +7757,6 @@ fn auction_verifier_rejects_withdrawal_for_wrong_batch() {
 fn auction_verifier_rejects_withdrawal_for_wrong_note_commitment() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
     let batch_id = 0x77f;
     let output_note_commitment = 0xabc12b;
     let output_amount = 200_u128;
@@ -7082,8 +7788,8 @@ fn auction_verifier_rejects_withdrawal_for_wrong_note_commitment() {
         output_amount,
         withdraw_secret,
         withdraw_authority,
-        recipient,
-        recipient,
+        0xeee780,
+        0xeee780,
         0,
         consumed_root,
         0x5684,
@@ -7095,7 +7801,6 @@ fn auction_verifier_rejects_withdrawal_for_wrong_note_commitment() {
 fn auction_verifier_rejects_withdrawal_for_wrong_asset() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
     let batch_id = 0x780;
     let output_note_commitment = 0xabc12c;
     let output_amount = 200_u128;
@@ -7127,8 +7832,8 @@ fn auction_verifier_rejects_withdrawal_for_wrong_asset() {
         output_amount,
         withdraw_secret,
         withdraw_authority,
-        recipient,
-        recipient,
+        0xeee781,
+        0xeee781,
         0,
         consumed_root,
         0x5685,
@@ -7140,7 +7845,6 @@ fn auction_verifier_rejects_withdrawal_for_wrong_asset() {
 fn auction_verifier_rejects_withdrawal_for_wrong_amount() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
     let batch_id = 0x781;
     let output_note_commitment = 0xabc12d;
     let output_amount = 200_u128;
@@ -7172,8 +7876,8 @@ fn auction_verifier_rejects_withdrawal_for_wrong_amount() {
         output_amount + 1,
         withdraw_secret,
         withdraw_authority,
-        recipient,
-        recipient,
+        0xeee782,
+        0xeee782,
         0,
         consumed_root,
         0x5686,
@@ -7185,7 +7889,6 @@ fn auction_verifier_rejects_withdrawal_for_wrong_amount() {
 fn auction_verifier_rejects_settlement_output_withdrawal_before_claim_delay() {
     let admin = as_address(0x111);
     let settlement_account = as_address(0x333);
-    let recipient = as_address(0x444);
     let batch_id = 0x778;
     let pair_id = 0x888;
     let output_note_commitment = 0xabc124;
@@ -7197,12 +7900,12 @@ fn auction_verifier_rejects_settlement_output_withdrawal_before_claim_delay() {
     );
     let batch_registry = deploy_batch_registry(admin, admin);
     let auction_verifier = deploy_auction_verifier(admin, batch_registry);
-    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: shielded_asset_adapter };
     let batches = IBatchRegistryDispatcher { contract_address: batch_registry };
     let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
 
     start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.set_auction_verifier(auction_verifier);
+    bridge.set_auction_verifier(auction_verifier);
     stop_cheat_caller_address(shielded_asset_adapter);
 
     start_cheat_caller_address(batch_registry, admin);
@@ -7280,7 +7983,8 @@ fn auction_verifier_rejects_settlement_output_withdrawal_before_claim_delay() {
     );
     stop_cheat_caller_address(auction_verifier);
 
-    let message = output_withdrawal_message_hash_for_verifier(
+    let exit_commitment = 0xeee778;
+    let message = output_strk20_exit_message_hash_for_verifier(
         auction_verifier,
         shielded_asset_adapter,
         TEST_CHAIN_ID,
@@ -7288,7 +7992,7 @@ fn auction_verifier_rejects_settlement_output_withdrawal_before_claim_delay() {
         output_note_commitment,
         ASSET_ID,
         output_amount,
-        recipient,
+        exit_commitment,
     );
     let (r, s) = StarkCurveSignerImpl::sign(key_pair, message).unwrap();
     let path = array![];
@@ -7319,7 +8023,7 @@ fn auction_verifier_rejects_settlement_output_withdrawal_before_claim_delay() {
     cheat_block_timestamp(auction_verifier, 1_020, CheatSpan::TargetCalls(1));
     cheat_proof_facts(auction_verifier, withdrawal_proof_facts.span(), CheatSpan::TargetCalls(1));
     verifier
-        .withdraw_settlement_output_with_proof_facts(
+        .withdraw_settlement_output_to_strk20_with_proof_facts(
             batch_id,
             withdrawal_statement,
             0,
@@ -7333,49 +8037,8 @@ fn auction_verifier_rejects_settlement_output_withdrawal_before_claim_delay() {
             directions.span(),
             r,
             s,
-            recipient,
+            exit_commitment,
         );
-}
-
-#[test]
-#[should_panic]
-fn shielded_asset_adapter_rejects_direct_verified_withdrawal_caller() {
-    let admin = as_address(0x111);
-    let verifier = as_address(0x222);
-    let attacker = as_address(0x333);
-    let recipient = as_address(0x444);
-    let shielded_asset_adapter = deploy_shielded_asset_adapter(admin);
-    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
-
-    start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.set_auction_verifier(verifier);
-    stop_cheat_caller_address(shielded_asset_adapter);
-
-    start_cheat_caller_address(shielded_asset_adapter, attacker);
-    adapter.withdraw_verified_note(ASSET_ID, 1, NOTE_COMMITMENT, recipient);
-}
-
-#[test]
-#[should_panic]
-fn shielded_asset_adapter_rejects_verified_withdrawal_replay() {
-    let admin = as_address(0x111);
-    let auction_verifier = as_address(0x444);
-    let recipient = as_address(0x555);
-    let token_address = deploy_configurable_mock_erc20();
-    let shielded_asset_adapter = deploy_shielded_asset_adapter(admin);
-    let token = IConfigurableMockERC20Dispatcher { contract_address: token_address };
-    let adapter = IShieldedAssetAdapterDispatcher { contract_address: shielded_asset_adapter };
-
-    token.mint(shielded_asset_adapter, as_u256(500));
-
-    start_cheat_caller_address(shielded_asset_adapter, admin);
-    adapter.set_auction_verifier(auction_verifier);
-    adapter.register_supported_asset(ASSET_ID, token_address);
-    stop_cheat_caller_address(shielded_asset_adapter);
-
-    start_cheat_caller_address(shielded_asset_adapter, auction_verifier);
-    adapter.withdraw_verified_note(ASSET_ID, 200, NOTE_COMMITMENT + 0x100, recipient);
-    adapter.withdraw_verified_note(ASSET_ID, 200, NOTE_COMMITMENT + 0x100, recipient);
 }
 
 #[test]
@@ -7453,7 +8116,6 @@ fn privacy_deposit_bridge_claims_staged_strk20_exit_to_open_note() {
     assert(erc20.balance_of(bridge_address).low == 500, 'BAD_BRIDGE_BALANCE');
     assert(erc20.allowance(bridge_address, privacy_pool) == as_u256(200), 'BAD_APPROVAL');
     assert(erc20.balance_of(privacy_pool).low == 0, 'BAD_POOL_BALANCE');
-    assert(bridge.withdrawal_count() == 0, 'PUBLIC_WITHDRAWAL_RECORDED');
 }
 
 #[test]
@@ -8069,10 +8731,9 @@ fn privacy_deposit_bridge_rejects_strk20_exit_stage_without_tracked_escrow() {
 
 #[test]
 #[should_panic]
-fn privacy_deposit_bridge_rejects_verified_withdrawal_without_tracked_escrow() {
+fn privacy_deposit_bridge_rejects_strk20_exit_stage_from_wrong_caller() {
     let admin = as_address(0x111);
     let auction_verifier = as_address(0x222);
-    let recipient = as_address(0x333);
     let privacy_pool = deploy_mock_privacy_pool();
     let commitment_registry = deploy_commitment_registry(admin);
     let token_address = deploy_mock_erc20();
@@ -8080,16 +8741,18 @@ fn privacy_deposit_bridge_rejects_verified_withdrawal_without_tracked_escrow() {
         admin, commitment_registry, privacy_pool,
     );
     let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
-    let token = IMockERC20Dispatcher { contract_address: token_address };
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
 
-    token.mint(bridge_address, as_u256(500));
     start_cheat_caller_address(bridge_address, admin);
     bridge.set_auction_verifier(auction_verifier);
     bridge.register_supported_asset(ASSET_ID, token_address);
     stop_cheat_caller_address(bridge_address);
 
-    start_cheat_caller_address(bridge_address, auction_verifier);
-    bridge.withdraw_verified_note(ASSET_ID, 200, NOTE_COMMITMENT + 0x20d, recipient);
+    start_cheat_caller_address(bridge_address, as_address(0x333));
+    bridge
+        .stage_verified_note_strk20_exit(
+            ASSET_ID, 200, NOTE_COMMITMENT + 0x20d, key_pair.public_key, 0xeee00e,
+        );
 }
 
 #[test]
@@ -8160,7 +8823,7 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_from_wrong_pool_caller() {
 
 #[test]
 #[should_panic]
-fn privacy_deposit_bridge_rejects_strk20_exit_claim_short_transfer_from() {
+fn strk20_exit_pool_delta_check_rejects_short_transfer_from() {
     let admin = as_address(0x111);
     let auction_verifier = as_address(0x222);
     let privacy_pool = deploy_mock_privacy_pool();
@@ -8238,47 +8901,6 @@ fn privacy_deposit_bridge_rejects_strk20_exit_claim_short_transfer_from() {
 
 #[test]
 #[should_panic]
-fn privacy_deposit_bridge_rejects_strk20_exit_stage_after_normal_withdrawal() {
-    let admin = as_address(0x111);
-    let auction_verifier = as_address(0x222);
-    let recipient = as_address(0x333);
-    let privacy_pool = deploy_mock_privacy_pool();
-    let commitment_registry = deploy_commitment_registry(admin);
-    let token_address = deploy_mock_erc20();
-    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
-        admin, commitment_registry, privacy_pool,
-    );
-    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
-    let token = IMockERC20Dispatcher { contract_address: token_address };
-    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
-    let note_commitment = NOTE_COMMITMENT + 0x206;
-
-    token.mint(bridge_address, as_u256(500));
-    start_cheat_caller_address(bridge_address, admin);
-    bridge.set_auction_verifier(auction_verifier);
-    bridge.register_supported_asset(ASSET_ID, token_address);
-    stop_cheat_caller_address(bridge_address);
-    seed_bridge_escrow(
-        admin,
-        privacy_pool,
-        commitment_registry,
-        bridge_address,
-        bridge,
-        FUNDING_COMMITMENT,
-        NOTE_COMMITMENT + 0x90b,
-        200,
-    );
-
-    start_cheat_caller_address(bridge_address, auction_verifier);
-    bridge.withdraw_verified_note(ASSET_ID, 200, note_commitment, recipient);
-    bridge
-        .stage_verified_note_strk20_exit(
-            ASSET_ID, 200, note_commitment, key_pair.public_key, 0xeee007,
-        );
-}
-
-#[test]
-#[should_panic]
 fn privacy_deposit_bridge_rejects_duplicate_strk20_exit_stage_for_same_note() {
     let admin = as_address(0x111);
     let auction_verifier = as_address(0x222);
@@ -8318,47 +8940,6 @@ fn privacy_deposit_bridge_rejects_duplicate_strk20_exit_stage_for_same_note() {
         .stage_verified_note_strk20_exit(
             ASSET_ID, 200, note_commitment, key_pair.public_key, 0xeee009,
         );
-}
-
-#[test]
-#[should_panic]
-fn privacy_deposit_bridge_rejects_normal_withdrawal_after_strk20_exit_stage() {
-    let admin = as_address(0x111);
-    let auction_verifier = as_address(0x222);
-    let recipient = as_address(0x333);
-    let privacy_pool = deploy_mock_privacy_pool();
-    let commitment_registry = deploy_commitment_registry(admin);
-    let token_address = deploy_mock_erc20();
-    let bridge_address = deploy_privacy_deposit_bridge_with_pool(
-        admin, commitment_registry, privacy_pool,
-    );
-    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
-    let token = IMockERC20Dispatcher { contract_address: token_address };
-    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(0xabcdef);
-    let note_commitment = NOTE_COMMITMENT + 0x208;
-
-    token.mint(bridge_address, as_u256(500));
-    start_cheat_caller_address(bridge_address, admin);
-    bridge.set_auction_verifier(auction_verifier);
-    bridge.register_supported_asset(ASSET_ID, token_address);
-    stop_cheat_caller_address(bridge_address);
-    seed_bridge_escrow(
-        admin,
-        privacy_pool,
-        commitment_registry,
-        bridge_address,
-        bridge,
-        FUNDING_COMMITMENT,
-        NOTE_COMMITMENT + 0x90d,
-        200,
-    );
-
-    start_cheat_caller_address(bridge_address, auction_verifier);
-    bridge
-        .stage_verified_note_strk20_exit(
-            ASSET_ID, 200, note_commitment, key_pair.public_key, 0xeee00a,
-        );
-    bridge.withdraw_verified_note(ASSET_ID, 200, note_commitment, recipient);
 }
 
 #[test]

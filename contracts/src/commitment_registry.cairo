@@ -5,6 +5,7 @@ use zylith_protocol::types::DepositActivationRecord;
 pub trait ICommitmentRegistry<TContractState> {
     fn propose_admin(ref self: TContractState, new_admin: ContractAddress);
     fn accept_admin(ref self: TContractState);
+    fn lock_config(ref self: TContractState);
     fn set_batch_registrar(ref self: TContractState, registrar: ContractAddress);
     fn set_privacy_deposit_bridge(ref self: TContractState, bridge: ContractAddress);
     fn set_auction_verifier(ref self: TContractState, verifier: ContractAddress);
@@ -29,6 +30,7 @@ pub trait ICommitmentRegistry<TContractState> {
     fn admin_address(self: @TContractState) -> ContractAddress;
     fn pending_admin_address(self: @TContractState) -> ContractAddress;
     fn admin_transfer_pending(self: @TContractState) -> bool;
+    fn config_is_locked(self: @TContractState) -> bool;
     fn batch_registrar_address(self: @TContractState) -> ContractAddress;
     fn privacy_deposit_bridge_address(self: @TContractState) -> ContractAddress;
     fn auction_verifier_address(self: @TContractState) -> ContractAddress;
@@ -52,6 +54,7 @@ pub mod CommitmentRegistry {
         admin: ContractAddress,
         pending_admin: ContractAddress,
         admin_transfer_pending: bool,
+        config_locked: bool,
         batch_registrar: ContractAddress,
         privacy_deposit_bridge: ContractAddress,
         auction_verifier: ContractAddress,
@@ -88,20 +91,32 @@ pub mod CommitmentRegistry {
             self.admin_transfer_pending.write(false);
         }
 
+        fn lock_config(ref self: ContractState) {
+            assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
+            assert(!self.batch_registrar.read().is_zero(), 'REGISTRAR_UNSET');
+            assert(!self.privacy_deposit_bridge.read().is_zero(), 'BRIDGE_UNSET');
+            assert(!self.auction_verifier.read().is_zero(), 'VERIFIER_UNSET');
+            self.config_locked.write(true);
+        }
+
         fn set_batch_registrar(ref self: ContractState, registrar: ContractAddress) {
             assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
             assert(!registrar.is_zero(), 'BAD_REGISTRAR');
             self.batch_registrar.write(registrar);
         }
 
         fn set_privacy_deposit_bridge(ref self: ContractState, bridge: ContractAddress) {
             assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
             assert(!bridge.is_zero(), 'BAD_PRIVACY_BRIDGE');
             self.privacy_deposit_bridge.write(bridge);
         }
 
         fn set_auction_verifier(ref self: ContractState, verifier: ContractAddress) {
             assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
             assert(!verifier.is_zero(), 'BAD_AUCTION_VERIFIER');
             self.auction_verifier.write(verifier);
         }
@@ -208,6 +223,10 @@ pub mod CommitmentRegistry {
 
         fn admin_transfer_pending(self: @ContractState) -> bool {
             self.admin_transfer_pending.read()
+        }
+
+        fn config_is_locked(self: @ContractState) -> bool {
+            self.config_locked.read()
         }
 
         fn batch_registrar_address(self: @ContractState) -> ContractAddress {
