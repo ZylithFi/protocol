@@ -14,11 +14,12 @@ STRK_TOKEN_ADDRESS="${ZYLITH_STRK_TOKEN_ADDRESS:-0x04718f5a0fc34cc1af16a1cdee98f
 ETH_TOKEN_ADDRESS="${ZYLITH_ETH_TOKEN_ADDRESS:-0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7}"
 USDC_TOKEN_ADDRESS="${ZYLITH_USDC_TOKEN_ADDRESS:-0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343}"
 STRKBTC_TOKEN_ADDRESS="${ZYLITH_STRKBTC_TOKEN_ADDRESS:-0x45060889ad33e70531ae2683046bb9b0d7c8199fccd9acd544170a42b0a0fd0}"
-WBTC_TOKEN_ADDRESS="${ZYLITH_WBTC_TOKEN_ADDRESS:-}"
-USDT_TOKEN_ADDRESS="${ZYLITH_USDT_TOKEN_ADDRESS:-}"
 PRIVACY_POOL_ADDRESS="${ZYLITH_STARKNET_PRIVACY_POOL_ADDRESS:-}"
 LOCK_PROOF_PROGRAM_AFTER_DEPLOY="${ZYLITH_LOCK_PROOF_PROGRAM_AFTER_DEPLOY:-true}"
 LOCK_OPERATIONAL_CONFIG_AFTER_DEPLOY="${ZYLITH_LOCK_OPERATIONAL_CONFIG_AFTER_DEPLOY:-true}"
+REFERENCE_PRICE_SIGNER_PUBLIC_KEY="${ZYLITH_REFERENCE_PRICE_SIGNER_PUBLIC_KEY:-}"
+EKUBO_CORE_ADDRESS="${ZYLITH_EKUBO_CORE_ADDRESS:-0x0444a09d96389aa7148f1aada508e30b71299ffe650d9c97fdaae38cb9a23384}"
+EKUBO_ROUTER_ADDRESS="${ZYLITH_EKUBO_ROUTER_ADDRESS:-0x0045f933adf0607292468ad1c1dedaa74d5ad166392590e72676a34d01d7b763}"
 
 if [[ -z "${RPC_URL}" ]]; then
   echo "ZYLITH_STARKNET_RPC_URL is required" >&2
@@ -150,6 +151,31 @@ require_nonzero_address() {
 declare_contract() {
   local name="$1"
   local out class_hash status attempt hard_error
+  class_hash="$(
+    cd "${CONTRACTS_DIR}" &&
+      sncast utils class-hash --contract-name "${name}" --package zylith_protocol 2>/dev/null |
+        sed -n 's/^Class Hash:[[:space:]]*//p' |
+        head -1
+  )"
+  if [[ -n "${class_hash}" ]] && node - "${RPC_URL}" "${class_hash}" <<'NODE'
+const [rpcUrl, classHash] = process.argv.slice(2);
+const response = await fetch(rpcUrl, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "starknet_getClass",
+    params: { block_id: "latest", class_hash: classHash },
+  }),
+  signal: AbortSignal.timeout(30_000),
+}).then((value) => value.json());
+process.exit(response && response.result ? 0 : 1);
+NODE
+  then
+    printf '%s' "${class_hash}"
+    return 0
+  fi
   for ((attempt = 1; attempt <= SNCAST_RETRY_ATTEMPTS; attempt++)); do
     set +e
     out="$(
@@ -159,6 +185,28 @@ declare_contract() {
     status=$?
     set -e
     printf '%s\n' "${out}" >&2
+    if [[ "${out}" == *"already declared"* ]]; then
+      class_hash="$(
+        cd "${CONTRACTS_DIR}" &&
+          sncast utils class-hash --contract-name "${name}" --package zylith_protocol 2>/dev/null |
+            sed -n 's/^Class Hash:[[:space:]]*//p' |
+            head -1
+      )"
+      if [[ -n "${class_hash}" ]]; then
+        printf '%s' "${class_hash}"
+        return 0
+      fi
+    fi
+    class_hash="$(
+      printf '%s\n' "${out}" |
+        tr -d '\r' |
+        sed -n 's/^.*Contract with class hash \(0x[0-9a-fA-F]*\) is already declared.*$/\1/p' |
+        head -1
+    )"
+    if [[ -n "${class_hash}" ]]; then
+      printf '%s' "${class_hash}"
+      return 0
+    fi
     hard_error=false
     if [[ "${out}" == *"Error:"* && "${out}" != *"already declared"* ]]; then
       hard_error=true
@@ -169,13 +217,6 @@ declare_contract() {
       class_hash="$(printf '%s\n' "${out}" | sed -n 's/^Class Hash:[[:space:]]*//p' | head -1)"
       if [[ -z "${class_hash}" ]]; then
         class_hash="$(printf '%s\n' "${out}" | sed -n 's/^Already declared class hash:[[:space:]]*//p' | head -1)"
-      fi
-      if [[ -z "${class_hash}" ]]; then
-        class_hash="$(
-          printf '%s\n' "${out}" |
-            sed -n 's/^Error: Contract with class hash \([^[:space:]]*\) is already declared$/\1/p' |
-            head -1
-        )"
       fi
       if [[ -n "${class_hash}" ]]; then
         printf '%s' "${class_hash}"
@@ -275,6 +316,28 @@ invoke_contract() {
   return 1
 }
 
+require_token_decimals() {
+  local token_address="$1"
+  local symbol="$2"
+  local expected_decimals="$3"
+  local out actual_decimals
+  out="$(
+    cd "${CONTRACTS_DIR}" &&
+      sncast call --url "${RPC_URL}" --contract-address "${token_address}" --function decimals 2>&1
+  )"
+  actual_decimals="$(printf '%s\n' "${out}" | sed -n 's/^Response Raw: \[0x\([0-9a-fA-F]*\)\]$/\1/p' | head -1)"
+  if [[ -z "${actual_decimals}" ]]; then
+    echo "failed to read ${symbol} decimals from ${token_address}" >&2
+    printf '%s\n' "${out}" >&2
+    exit 1
+  fi
+  actual_decimals="$((16#${actual_decimals}))"
+  if [[ "${actual_decimals}" -ne "${expected_decimals}" ]]; then
+    echo "${symbol} decimals mismatch: expected ${expected_decimals}, got ${actual_decimals}" >&2
+    exit 1
+  fi
+}
+
 mkdir -p "${ROOT_DIR}/.deploy"
 
 ACCOUNT_ADDRESS="$(read_account_field address)"
@@ -292,6 +355,7 @@ INITIAL_NULLIFIER_ROOT="${ZYLITH_INITIAL_NULLIFIER_ROOT:-$(read_manifest_field 0
 INITIAL_RENEWAL_ROOT="${ZYLITH_INITIAL_RENEWAL_ROOT:-$(read_manifest_field 0 proof initial_renewal_root)}"
 INITIAL_FEE_ROOT="${ZYLITH_INITIAL_FEE_ROOT:-$(read_manifest_field 0 proof initial_fee_root)}"
 NATIVE_PROOF_PROGRAM_HASH="${ZYLITH_NATIVE_PROOF_PROGRAM_HASH:-}"
+EXPECTED_NATIVE_PROOF_PROGRAM_HASH="${ZYLITH_EXPECTED_NATIVE_PROOF_PROGRAM_HASH:-}"
 NATIVE_PROOF_PROGRAM_ADDRESS="${ZYLITH_NATIVE_PROOF_PROGRAM_ADDRESS:-}"
 STARKNET_OS_CONFIG_HASH="${ZYLITH_STARKNET_OS_CONFIG_HASH:-}"
 NATIVE_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS="${ZYLITH_NATIVE_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS:-}"
@@ -307,12 +371,23 @@ NATIVE_ADMISSION_STATEMENT_PROGRAM_ADDRESS="${ZYLITH_NATIVE_ADMISSION_STATEMENT_
 NATIVE_AUCTION_RESULT_STATEMENT_PROGRAM_ADDRESS="${ZYLITH_NATIVE_AUCTION_RESULT_STATEMENT_PROGRAM_ADDRESS:-}"
 NATIVE_MULTI_PAIR_STATEMENT_PROGRAM_ADDRESS="${ZYLITH_NATIVE_MULTI_PAIR_STATEMENT_PROGRAM_ADDRESS:-}"
 NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS="${ZYLITH_NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS:-}"
+NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS="${ZYLITH_NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS:-}"
 PROTOCOL_FEE_RECIPIENT="${ZYLITH_PROTOCOL_FEE_RECIPIENT:-${ZYLITH_PROTOCOL_TREASURY_ADDRESS:-${ACCOUNT_ADDRESS}}}"
 PAUSE_GUARDIAN_ADDRESS="${ZYLITH_PAUSE_GUARDIAN_ADDRESS:-${ACCOUNT_ADDRESS}}"
-SETTLEMENT_ACCOUNT_ADDRESS="${ZYLITH_SETTLEMENT_ACCOUNT_ADDRESS:-${ACCOUNT_ADDRESS}}"
+SETTLEMENT_ACCOUNT_ADDRESS="${ZYLITH_SETTLEMENT_ACCOUNT_ADDRESS:-}"
 SETTLEMENT_ACCOUNT_PRIVATE_KEY="${ZYLITH_SETTLEMENT_ACCOUNT_PRIVATE_KEY:-}"
 if [[ -z "${NATIVE_PROOF_PROGRAM_HASH}" ]]; then
   NATIVE_PROOF_PROGRAM_HASH="$(read_manifest_field "" proof proof_program_hash)"
+fi
+if [[ -z "${EXPECTED_NATIVE_PROOF_PROGRAM_HASH}" ]]; then
+  echo "ZYLITH_EXPECTED_NATIVE_PROOF_PROGRAM_HASH is required for fail-closed proof configuration" >&2
+  exit 1
+fi
+normalized_proof_program_hash="$(printf '%s' "${NATIVE_PROOF_PROGRAM_HASH}" | tr '[:upper:]' '[:lower:]')"
+normalized_expected_proof_program_hash="$(printf '%s' "${EXPECTED_NATIVE_PROOF_PROGRAM_HASH}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${normalized_proof_program_hash}" != "${normalized_expected_proof_program_hash}" ]]; then
+  echo "resolved proof program hash does not match ZYLITH_EXPECTED_NATIVE_PROOF_PROGRAM_HASH" >&2
+  exit 1
 fi
 if [[ -z "${NATIVE_PROOF_PROGRAM_ADDRESS}" ]]; then
   NATIVE_PROOF_PROGRAM_ADDRESS="$(read_manifest_field "" proof proof_program_address)"
@@ -356,6 +431,9 @@ fi
 if [[ -z "${NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS}" ]]; then
   NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS="$(read_manifest_field "" proof multi_pair_settlement_statement_program_address)"
 fi
+if [[ -z "${NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS}" ]]; then
+  NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS="$(read_manifest_field "" proof external_match_authorization_statement_program_address)"
+fi
 if [[ ! "${PROOF_VALIDITY_BLOCKS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "ZYLITH_PROOF_VALIDITY_BLOCKS must be a positive integer" >&2
   exit 1
@@ -373,25 +451,32 @@ if [[ -z "${NATIVE_PROOF_PROGRAM_ADDRESS}" ]]; then
   exit 1
 fi
 if [[ -z "${NATIVE_MULTI_PAIR_STATEMENT_PROGRAM_ADDRESS}" ]]; then
-  echo "ZYLITH_NATIVE_MULTI_PAIR_STATEMENT_PROGRAM_ADDRESS or proof.multi_pair_statement_program_address is required for multi-pair optimality proofs" >&2
+  echo "ZYLITH_NATIVE_MULTI_PAIR_STATEMENT_PROGRAM_ADDRESS or proof.multi_pair_statement_program_address is required for multi-pair candidate-set proofs" >&2
   exit 1
 fi
 if [[ -z "${NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS}" ]]; then
   echo "ZYLITH_NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS or proof.multi_pair_settlement_statement_program_address is required for grouped multi-pair settlement proofs" >&2
   exit 1
 fi
+if [[ -z "${NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS}" ]]; then
+  echo "ZYLITH_NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS or proof.external_match_authorization_statement_program_address is required for proof-authorized external matching" >&2
+  exit 1
+fi
 if [[ -z "${STARKNET_OS_CONFIG_HASH}" || "${STARKNET_OS_CONFIG_HASH}" == "0" || "${STARKNET_OS_CONFIG_HASH}" == "0x0" ]]; then
   echo "ZYLITH_STARKNET_OS_CONFIG_HASH is required so AuctionVerifier can bind proof_facts.starknet_os_config_hash" >&2
   exit 1
 fi
+if [[ -z "${SETTLEMENT_ACCOUNT_ADDRESS}" ]]; then
+  echo "ZYLITH_SETTLEMENT_ACCOUNT_ADDRESS is required" >&2
+  exit 1
+fi
+if [[ "${SETTLEMENT_ACCOUNT_ADDRESS}" == "${ACCOUNT_ADDRESS}" ]]; then
+  echo "ZYLITH_SETTLEMENT_ACCOUNT_ADDRESS must differ from the deployer account" >&2
+  exit 1
+fi
 if [[ -z "${SETTLEMENT_ACCOUNT_PRIVATE_KEY}" ]]; then
-  if [[ "${SETTLEMENT_ACCOUNT_ADDRESS}" == "${ACCOUNT_ADDRESS}" ]]; then
-    read_deployer_private_key
-    SETTLEMENT_ACCOUNT_PRIVATE_KEY="${PRIVATE_KEY}"
-  else
-    echo "ZYLITH_SETTLEMENT_ACCOUNT_PRIVATE_KEY is required when ZYLITH_SETTLEMENT_ACCOUNT_ADDRESS differs from the deployer account" >&2
-    exit 1
-  fi
+  echo "ZYLITH_SETTLEMENT_ACCOUNT_PRIVATE_KEY is required" >&2
+  exit 1
 fi
 BATCH_REGISTRAR_ADDRESS="${ZYLITH_BATCH_REGISTRAR_ACCOUNT_ADDRESS:-}"
 BATCH_REGISTRAR_PRIVATE_KEY="${ZYLITH_BATCH_REGISTRAR_PRIVATE_KEY:-}"
@@ -403,17 +488,20 @@ STRK_ASSET_ID="$(compute_asset_id STRK)"
 ETH_ASSET_ID="$(compute_asset_id ETH)"
 USDC_ASSET_ID="$(compute_asset_id USDC)"
 STRKBTC_ASSET_ID="$(compute_asset_id strkBTC)"
-WBTC_ASSET_ID="$(compute_asset_id WBTC)"
-USDT_ASSET_ID="$(compute_asset_id USDT)"
 
 require_nonzero_address ZYLITH_STRK_TOKEN_ADDRESS "${STRK_TOKEN_ADDRESS}"
 require_nonzero_address ZYLITH_ETH_TOKEN_ADDRESS "${ETH_TOKEN_ADDRESS}"
 require_nonzero_address ZYLITH_USDC_TOKEN_ADDRESS "${USDC_TOKEN_ADDRESS}"
 require_nonzero_address ZYLITH_STRKBTC_TOKEN_ADDRESS "${STRKBTC_TOKEN_ADDRESS}"
-require_nonzero_address ZYLITH_WBTC_TOKEN_ADDRESS "${WBTC_TOKEN_ADDRESS}"
-require_nonzero_address ZYLITH_USDT_TOKEN_ADDRESS "${USDT_TOKEN_ADDRESS}"
+require_token_decimals "${STRK_TOKEN_ADDRESS}" STRK 18
+require_token_decimals "${ETH_TOKEN_ADDRESS}" ETH 18
+require_token_decimals "${USDC_TOKEN_ADDRESS}" USDC 6
+require_token_decimals "${STRKBTC_TOKEN_ADDRESS}" strkBTC 18
 require_nonzero_address ZYLITH_PROTOCOL_FEE_RECIPIENT "${PROTOCOL_FEE_RECIPIENT}"
 require_nonzero_address ZYLITH_PAUSE_GUARDIAN_ADDRESS "${PAUSE_GUARDIAN_ADDRESS}"
+require_nonzero_address ZYLITH_REFERENCE_PRICE_SIGNER_PUBLIC_KEY "${REFERENCE_PRICE_SIGNER_PUBLIC_KEY}"
+require_nonzero_address ZYLITH_EKUBO_CORE_ADDRESS "${EKUBO_CORE_ADDRESS}"
+require_nonzero_address ZYLITH_EKUBO_ROUTER_ADDRESS "${EKUBO_ROUTER_ADDRESS}"
 
 (
   cd "${CONTRACTS_DIR}" &&
@@ -423,29 +511,68 @@ require_nonzero_address ZYLITH_PAUSE_GUARDIAN_ADDRESS "${PAUSE_GUARDIAN_ADDRESS}
 COMMITMENT_REGISTRY_CLASS="$(declare_contract CommitmentRegistry)"
 BATCH_REGISTRY_CLASS="$(declare_contract BatchRegistry)"
 PRIVACY_DEPOSIT_BRIDGE_CLASS="$(declare_contract PrivacyDepositBridge)"
+EXTERNAL_MATCH_EXECUTOR_CLASS="$(declare_contract ExternalMatchExecutor)"
+EKUBO_EXTERNAL_MATCH_ROUTER_CLASS="$(declare_contract EkuboExternalMatchRouter)"
 AUCTION_VERIFIER_CLASS="$(declare_contract AuctionVerifier)"
 
-COMMITMENT_REGISTRY_ADDRESS="$(
-  deploy_contract "${COMMITMENT_REGISTRY_CLASS}" --constructor-calldata "${ACCOUNT_ADDRESS}"
-)"
-BATCH_REGISTRY_ADDRESS="$(
-  deploy_contract "${BATCH_REGISTRY_CLASS}" --constructor-calldata "${ACCOUNT_ADDRESS}" "${BATCH_REGISTRAR_ADDRESS}"
-)"
-PRIVACY_DEPOSIT_BRIDGE_ADDRESS="$(
-  deploy_contract "${PRIVACY_DEPOSIT_BRIDGE_CLASS}" --constructor-calldata \
-    "${ACCOUNT_ADDRESS}" \
-    "${COMMITMENT_REGISTRY_ADDRESS}" \
-    "${PRIVACY_POOL_ADDRESS}"
-)"
-AUCTION_VERIFIER_ADDRESS="$(
-  deploy_contract "${AUCTION_VERIFIER_CLASS}" --constructor-calldata \
-    "${ACCOUNT_ADDRESS}" \
-    "${BATCH_REGISTRY_ADDRESS}" \
-    "${INITIAL_NOTE_ROOT}" \
-    "${INITIAL_NULLIFIER_ROOT}" \
-    "${INITIAL_RENEWAL_ROOT}" \
-    "${INITIAL_FEE_ROOT}"
-)"
+COMMITMENT_REGISTRY_ADDRESS="${ZYLITH_REUSE_COMMITMENT_REGISTRY_ADDRESS:-}"
+if [[ -z "${COMMITMENT_REGISTRY_ADDRESS}" ]]; then
+  COMMITMENT_REGISTRY_ADDRESS="$(
+    deploy_contract "${COMMITMENT_REGISTRY_CLASS}" --constructor-calldata "${ACCOUNT_ADDRESS}"
+  )"
+fi
+BATCH_REGISTRY_ADDRESS="${ZYLITH_REUSE_BATCH_REGISTRY_ADDRESS:-}"
+if [[ -z "${BATCH_REGISTRY_ADDRESS}" ]]; then
+  BATCH_REGISTRY_ADDRESS="$(
+    deploy_contract "${BATCH_REGISTRY_CLASS}" --constructor-calldata "${ACCOUNT_ADDRESS}" "${BATCH_REGISTRAR_ADDRESS}"
+  )"
+fi
+PRIVACY_DEPOSIT_BRIDGE_ADDRESS="${ZYLITH_REUSE_PRIVACY_DEPOSIT_BRIDGE_ADDRESS:-}"
+if [[ -z "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}" ]]; then
+  PRIVACY_DEPOSIT_BRIDGE_ADDRESS="$(
+    deploy_contract "${PRIVACY_DEPOSIT_BRIDGE_CLASS}" --constructor-calldata \
+      "${ACCOUNT_ADDRESS}" \
+      "${COMMITMENT_REGISTRY_ADDRESS}" \
+      "${PRIVACY_POOL_ADDRESS}"
+  )"
+fi
+AUCTION_VERIFIER_ADDRESS="${ZYLITH_REUSE_AUCTION_VERIFIER_ADDRESS:-}"
+if [[ -z "${AUCTION_VERIFIER_ADDRESS}" ]]; then
+  AUCTION_VERIFIER_ADDRESS="$(
+    deploy_contract "${AUCTION_VERIFIER_CLASS}" --constructor-calldata \
+      "${ACCOUNT_ADDRESS}" \
+      "${BATCH_REGISTRY_ADDRESS}" \
+      "${INITIAL_NOTE_ROOT}" \
+      "${INITIAL_NULLIFIER_ROOT}" \
+      "${INITIAL_RENEWAL_ROOT}" \
+      "${INITIAL_FEE_ROOT}"
+  )"
+fi
+EXTERNAL_MATCH_EXECUTOR_ADDRESS="${ZYLITH_REUSE_EXTERNAL_MATCH_EXECUTOR_ADDRESS:-}"
+if [[ -z "${EXTERNAL_MATCH_EXECUTOR_ADDRESS}" ]]; then
+  EXTERNAL_MATCH_EXECUTOR_ADDRESS="$(
+    deploy_contract "${EXTERNAL_MATCH_EXECUTOR_CLASS}" --constructor-calldata \
+      "${ACCOUNT_ADDRESS}" \
+      "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}" \
+      "${AUCTION_VERIFIER_ADDRESS}" \
+      "${AUCTION_VERIFIER_ADDRESS}"
+  )"
+fi
+EKUBO_EXTERNAL_MATCH_ROUTER_ADDRESS="${ZYLITH_REUSE_EKUBO_EXTERNAL_MATCH_ROUTER_ADDRESS:-}"
+if [[ -z "${EKUBO_EXTERNAL_MATCH_ROUTER_ADDRESS}" ]]; then
+  EKUBO_EXTERNAL_MATCH_ROUTER_ADDRESS="$(
+    deploy_contract "${EKUBO_EXTERNAL_MATCH_ROUTER_CLASS}" --constructor-calldata \
+      "${EKUBO_CORE_ADDRESS}" \
+      "${EKUBO_ROUTER_ADDRESS}" \
+      "${EXTERNAL_MATCH_EXECUTOR_ADDRESS}"
+  )"
+fi
+require_nonzero_address ZYLITH_REUSE_COMMITMENT_REGISTRY_ADDRESS "${COMMITMENT_REGISTRY_ADDRESS}"
+require_nonzero_address ZYLITH_REUSE_BATCH_REGISTRY_ADDRESS "${BATCH_REGISTRY_ADDRESS}"
+require_nonzero_address ZYLITH_REUSE_PRIVACY_DEPOSIT_BRIDGE_ADDRESS "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}"
+require_nonzero_address ZYLITH_REUSE_AUCTION_VERIFIER_ADDRESS "${AUCTION_VERIFIER_ADDRESS}"
+require_nonzero_address ZYLITH_REUSE_EXTERNAL_MATCH_EXECUTOR_ADDRESS "${EXTERNAL_MATCH_EXECUTOR_ADDRESS}"
+require_nonzero_address ZYLITH_REUSE_EKUBO_EXTERNAL_MATCH_ROUTER_ADDRESS "${EKUBO_EXTERNAL_MATCH_ROUTER_ADDRESS}"
 NATIVE_PROOF_ACCOUNT_ADDRESS="${ZYLITH_NATIVE_PROOF_ACCOUNT_ADDRESS:-${SETTLEMENT_ACCOUNT_ADDRESS}}"
 
 invoke_contract "${COMMITMENT_REGISTRY_ADDRESS}" set_batch_registrar "${BATCH_REGISTRAR_ADDRESS}"
@@ -453,11 +580,14 @@ invoke_contract "${COMMITMENT_REGISTRY_ADDRESS}" set_privacy_deposit_bridge "${P
 invoke_contract "${COMMITMENT_REGISTRY_ADDRESS}" set_auction_verifier "${AUCTION_VERIFIER_ADDRESS}"
 invoke_contract "${BATCH_REGISTRY_ADDRESS}" set_auction_verifier "${AUCTION_VERIFIER_ADDRESS}"
 invoke_contract "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}" set_auction_verifier "${AUCTION_VERIFIER_ADDRESS}"
+invoke_contract "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}" set_external_match_executor "${EXTERNAL_MATCH_EXECUTOR_ADDRESS}"
 invoke_contract "${AUCTION_VERIFIER_ADDRESS}" set_pause_guardian "${PAUSE_GUARDIAN_ADDRESS}"
 invoke_contract "${AUCTION_VERIFIER_ADDRESS}" set_authorized_settlement_account "${SETTLEMENT_ACCOUNT_ADDRESS}"
 invoke_contract "${AUCTION_VERIFIER_ADDRESS}" set_shielded_asset_adapter "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}"
+invoke_contract "${AUCTION_VERIFIER_ADDRESS}" set_external_match_executor "${EXTERNAL_MATCH_EXECUTOR_ADDRESS}"
 invoke_contract "${AUCTION_VERIFIER_ADDRESS}" set_deposit_root_registrar "${COMMITMENT_REGISTRY_ADDRESS}"
 invoke_contract "${AUCTION_VERIFIER_ADDRESS}" set_protocol_fee_recipient "${PROTOCOL_FEE_RECIPIENT}"
+invoke_contract "${AUCTION_VERIFIER_ADDRESS}" set_reference_price_signer "${REFERENCE_PRICE_SIGNER_PUBLIC_KEY}"
 invoke_contract "${AUCTION_VERIFIER_ADDRESS}" set_proof_program "${NATIVE_PROOF_PROGRAM_ADDRESS}" "${NATIVE_PROOF_PROGRAM_HASH}"
 for statement_kind in \
   "0x41444d495353494f4e" \
@@ -472,6 +602,7 @@ for statement_kind in \
 	  "0x4147475245474154455f534554544c454d454e54" \
   "0x5749544844524157414c" \
   "0x4d554c54495f50414952" \
+  "0x45585445524e414c5f4d415443485f41555448" \
   "0x4d554c54495f504149525f534554544c454d454e54"; do
   invoke_contract \
     "${AUCTION_VERIFIER_ADDRESS}" \
@@ -486,17 +617,13 @@ invoke_contract "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}" register_supported_asset "${
 invoke_contract "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}" register_supported_asset "${ETH_ASSET_ID}" "${ETH_TOKEN_ADDRESS}"
 invoke_contract "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}" register_supported_asset "${USDC_ASSET_ID}" "${USDC_TOKEN_ADDRESS}"
 invoke_contract "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}" register_supported_asset "${STRKBTC_ASSET_ID}" "${STRKBTC_TOKEN_ADDRESS}"
-invoke_contract "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}" register_supported_asset "${WBTC_ASSET_ID}" "${WBTC_TOKEN_ADDRESS}"
-invoke_contract "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}" register_supported_asset "${USDT_ASSET_ID}" "${USDT_TOKEN_ADDRESS}"
 
 for pair_fee in \
   "STRK/USDC:4" \
-  "ETH/USDC:4" \
   "strkBTC/USDC:4" \
+  "strkBTC/ETH:4" \
   "STRK/ETH:4" \
-  "STRK/strkBTC:4" \
-  "WBTC/strkBTC:1" \
-  "USDC/USDT:1"; do
+  "STRK/strkBTC:4"; do
   IFS=: read -r pair_id taker_fee <<<"${pair_fee}"
   invoke_contract \
     "${AUCTION_VERIFIER_ADDRESS}" \
@@ -519,6 +646,8 @@ python3 - "${ROOT_DIR}" "${EXISTING_MANIFEST_PATH}" "${RPC_URL}" "${PUBLIC_RPC_U
   "${COMMITMENT_REGISTRY_ADDRESS}" \
   "${BATCH_REGISTRY_ADDRESS}" \
   "${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}" \
+  "${EXTERNAL_MATCH_EXECUTOR_ADDRESS}" \
+  "${EKUBO_EXTERNAL_MATCH_ROUTER_ADDRESS}" \
   "${AUCTION_VERIFIER_ADDRESS}" \
   "${NATIVE_PROOF_PROGRAM_ADDRESS}" \
   "${BATCH_REGISTRAR_ADDRESS}" \
@@ -529,14 +658,10 @@ python3 - "${ROOT_DIR}" "${EXISTING_MANIFEST_PATH}" "${RPC_URL}" "${PUBLIC_RPC_U
   "${ETH_ASSET_ID}" \
   "${USDC_ASSET_ID}" \
   "${STRKBTC_ASSET_ID}" \
-  "${WBTC_ASSET_ID}" \
-  "${USDT_ASSET_ID}" \
   "${STRK_TOKEN_ADDRESS}" \
   "${ETH_TOKEN_ADDRESS}" \
   "${USDC_TOKEN_ADDRESS}" \
   "${STRKBTC_TOKEN_ADDRESS}" \
-  "${WBTC_TOKEN_ADDRESS}" \
-  "${USDT_TOKEN_ADDRESS}" \
   "${PRIVACY_POOL_ADDRESS}" \
   "${PROOF_VALIDITY_BLOCKS}" \
   "${OUTPUT_CLAIM_DELAY_SECONDS}" \
@@ -559,6 +684,7 @@ python3 - "${ROOT_DIR}" "${EXISTING_MANIFEST_PATH}" "${RPC_URL}" "${PUBLIC_RPC_U
   "${NATIVE_AUCTION_RESULT_STATEMENT_PROGRAM_ADDRESS}" \
   "${NATIVE_MULTI_PAIR_STATEMENT_PROGRAM_ADDRESS}" \
   "${NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS}" \
+  "${NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS}" \
   "${NATIVE_PROOF_ACCOUNT_ADDRESS}" \
   "${SETTLEMENT_ACCOUNT_ADDRESS}" \
   "${SETTLEMENT_ACCOUNT_PRIVATE_KEY}" \
@@ -576,6 +702,8 @@ from pathlib import Path
     commitment_registry,
     batch_registry,
     privacy_deposit_bridge,
+    external_match_executor,
+    ekubo_external_match_router,
     auction_verifier,
     native_proof_program_address,
     batch_registrar_address,
@@ -586,14 +714,10 @@ from pathlib import Path
     eth_asset_id,
     usdc_asset_id,
     strkbtc_asset_id,
-    wbtc_asset_id,
-    usdt_asset_id,
     strk_token_address,
     eth_token_address,
     usdc_token_address,
     strkbtc_token_address,
-    wbtc_token_address,
-    usdt_token_address,
     privacy_pool,
     proof_validity_blocks,
     output_claim_delay_seconds,
@@ -616,6 +740,7 @@ from pathlib import Path
     auction_result_statement_program_address,
     multi_pair_statement_program_address,
     multi_pair_settlement_statement_program_address,
+    external_match_authorization_statement_program_address,
     native_proof_account_address,
     settlement_account_address,
     settlement_account_private_key,
@@ -635,6 +760,8 @@ contracts = {
     "batch_registry": batch_registry,
     "shielded_asset_adapter": privacy_deposit_bridge,
     "privacy_deposit_bridge": privacy_deposit_bridge,
+    "external_match_executor": external_match_executor,
+    "ekubo_external_match_router": ekubo_external_match_router,
     "auction_verifier": auction_verifier,
 }
 
@@ -643,8 +770,6 @@ token_addresses = {
     "ETH": eth_token_address,
     "USDC": usdc_token_address,
     "strkBTC": strkbtc_token_address,
-    "WBTC": wbtc_token_address,
-    "USDT": usdt_token_address,
 }
 
 source_funding = manifest.get("funding") if isinstance(manifest.get("funding"), dict) else {}
@@ -738,11 +863,6 @@ proof["settlement_statement_schema"] = 1
 proof["auction_statement_type"] = 2
 proof["auction_statement_schema"] = 1
 proof["settlement_entrypoint"] = "submit_settlement_with_proof_facts"
-native_proof_entrypoint = os.environ.get(
-    "ZYLITH_NATIVE_PROOF_ENTRYPOINT",
-    "compile_settlement_proof",
-).strip() or "compile_settlement_proof"
-proof["proof_entrypoint"] = native_proof_entrypoint
 proof["proof_program_address"] = native_proof_program_address
 proof["proof_program_hash"] = proof_program_hash
 statement_proof_program_hashes = {
@@ -759,6 +879,7 @@ statement_proof_program_hashes = {
     "WITHDRAWAL": proof_program_hash,
     "MULTI_PAIR": proof_program_hash,
     "MULTI_PAIR_SETTLEMENT": proof_program_hash,
+    "EXTERNAL_MATCH_AUTH": proof_program_hash,
 }
 proof["statement_proof_program_hashes"] = statement_proof_program_hashes
 proof["admission_proof_program_hash"] = proof_program_hash
@@ -774,6 +895,7 @@ proof["aggregate_settlement_proof_program_hash"] = proof_program_hash
 proof["withdrawal_proof_program_hash"] = proof_program_hash
 proof["multi_pair_proof_program_hash"] = proof_program_hash
 proof["multi_pair_settlement_proof_program_hash"] = proof_program_hash
+proof["external_match_authorization_proof_program_hash"] = proof_program_hash
 proof["starknet_os_config_hash"] = starknet_os_config_hash
 if settlement_statement_program_address:
     proof["settlement_statement_program_address"] = settlement_statement_program_address
@@ -801,6 +923,8 @@ if multi_pair_statement_program_address:
     proof["multi_pair_statement_program_address"] = multi_pair_statement_program_address
 if multi_pair_settlement_statement_program_address:
     proof["multi_pair_settlement_statement_program_address"] = multi_pair_settlement_statement_program_address
+if external_match_authorization_statement_program_address:
+    proof["external_match_authorization_statement_program_address"] = external_match_authorization_statement_program_address
 proof["proof_account_address"] = native_proof_account_address
 proof["settlement_account_address"] = settlement_account_address
 proof["deposit_root_registrar_address"] = commitment_registry
@@ -825,22 +949,25 @@ proof["native_tx_prover_ohttp_enabled"] = True
 
 asset_defs = {
     "STRK": {"token": strk_token_address, "decimals": 18, "pairs": ["STRK/ETH", "STRK/USDC", "STRK/strkBTC"]},
-    "ETH": {"token": eth_token_address, "decimals": 18, "pairs": ["STRK/ETH", "ETH/USDC"]},
-    "USDC": {"token": usdc_token_address, "decimals": 6, "pairs": ["STRK/USDC", "ETH/USDC", "strkBTC/USDC", "USDC/USDT"]},
-    "strkBTC": {"token": strkbtc_token_address, "decimals": 8, "pairs": ["STRK/strkBTC", "strkBTC/USDC", "WBTC/strkBTC"]},
-    "WBTC": {"token": wbtc_token_address, "decimals": 8, "pairs": ["WBTC/strkBTC"]},
-    "USDT": {"token": usdt_token_address, "decimals": 6, "pairs": ["USDC/USDT"]},
+    "ETH": {"token": eth_token_address, "decimals": 18, "pairs": ["STRK/ETH", "strkBTC/ETH"]},
+    "USDC": {"token": usdc_token_address, "decimals": 6, "pairs": ["STRK/USDC", "strkBTC/USDC"]},
+    "strkBTC": {"token": strkbtc_token_address, "decimals": 18, "pairs": ["STRK/strkBTC", "strkBTC/USDC", "strkBTC/ETH"]},
 }
 pair_defs = {
     "STRK/USDC": ("STRK", "USDC", 4),
-    "ETH/USDC": ("ETH", "USDC", 4),
     "strkBTC/USDC": ("strkBTC", "USDC", 4),
+    "strkBTC/ETH": ("strkBTC", "ETH", 4),
     "STRK/ETH": ("STRK", "ETH", 4),
     "STRK/strkBTC": ("STRK", "strkBTC", 4),
-    "WBTC/strkBTC": ("WBTC", "strkBTC", 1),
-    "USDC/USDT": ("USDC", "USDT", 1),
 }
-product_pair_ids = ",".join(pair_defs.keys())
+priced_pairs = {
+    "STRK/USDC",
+    "strkBTC/USDC",
+    "strkBTC/ETH",
+    "STRK/ETH",
+    "STRK/strkBTC",
+}
+product_pair_ids = ",".join(pair for pair in pair_defs if pair in priced_pairs)
 funding_assets = {}
 for symbol, info in asset_defs.items():
     asset = dict(funding_assets.get(symbol) or {})
@@ -848,7 +975,7 @@ for symbol, info in asset_defs.items():
     asset["token_address"] = info["token"]
     asset["rail_token_address"] = info["token"]
     asset["min_trade_amount"] = "1"
-    asset["enabled_pairs"] = info["pairs"]
+    asset["enabled_pairs"] = [pair for pair in info["pairs"] if pair in priced_pairs]
     funding_assets[symbol] = asset
 funding["assets"] = funding_assets
 
@@ -871,7 +998,8 @@ product = {
             "base_asset_id": base_asset,
             "quote_asset_id": quote_asset,
             "min_order_amount": "1",
-            "enabled": True,
+            "enabled": pair_id in priced_pairs,
+            "external_match_enabled": pair_id in priced_pairs,
             "taker_fee_bps": taker_fee,
             "heartbeat_cover_price": str(
                 ((manifest.get("product") or {}).get("pairs") or {}).get(pair_id, {}).get(
@@ -890,7 +1018,12 @@ deployment = {
 }
 release_commit = os.environ.get("ZYLITH_DEPLOYMENT_RELEASE_COMMIT", "").strip().lower()
 if release_commit:
+    if len(release_commit) != 40 or any(ch not in "0123456789abcdef" for ch in release_commit):
+        raise SystemExit("ZYLITH_DEPLOYMENT_RELEASE_COMMIT must be a 40-character lowercase hex commit")
     deployment["release_commit"] = release_commit
+else:
+    deployment["finalized"] = False
+    deployment.pop("release_commit", None)
 
 manifest.update(
     {
@@ -921,8 +1054,6 @@ manifest.update(
                     "ETH": eth_asset_id,
                     "USDC": usdc_asset_id,
                     "strkBTC": strkbtc_asset_id,
-                    "WBTC": wbtc_asset_id,
-                    "USDT": usdt_asset_id,
                 }.items()
                 if value
             },
@@ -939,10 +1070,12 @@ prover_env_lines = [
     f"ZYLITH_STARKNET_CHAIN_ID={chain_id}",
     f"ZYLITH_NATIVE_PROOF_ACCOUNT_ADDRESS={native_proof_account_address}",
     f"ZYLITH_NATIVE_PROOF_PROGRAM_ADDRESS={native_proof_program_address}",
-    f"ZYLITH_NATIVE_PROOF_ENTRYPOINT={native_proof_entrypoint}",
     f"ZYLITH_NATIVE_PROOF_PROGRAM_HASH={proof_program_hash}",
     f"ZYLITH_STARKNET_OS_CONFIG_HASH={starknet_os_config_hash}",
     f"ZYLITH_AUCTION_VERIFIER_ADDRESS={auction_verifier}",
+    f"ZYLITH_PRIVACY_DEPOSIT_BRIDGE_ADDRESS={privacy_deposit_bridge}",
+    f"ZYLITH_EXTERNAL_MATCH_EXECUTOR_ADDRESS={external_match_executor}",
+    f"ZYLITH_EKUBO_EXTERNAL_MATCH_ROUTER_ADDRESS={ekubo_external_match_router}",
     f"ZYLITH_DEPOSIT_NOTE_ROOT_REGISTRAR_ADDRESS={commitment_registry}",
     f"ZYLITH_BATCH_REGISTRAR_ACCOUNT_ADDRESS={batch_registrar_address}",
     f"ZYLITH_BATCH_REGISTRAR_PRIVATE_KEY={batch_registrar_private_key}",
@@ -954,8 +1087,22 @@ prover_env_lines = [
     f"ZYLITH_PROOF_VALIDITY_BLOCKS={proof_validity_blocks}",
     f"ZYLITH_OUTPUT_CLAIM_DELAY_SECONDS={output_claim_delay_seconds}",
     f"ZYLITH_PRODUCT_PAIRS={product_pair_ids}",
-    "ZYLITH_BATCH_WINDOW_MS=20000",
+    "ZYLITH_BATCH_WINDOW_MS=10000",
 ]
+reference_price_signer_public_key = os.environ.get(
+    "ZYLITH_REFERENCE_PRICE_SIGNER_PUBLIC_KEY", ""
+).strip()
+reference_price_signer_private_key = os.environ.get(
+    "ZYLITH_REFERENCE_PRICE_SIGNER_PRIVATE_KEY", ""
+).strip()
+if reference_price_signer_public_key:
+    prover_env_lines.append(
+        f"ZYLITH_REFERENCE_PRICE_SIGNER_PUBLIC_KEY={reference_price_signer_public_key}"
+    )
+if reference_price_signer_private_key:
+    prover_env_lines.append(
+        f"ZYLITH_REFERENCE_PRICE_SIGNER_PRIVATE_KEY={reference_price_signer_private_key}"
+    )
 if settlement_statement_program_address:
     prover_env_lines.append(
         f"ZYLITH_NATIVE_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS={settlement_statement_program_address}"
@@ -1008,19 +1155,30 @@ if multi_pair_settlement_statement_program_address:
     prover_env_lines.append(
         f"ZYLITH_NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS={multi_pair_settlement_statement_program_address}"
     )
+if external_match_authorization_statement_program_address:
+    prover_env_lines.append(
+        f"ZYLITH_NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS={external_match_authorization_statement_program_address}"
+    )
 prover_env_lines.insert(1, f"ZYLITH_NATIVE_TX_PROVER_URL={native_tx_prover_endpoint}")
 if native_tx_prover_ohttp_key_config_hex:
     prover_env_lines.append(
         f"ZYLITH_NATIVE_TX_PROVER_OHTTP_KEY_CONFIG_HEX={native_tx_prover_ohttp_key_config_hex}"
     )
-(root / ".deploy/sepolia.prover.env").write_text("\n".join(prover_env_lines + [""]))
+env_path = root / ".deploy/sepolia.prover.env"
+generated_keys = {line.split("=", 1)[0] for line in prover_env_lines}
+preserved_lines = []
+if env_path.exists():
+    for line in env_path.read_text().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        key = line.split("=", 1)[0]
+        if key not in generated_keys:
+            preserved_lines.append(line)
+env_path.write_text("\n".join(prover_env_lines + preserved_lines + [""]))
+env_path.chmod(0o600)
 PY
 
 python3 - "${ROOT_DIR}" \
-  "${WBTC_ASSET_ID}" \
-  "${USDT_ASSET_ID}" \
-  "${WBTC_TOKEN_ADDRESS}" \
-  "${USDT_TOKEN_ADDRESS}" \
   "${NATIVE_NULLIFIER_STATEMENT_PROGRAM_ADDRESS}" \
   "${NATIVE_RENEWAL_STATEMENT_PROGRAM_ADDRESS}" \
   "${NATIVE_NOTE_CONSOLIDATION_STATEMENT_PROGRAM_ADDRESS}" \
@@ -1029,6 +1187,7 @@ python3 - "${ROOT_DIR}" \
   "${NATIVE_AUCTION_RESULT_STATEMENT_PROGRAM_ADDRESS}" \
   "${NATIVE_MULTI_PAIR_STATEMENT_PROGRAM_ADDRESS}" \
   "${NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS}" \
+  "${NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS}" \
   "${PROTOCOL_FEE_RECIPIENT}" \
   "${PAUSE_GUARDIAN_ADDRESS}" <<'PY'
 import json
@@ -1037,10 +1196,6 @@ from pathlib import Path
 
 (
     root,
-    wbtc_asset_id,
-    usdt_asset_id,
-    wbtc_token_address,
-    usdt_token_address,
     nullifier_statement_program_address,
     renewal_statement_program_address,
     note_consolidation_statement_program_address,
@@ -1049,6 +1204,7 @@ from pathlib import Path
     auction_result_statement_program_address,
     multi_pair_statement_program_address,
     multi_pair_settlement_statement_program_address,
+    external_match_authorization_statement_program_address,
     protocol_fee_recipient,
     pause_guardian_address,
 ) = sys.argv[1:]
@@ -1059,31 +1215,38 @@ assets = {
     "STRK": {"asset_id": "STRK", "min_trade_amount": "1000000000000000000", "decimals": 18, "enabled": True},
     "ETH": {"asset_id": "ETH", "min_trade_amount": "1000000000000000", "decimals": 18, "enabled": True},
     "USDC": {"asset_id": "USDC", "min_trade_amount": "1000000", "decimals": 6, "enabled": True},
-    "strkBTC": {"asset_id": "strkBTC", "min_trade_amount": "100000", "decimals": 8, "enabled": True},
-    "WBTC": {"asset_id": "WBTC", "min_trade_amount": "100000", "decimals": 8, "enabled": True},
-    "USDT": {"asset_id": "USDT", "min_trade_amount": "1000000", "decimals": 6, "enabled": True},
+    "strkBTC": {"asset_id": "strkBTC", "min_trade_amount": "1000000000000000", "decimals": 18, "enabled": True},
 }
 
 pairs = {
     "STRK/USDC": ("STRK", "USDC", "1000000000000000000", "1000000000000000000", 4),
-    "ETH/USDC": ("ETH", "USDC", "1000000000000000", "1000000000000000000", 4),
-    "strkBTC/USDC": ("strkBTC", "USDC", "100000", "100000000", 4),
+    "strkBTC/USDC": ("strkBTC", "USDC", "1000000000000000", "1000000000000000000", 4),
+    "strkBTC/ETH": ("strkBTC", "ETH", "1000000000000000", "1000000000000000000", 4),
     "STRK/ETH": ("STRK", "ETH", "1000000000000000000", "1000000000000000000", 4),
     "STRK/strkBTC": ("STRK", "strkBTC", "1000000000000000000", "1000000000000000000", 4),
-    "WBTC/strkBTC": ("WBTC", "strkBTC", "100000", "100000000", 1),
-    "USDC/USDT": ("USDC", "USDT", "1000000", "1000000", 1),
+}
+priced_pairs = {
+    "STRK/USDC",
+    "strkBTC/USDC",
+    "strkBTC/ETH",
+    "STRK/ETH",
+    "STRK/strkBTC",
 }
 
 asset_pairs = {asset: [] for asset in assets}
 for pair_id, (base, quote, *_rest) in pairs.items():
+    if pair_id not in priced_pairs:
+        continue
     asset_pairs[base].append(pair_id)
     asset_pairs[quote].append(pair_id)
 
 def update_manifest(data):
     manifest = data.get("manifest", data)
     token_addresses = dict(manifest.get("token_addresses") or {})
-    token_addresses["WBTC"] = wbtc_token_address
-    token_addresses["USDT"] = usdt_token_address
+    token_addresses = {
+        symbol: token_addresses[symbol]
+        for symbol in assets
+    }
     manifest["token_addresses"] = token_addresses
 
     funding = dict(manifest.get("funding") or {})
@@ -1125,7 +1288,8 @@ def update_manifest(data):
                     )
                 ),
                 "taker_fee_bps": taker_fee_bps,
-                "enabled": True,
+                "enabled": pair_id in priced_pairs,
+                "external_match_enabled": pair_id in priced_pairs,
             }
             for pair_id, (
                 base,
@@ -1155,6 +1319,7 @@ def update_manifest(data):
             "WITHDRAWAL": proof_program_hash,
             "MULTI_PAIR": proof_program_hash,
             "MULTI_PAIR_SETTLEMENT": proof_program_hash,
+            "EXTERNAL_MATCH_AUTH": proof_program_hash,
         }
         proof["statement_proof_program_hashes"] = statement_proof_program_hashes
         proof["admission_proof_program_hash"] = proof_program_hash
@@ -1170,6 +1335,7 @@ def update_manifest(data):
         proof["withdrawal_proof_program_hash"] = proof_program_hash
         proof["multi_pair_proof_program_hash"] = proof_program_hash
         proof["multi_pair_settlement_proof_program_hash"] = proof_program_hash
+        proof["external_match_authorization_proof_program_hash"] = proof_program_hash
     if nullifier_statement_program_address:
         proof["nullifier_statement_program_address"] = nullifier_statement_program_address
     if renewal_statement_program_address:
@@ -1186,6 +1352,8 @@ def update_manifest(data):
         proof["multi_pair_statement_program_address"] = multi_pair_statement_program_address
     if multi_pair_settlement_statement_program_address:
         proof["multi_pair_settlement_statement_program_address"] = multi_pair_settlement_statement_program_address
+    if external_match_authorization_statement_program_address:
+        proof["external_match_authorization_statement_program_address"] = external_match_authorization_statement_program_address
 
     manifest["roles"] = {
         "protocol_fee_recipient": protocol_fee_recipient,
@@ -1200,11 +1368,6 @@ for path in [root / "client/public/deployment.json", root / ".deploy/sepolia-liv
     data = json.loads(path.read_text())
     data = update_manifest(data)
     if path.name == "sepolia-live.json":
-        data["asset_ids"] = {
-            **data.get("asset_ids", {}),
-            "WBTC": wbtc_asset_id,
-            "USDT": usdt_asset_id,
-        }
         data["token_addresses"] = data["manifest"]["token_addresses"]
     path.write_text(json.dumps(data, indent=2) + "\n")
 
@@ -1219,9 +1382,10 @@ if env_path.exists():
         "ZYLITH_NATIVE_AUCTION_RESULT_STATEMENT_PROGRAM_ADDRESS": auction_result_statement_program_address,
         "ZYLITH_NATIVE_MULTI_PAIR_STATEMENT_PROGRAM_ADDRESS": multi_pair_statement_program_address,
         "ZYLITH_NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS": multi_pair_settlement_statement_program_address,
+        "ZYLITH_NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS": external_match_authorization_statement_program_address,
         "ZYLITH_PROTOCOL_FEE_RECIPIENT": protocol_fee_recipient,
-        "ZYLITH_PRODUCT_PAIRS": ",".join(pairs.keys()),
-        "ZYLITH_BATCH_WINDOW_MS": "20000",
+        "ZYLITH_PRODUCT_PAIRS": ",".join(pair for pair in pairs if pair in priced_pairs),
+        "ZYLITH_BATCH_WINDOW_MS": "10000",
     }
     lines = []
     seen = set()
@@ -1246,6 +1410,7 @@ PrivacyDepositBridge: ${PRIVACY_DEPOSIT_BRIDGE_ADDRESS}
 AuctionVerifier: ${AUCTION_VERIFIER_ADDRESS}
 NativeProofProgram: ${NATIVE_PROOF_PROGRAM_ADDRESS}
 MultiPairSettlementStatementProgram: ${NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS}
+ExternalMatchAuthorizationStatementProgram: ${NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS}
 StarknetOSConfigHash: ${STARKNET_OS_CONFIG_HASH}
 SettlementAccount: ${SETTLEMENT_ACCOUNT_ADDRESS}
 ProtocolFeeRecipient: ${PROTOCOL_FEE_RECIPIENT}

@@ -14,10 +14,12 @@ use zylith_core::{
     build_admission_serialized_input, build_auction_result_serialized_input,
     build_multi_pair_serialized_input, build_multi_pair_settlement_serialized_input,
     build_multi_pair_settlement_witness, build_settlement_witness, build_stwo_serialized_input,
-    deposit_root_from_note, encrypt_output_note_for_owner,
-    note_recognition_public_key_from_raw_key_hex, nullifier_from_note_secret,
-    nullifier_sparse_update_witnesses_for_consumed_inputs, output_note_merkle_proof,
-    plan_multi_pair_netting, settlement_note_root_after_deposit_roots, sign_order_authorization,
+    deposit_root_from_note, encrypt_output_note_for_owner, note_accumulator_root_after_append,
+    note_accumulator_root_after_deposits, note_recognition_public_key_from_raw_key_hex,
+    nullifier_from_note_secret, nullifier_sparse_update_witnesses_for_consumed_inputs,
+    output_note_merkle_proof, output_note_merkle_root, plan_multi_pair_netting,
+    reference_price_attestation_commitment, reference_price_source_set_commitment,
+    sign_order_authorization, sign_reference_price_attestation,
     spend_auth_key_felt_from_raw_key_hex, spend_authority_from_raw_key_hex,
     withdraw_authority_from_raw_key_hex,
 };
@@ -176,19 +178,40 @@ fn build_smoke_arguments(statement: SmokeStatement) -> Result<Vec<String>, Box<d
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let reference_attestation = smoke_reference_attestation(
+        "0x999",
+        PairId("STRK/USDC".into()),
+        AssetId("STRK".into()),
+        AssetId("USDC".into()),
+        1,
+        1_000_000_000_000_000_000,
+        1,
+    )?;
+    let new_note_root = note_accumulator_root_after_append(
+        &[],
+        &output_note_merkle_root(&[], &output_bundle.bundle_commitment)?,
+    )?;
     let transcript = SettlementTranscript {
         batch_id,
         pair_id: PairId("STRK/USDC".into()),
         batch_epoch: 1,
+        auction_verifier_address: "0x999".into(),
         order_commitment_root,
         encrypted_order_set_commitment: "0x222".into(),
+        reference_price_attestation_commitment: reference_price_attestation_commitment(
+            &reference_attestation,
+        )?,
+        reference_price_signer: reference_attestation.signer_public_key.clone(),
+        reference_price_observed_at_unix_ms: reference_attestation.envelope.observed_at_unix_ms,
+        reference_price_valid_until_unix_ms: reference_attestation.valid_until_unix_ms,
         prior_note_root: "0x0".into(),
         prior_nullifier_root: "0x0".into(),
         prior_renewal_root: "0x0".into(),
         prior_fee_root: "0x0".into(),
+        new_note_root,
         new_nullifier_root: "0x0".into(),
         new_renewal_root: "0x0".into(),
-        clearing_price: 0,
+        clearing_price: 1,
         price_base_scale: 1_000_000_000_000_000_000,
         taker_fee_bps: 4,
         protocol_fee_recipient: "0x4010".into(),
@@ -210,6 +233,7 @@ fn build_smoke_arguments(statement: SmokeStatement) -> Result<Vec<String>, Box<d
         AssetId("STRK".into()),
         AssetId("USDC".into()),
         vec![],
+        reference_attestation,
     )?;
 
     match statement {
@@ -462,7 +486,7 @@ fn build_multi_pair_settlement_smoke_arguments() -> Result<Vec<String>, Box<dyn 
         .iter()
         .map(deposit_root_from_note)
         .collect::<Result<Vec<_>, _>>()?;
-    let prior_note_root = settlement_note_root_after_deposit_roots(&deposit_roots)?;
+    let prior_note_root = note_accumulator_root_after_deposits(&deposit_roots)?;
     let (_, new_nullifier_root, _) =
         nullifier_sparse_update_witnesses_for_consumed_inputs(&[], &consumed_inputs)?;
     let output_note_preimages = problem
@@ -483,16 +507,25 @@ fn build_multi_pair_settlement_smoke_arguments() -> Result<Vec<String>, Box<dyn 
             &output_note_preimages,
         )?;
 
-    let transcript = zylith_core::MultiPairSettlementTranscript {
+    let output_note_root =
+        output_note_merkle_root(&output_notes, &output_bundle.bundle_commitment)?;
+    let new_note_root = note_accumulator_root_after_append(&deposit_roots, &output_note_root)?;
+    let mut transcript = zylith_core::MultiPairSettlementTranscript {
         group_id: group_id.clone(),
         batch_epoch: 99,
+        auction_verifier_address: "0x999".into(),
         batch_bindings: vec![
             zylith_core::MultiPairSettlementBatchBinding {
                 batch_id: BatchId("batch-eth-usdc-99".into()),
                 pair_id: PairId("ETH/USDC".into()),
                 batch_epoch: 99,
                 order_commitment_root: "0x3111".into(),
+                admission_root: "0x4111".into(),
                 encrypted_order_set_commitment: "0x3211".into(),
+                reference_price_attestation_commitment: "0x1".into(),
+                reference_price_signer: "0x1".into(),
+                reference_price_observed_at_unix_ms: 1_000,
+                reference_price_valid_until_unix_ms: 6_000,
                 base_asset_id: AssetId("ETH".into()),
                 quote_asset_id: AssetId("USDC".into()),
                 price_base_scale: 1,
@@ -503,7 +536,12 @@ fn build_multi_pair_settlement_smoke_arguments() -> Result<Vec<String>, Box<dyn 
                 pair_id: PairId("ETH/STRK".into()),
                 batch_epoch: 99,
                 order_commitment_root: "0x3112".into(),
+                admission_root: "0x4112".into(),
                 encrypted_order_set_commitment: "0x3212".into(),
+                reference_price_attestation_commitment: "0x1".into(),
+                reference_price_signer: "0x1".into(),
+                reference_price_observed_at_unix_ms: 1_000,
+                reference_price_valid_until_unix_ms: 6_000,
                 base_asset_id: AssetId("ETH".into()),
                 quote_asset_id: AssetId("STRK".into()),
                 price_base_scale: 1,
@@ -514,7 +552,12 @@ fn build_multi_pair_settlement_smoke_arguments() -> Result<Vec<String>, Box<dyn 
                 pair_id: PairId("STRK/USDC".into()),
                 batch_epoch: 99,
                 order_commitment_root: "0x3113".into(),
+                admission_root: "0x4113".into(),
                 encrypted_order_set_commitment: "0x3213".into(),
+                reference_price_attestation_commitment: "0x1".into(),
+                reference_price_signer: "0x1".into(),
+                reference_price_observed_at_unix_ms: 1_000,
+                reference_price_valid_until_unix_ms: 6_000,
                 base_asset_id: AssetId("STRK".into()),
                 quote_asset_id: AssetId("USDC".into()),
                 price_base_scale: 1,
@@ -525,10 +568,12 @@ fn build_multi_pair_settlement_smoke_arguments() -> Result<Vec<String>, Box<dyn 
         prior_nullifier_root: "0x0".into(),
         prior_renewal_root: "0x0".into(),
         prior_fee_root: "0x0".into(),
+        new_note_root,
         new_nullifier_root,
         new_renewal_root: "0x0".into(),
         protocol_fee_recipient: "0x4010".into(),
         multi_pair_commitment,
+        external_match_settlements: vec![],
         matched_orders: problem
             .chosen
             .fills
@@ -618,13 +663,119 @@ fn build_multi_pair_settlement_smoke_arguments() -> Result<Vec<String>, Box<dyn 
             })
         })
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    let admission_order_summaries = matched_order_witnesses
+        .iter()
+        .map(|entry| zylith_core::MultiPairAdmissionOrderSummary {
+            batch_id: entry.batch_id.clone(),
+            order_commitment: entry.order_witness.order_commitment.clone(),
+            side: entry.order_witness.side,
+            order_type: entry.order_witness.order_type,
+            relay_mode: entry.order_witness.relay_mode.clone(),
+            limit_price: entry.order_witness.limit_price,
+            order_amount: entry.order_witness.order_amount,
+            min_fill: entry.order_witness.min_fill,
+            time_in_force: entry.order_witness.time_in_force,
+            execution_preference: entry.order_witness.execution_preference,
+            funding_note_amount: entry
+                .order_witness
+                .effective_funding_notes()
+                .iter()
+                .map(|note| note.amount)
+                .sum(),
+            funding_note_owner_public_key: entry
+                .order_witness
+                .funding_note
+                .owner_public_key
+                .clone(),
+        })
+        .collect::<Vec<_>>();
+    for binding in &mut transcript.batch_bindings {
+        let summaries = admission_order_summaries
+            .iter()
+            .filter(|summary| summary.batch_id == binding.batch_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        binding.order_commitment_root = zylith_core::hash::ordered_felt_list_commitment(
+            "zylith/batch-order-root",
+            &summaries
+                .iter()
+                .map(|summary| summary.order_commitment.0.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        binding.admission_root = zylith_core::multi_pair_admission_root_from_summaries(&summaries)?;
+    }
+    let reference_price_attestations = transcript
+        .batch_bindings
+        .iter_mut()
+        .enumerate()
+        .map(|(index, binding)| {
+            let midpoint_price = match binding.pair_id.0.as_str() {
+                "ETH/USDC" => 2_000,
+                "ETH/STRK" => 100,
+                "STRK/USDC" => 20,
+                _ => return Err("unexpected multi-pair smoke reference pair".into()),
+            };
+            let attestation = smoke_reference_attestation(
+                "0x999",
+                binding.pair_id.clone(),
+                binding.base_asset_id.clone(),
+                binding.quote_asset_id.clone(),
+                midpoint_price,
+                binding.price_base_scale,
+                index as u64 + 1,
+            )?;
+            binding.reference_price_attestation_commitment =
+                reference_price_attestation_commitment(&attestation)?;
+            binding.reference_price_signer = attestation.signer_public_key.clone();
+            binding.reference_price_observed_at_unix_ms = attestation.envelope.observed_at_unix_ms;
+            binding.reference_price_valid_until_unix_ms = attestation.valid_until_unix_ms;
+            Ok(attestation)
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
     let witness = build_multi_pair_settlement_witness(
         &transcript,
         "0x999",
         problem,
         matched_order_witnesses,
+        admission_order_summaries,
+        reference_price_attestations,
     )?;
     Ok(build_multi_pair_settlement_serialized_input(&witness)?)
+}
+
+fn smoke_reference_attestation(
+    verifier_address: &str,
+    pair_id: PairId,
+    base_asset_id: AssetId,
+    quote_asset_id: AssetId,
+    midpoint_price: u128,
+    price_base_scale: u128,
+    nonce: u64,
+) -> Result<zylith_core::ReferencePriceAttestation, Box<dyn Error>> {
+    let observed_at_unix_ms = 1_000;
+    let source_set_commitment = reference_price_source_set_commitment(&[
+        ("binance", midpoint_price),
+        ("coinbase", midpoint_price),
+        ("kraken", midpoint_price),
+    ])?;
+    Ok(sign_reference_price_attestation(
+        "0x12345",
+        verifier_address,
+        zylith_core::ReferencePriceEnvelope {
+            pair_id,
+            base_asset_id,
+            quote_asset_id,
+            midpoint_price,
+            lower_price: midpoint_price,
+            upper_price: midpoint_price,
+            price_base_scale,
+            source_count: 3,
+            observed_at_unix_ms,
+        },
+        &source_set_commitment,
+        observed_at_unix_ms + 5_000,
+        nonce,
+    )?)
 }
 
 type OutputBundleParts = (

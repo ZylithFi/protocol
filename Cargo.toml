@@ -1,5 +1,8 @@
 [workspace]
-members = ["core", "smoke"]
+members = [
+    "core",
+    "smoke",
+]
 resolver = "2"
 
 [workspace.package]

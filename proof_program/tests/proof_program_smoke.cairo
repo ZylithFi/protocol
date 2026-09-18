@@ -161,7 +161,7 @@ fn deploy_auction_proof_program_with(
         renewal_statement_program.into(), note_consolidation_statement_program.into(),
         withdrawal_statement_program.into(), admission_statement_program.into(),
         auction_result_statement_program.into(), multi_pair_statement_program.into(),
-        multi_pair_settlement_statement_program.into(),
+        multi_pair_statement_program.into(), multi_pair_settlement_statement_program.into(),
     ];
     let (address, _) = class.deploy(@calldata).unwrap_syscall();
     address
@@ -347,93 +347,6 @@ fn withdrawal_message_hash_matches_native_payload_binding() {
         proof_program_address, auction_verifier, withdrawal_commitment,
     );
     assert(actual == expected, 'BAD_WITHDRAW_HASH');
-}
-
-#[test]
-fn compile_settlement_proof_accepts_known_good_statement_fixture() {
-    let proof_program_address = deploy_proof_program_with_mock_statements();
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let auction_verifier = as_address(0x456);
-    let empty_witness = array![];
-
-    let actual = proof_program.compile_settlement_proof(auction_verifier, empty_witness.span());
-    let expected = expected_settlement_proof_message_hash(
-        proof_program_address, auction_verifier, 0xaaa,
-    );
-    assert(actual == expected, 'BAD_COMPILE_SETTLE');
-}
-
-#[test]
-fn compile_nullifier_proof_accepts_known_good_statement_fixture() {
-    let proof_program_address = deploy_proof_program_with_mock_statements();
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let auction_verifier = as_address(0x456);
-    let empty_witness = array![];
-
-    let actual = proof_program.compile_nullifier_proof(auction_verifier, empty_witness.span());
-    let expected = expected_nullifier_proof_message_hash(
-        proof_program_address, auction_verifier, 0xaaa, 0x101, 0x102, 0x103,
-    );
-    assert(actual == expected, 'BAD_COMPILE_NULL');
-}
-
-#[test]
-fn compile_renewal_proof_accepts_known_good_statement_fixture() {
-    let proof_program_address = deploy_proof_program_with_mock_statements();
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let auction_verifier = as_address(0x456);
-    let empty_witness = array![];
-
-    let actual = proof_program.compile_renewal_proof(auction_verifier, empty_witness.span());
-    let expected = expected_renewal_proof_message_hash(
-        proof_program_address, auction_verifier, 0xaaa, 0x201, 0x202, 0x203,
-    );
-    assert(actual == expected, 'BAD_COMPILE_RENEW');
-}
-
-#[test]
-fn compile_settlement_order_proof_accepts_known_good_statement_fixture() {
-    let proof_program_address = deploy_proof_program_with_mock_statements();
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let auction_verifier = as_address(0x456);
-    let empty_witness = array![];
-
-    let actual = proof_program
-        .compile_settlement_order_proof(auction_verifier, empty_witness.span());
-    let expected = expected_settlement_component_proof_message_hash(
-        proof_program_address, auction_verifier, 0xaaa, SETTLEMENT_ORDER_MESSAGE_DOMAIN,
-    );
-    assert(actual == expected, 'BAD_COMPILE_ORDER');
-}
-
-#[test]
-fn compile_settlement_input_membership_proof_accepts_known_good_statement_fixture() {
-    let proof_program_address = deploy_proof_program_with_mock_statements();
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let auction_verifier = as_address(0x456);
-    let empty_witness = array![];
-
-    let actual = proof_program
-        .compile_settlement_input_membership_proof(auction_verifier, empty_witness.span());
-    let expected = expected_settlement_component_proof_message_hash(
-        proof_program_address, auction_verifier, 0xaaa, SETTLEMENT_INPUT_MEMBERSHIP_MESSAGE_DOMAIN,
-    );
-    assert(actual == expected, 'BAD_COMPILE_MEM');
-}
-
-#[test]
-fn compile_settlement_output_recovery_proof_accepts_known_good_statement_fixture() {
-    let proof_program_address = deploy_proof_program_with_mock_statements();
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let auction_verifier = as_address(0x456);
-    let empty_witness = array![];
-
-    let actual = proof_program
-        .compile_settlement_output_recovery_proof(auction_verifier, empty_witness.span());
-    let expected = expected_settlement_component_proof_message_hash(
-        proof_program_address, auction_verifier, 0xaaa, SETTLEMENT_OUTPUT_RECOVERY_MESSAGE_DOMAIN,
-    );
-    assert(actual == expected, 'BAD_COMPILE_REC');
 }
 
 #[test]
@@ -729,72 +642,6 @@ fn withdrawal_message_hash_rejects_zero_verifier() {
 
 #[test]
 #[should_panic]
-fn compile_settlement_proof_rejects_zero_verifier_before_statement_dispatch() {
-    let statement_program = as_address(0x123);
-    let proof_program_address = deploy_auction_proof_program(statement_program);
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let empty_witness = array![];
-
-    proof_program.compile_settlement_proof(as_address(0), empty_witness.span());
-}
-
-#[test]
-#[should_panic]
-fn compile_nullifier_proof_rejects_zero_verifier_before_statement_dispatch() {
-    let statement_program = as_address(0x123);
-    let proof_program_address = deploy_auction_proof_program(statement_program);
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let empty_witness = array![];
-
-    proof_program.compile_nullifier_proof(as_address(0), empty_witness.span());
-}
-
-#[test]
-#[should_panic]
-fn compile_renewal_proof_rejects_zero_verifier_before_statement_dispatch() {
-    let statement_program = as_address(0x123);
-    let proof_program_address = deploy_auction_proof_program(statement_program);
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let empty_witness = array![];
-
-    proof_program.compile_renewal_proof(as_address(0), empty_witness.span());
-}
-
-#[test]
-#[should_panic]
-fn compile_settlement_order_proof_rejects_zero_verifier_before_statement_dispatch() {
-    let statement_program = as_address(0x123);
-    let proof_program_address = deploy_auction_proof_program(statement_program);
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let empty_witness = array![];
-
-    proof_program.compile_settlement_order_proof(as_address(0), empty_witness.span());
-}
-
-#[test]
-#[should_panic]
-fn compile_settlement_input_membership_proof_rejects_zero_verifier_before_statement_dispatch() {
-    let statement_program = as_address(0x123);
-    let proof_program_address = deploy_auction_proof_program(statement_program);
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let empty_witness = array![];
-
-    proof_program.compile_settlement_input_membership_proof(as_address(0), empty_witness.span());
-}
-
-#[test]
-#[should_panic]
-fn compile_settlement_output_recovery_proof_rejects_zero_verifier_before_statement_dispatch() {
-    let statement_program = as_address(0x123);
-    let proof_program_address = deploy_auction_proof_program(statement_program);
-    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
-    let empty_witness = array![];
-
-    proof_program.compile_settlement_output_recovery_proof(as_address(0), empty_witness.span());
-}
-
-#[test]
-#[should_panic]
 fn compile_note_consolidation_proof_rejects_zero_verifier_before_statement_dispatch() {
     let statement_program = as_address(0x123);
     let proof_program_address = deploy_auction_proof_program(statement_program);
@@ -850,6 +697,17 @@ fn compile_multi_pair_proof_rejects_zero_verifier_before_statement_dispatch() {
 
 #[test]
 #[should_panic]
+fn compile_external_match_authorization_rejects_zero_verifier_before_statement_dispatch() {
+    let statement_program = as_address(0x123);
+    let proof_program_address = deploy_auction_proof_program(statement_program);
+    let proof_program = IAuctionProofProgramDispatcher { contract_address: proof_program_address };
+    let empty_witness = array![];
+
+    proof_program.compile_external_match_authorization_proof(as_address(0), empty_witness.span());
+}
+
+#[test]
+#[should_panic]
 fn compile_multi_pair_settlement_proof_rejects_zero_verifier_before_statement_dispatch() {
     let statement_program = as_address(0x123);
     let proof_program_address = deploy_auction_proof_program(statement_program);
@@ -885,39 +743,12 @@ mod MockSettlementStatementProgram {
     }
 
     #[external(v0)]
-    fn verify_settlement_note_fee_statement(
+    fn verify_settlement_statement_with_roots(
         self: @ContractState, serialized_settlement_witness: Span<felt252>,
-    ) -> felt252 {
+    ) -> (felt252, felt252, felt252, felt252, felt252, felt252, felt252) {
         let _ = self;
         let _ = serialized_settlement_witness;
-        0xaaa
-    }
-
-    #[external(v0)]
-    fn verify_settlement_order_statement(
-        self: @ContractState, serialized_settlement_witness: Span<felt252>,
-    ) -> felt252 {
-        let _ = self;
-        let _ = serialized_settlement_witness;
-        0xaaa
-    }
-
-    #[external(v0)]
-    fn verify_settlement_output_recovery_statement(
-        self: @ContractState, serialized_settlement_witness: Span<felt252>,
-    ) -> felt252 {
-        let _ = self;
-        let _ = serialized_settlement_witness;
-        0xaaa
-    }
-
-    #[external(v0)]
-    fn verify_settlement_input_membership_statement(
-        self: @ContractState, serialized_settlement_witness: Span<felt252>,
-    ) -> felt252 {
-        let _ = self;
-        let _ = serialized_settlement_witness;
-        0xaaa
+        (0xaaa, 0x101, 0x102, 0x103, 0x201, 0x202, 0x203)
     }
 }
 
