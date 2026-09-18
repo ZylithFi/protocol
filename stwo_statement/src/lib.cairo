@@ -1,4 +1,5 @@
 use core::array::{Array, ArrayTrait};
+use core::ecdsa::check_ecdsa_signature;
 use core::integer::u256;
 use core::poseidon::hades_permutation;
 use core::traits::{Into, TryInto};
@@ -6,7 +7,11 @@ mod admission_executable;
 mod auction_result_executable;
 
 mod executable;
+mod external_match_authorization;
 mod multi_pair_executable;
+pub use external_match_authorization::verify_external_match_authorization_statement;
+#[cfg(test)]
+pub mod tests;
 
 const ORDER_SIDE_BUY: felt252 = 0;
 const ORDER_SIDE_SELL: felt252 = 1;
@@ -19,6 +24,7 @@ const TIF_FILL_OR_KILL: felt252 = 1;
 const EXECUTION_PRIVATE_ONLY: felt252 = 0;
 const EXECUTION_PRIVATE_THEN_EXTERNAL: felt252 = 1;
 const FEE_BPS_DENOMINATOR: u128 = 10000;
+const MAX_MULTI_PAIR_REFERENCE_COMPONENT: u128 = 0xffffffffffffffff;
 const RENEWAL_CHILD_NULLIFIER_DOMAIN: felt252 =
     0x362b534b676bb36e394d08e276c8e64e65e3733e5d517a7eb6f438eafe54b61;
 const RENEWAL_PARENT_SECRET_DOMAIN: felt252 =
@@ -31,6 +37,9 @@ const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
     0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
 const OUTPUT_NOTE_NODE_DOMAIN: felt252 =
     0x03c6998f476a618431be1c1764a6724f13c0739be395bab4c1217bc0a65b2ee7;
+const NOTE_ACCUMULATOR_LEAF_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f6163635f6c6561665f7631;
+const NOTE_ACCUMULATOR_NODE_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f6163635f6e6f64655f7631;
+const NOTE_ACCUMULATOR_DEPTH: usize = 32;
 const EMPTY_OUTPUT_NOTE_ROOT_DOMAIN: felt252 =
     0x0279c22958925b34e81138c0d651a82cdbfd3287fa3de370e021a7201b4ce30b;
 const OUTPUT_RECOVERY_FIELD_COUNT: usize = 21;
@@ -52,8 +61,7 @@ const STATEMENT_TYPE_MULTI_PAIR_SETTLEMENT: felt252 = 9;
 const MULTI_PAIR_DELTA_DIRECTION_IN: felt252 = 0;
 const MULTI_PAIR_DELTA_DIRECTION_OUT: felt252 = 1;
 const MULTI_PAIR_DELTA_SOURCE_USER: felt252 = 0;
-const MULTI_PAIR_DELTA_SOURCE_EXTERNAL_COMPLETION: felt252 = 1;
-const MULTI_PAIR_DELTA_SOURCE_FEE: felt252 = 2;
+const MULTI_PAIR_DELTA_SOURCE_FEE: felt252 = 1;
 const MULTI_PAIR_WITNESS_DIGEST_DOMAIN: felt252 = 'zylith_mpair_in_v1';
 const ADMISSION_ROOT_DOMAIN: felt252 = 0x7a796c6974685f61646d69745f726f6f745f7631;
 const ADMISSION_LEAF_DOMAIN: felt252 = 0x7a796c6974685f61646d69745f6c6561665f7631;
@@ -65,7 +73,7 @@ const MAX_MULTI_PAIR_ASSET_DELTAS: usize = 256;
 const MAX_MULTI_PAIR_CANDIDATE_SOLUTIONS: usize = 64;
 const MAX_SETTLEMENT_INPUT_NOTES: usize = MAX_SETTLEMENT_ORDERS * MAX_ORDER_FUNDING_INPUTS;
 const MAX_SETTLEMENT_OUTPUT_NOTES: usize = MAX_SETTLEMENT_ORDERS * 2 + 4;
-const SETTLEMENT_HEADER_FIELD_COUNT: usize = 33;
+const SETTLEMENT_HEADER_FIELD_COUNT: usize = 46;
 const MAX_NOTE_CONSOLIDATION_NOTES: usize = MAX_SETTLEMENT_INPUT_NOTES;
 const PAIR_ID_STRK_USDC: felt252 =
     0x116ee836b759d809a28dfcf84de04ce4d7ba6aca96741019ffcbbbbcaa8b29e;
@@ -94,14 +102,16 @@ const NOTE_COMMITMENT_DOMAIN: felt252 =
     0x43aeae569e031a74671a28c60a017d2a53bbb5ffa6f6a7711c076348fb186c;
 const SPEND_AUTHORITY_DOMAIN: felt252 =
     0x21b92fb580b0e2cb7898509d56df3d7b51d6f68f17b50aa02e93e0227b15f3b;
-const SPEND_AUTHORIZATION_TAG_DOMAIN: felt252 =
-    0x025a229e7207657107d37566206d51ed8d588a4c5406063f47350cb7ddc938f4;
 const NULLIFIER_DOMAIN: felt252 = 0x6cd79aee4dd094aadf944f50e83fad66ce717a58d59d73a92df351aac6d14e3;
 const ORDER_COMMITMENT_DOMAIN: felt252 =
     0x7cd5dda33869da7da5ccb3afbc70fc766fb0cbe3d560c2bfb3bdbab8a4b844d;
 const PUBLIC_SETTLEMENT_DOMAIN: felt252 =
     0x0283f626418aa97a073f64500f7e35dd8bf7c01ff8611917c3c38e5be92eb205;
+const REFERENCE_PRICE_ATTESTATION_DOMAIN: felt252 =
+    0x79508ce25b318644e4a7aea66c1edc2342856b522eb62152b5c118fc1ef3e67;
 const PUBLIC_MULTI_PAIR_SETTLEMENT_DOMAIN: felt252 = 0x7a796c6974685f6d756c74695f736574746c655f7631;
+const EXTERNAL_MATCH_SETTLEMENT_DOMAIN: felt252 =
+    0x0311a2ee2e3ee96d0021c80b411688504ca49cbb5bee8d3dcc19e1ae87f1c9ea;
 const PUBLIC_NOTE_CONSOLIDATION_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f636f6e736f6c5f7631;
 const PUBLIC_NOTE_WITHDRAWAL_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f77697468647261775f7631;
 const CONSUMED_NOTE_ROOT_DOMAIN: felt252 =
@@ -129,6 +139,8 @@ struct MultiPairSettlementHeader {
     public_multi_pair_settlement_domain: felt252,
     group_id: felt252,
     batch_epoch: felt252,
+    auction_verifier_address: felt252,
+    reference_price_attestation_domain: felt252,
     transcript_commitment: felt252,
     protocol_fee_recipient: felt252,
     matched_order_count: felt252,
@@ -149,27 +161,74 @@ struct MultiPairSettlementHeader {
     new_renewal_root: felt252,
     new_fee_root: felt252,
 }
+
+#[derive(Copy, Drop)]
+struct FinalMultiPairFillInputs {
+    binding_batch_ids: Span<felt252>,
+    binding_pair_ids: Span<felt252>,
+    binding_base_asset_ids: Span<felt252>,
+    binding_quote_asset_ids: Span<felt252>,
+    binding_price_base_scales: Span<felt252>,
+    binding_taker_fee_bps: Span<felt252>,
+    admission_batch_ids: Span<felt252>,
+    admission_order_commitments: Span<felt252>,
+    admission_sides: Span<felt252>,
+    admission_order_types: Span<felt252>,
+    admission_limit_prices: Span<felt252>,
+    admission_order_amounts: Span<felt252>,
+    admission_execution_preferences: Span<felt252>,
+    admission_funding_amounts: Span<felt252>,
+    private_order_commitments: Span<felt252>,
+    private_filled_base_amounts: Span<felt252>,
+    private_quote_amounts: Span<felt252>,
+    external_pair_ids: Span<felt252>,
+    external_base_asset_ids: Span<felt252>,
+    external_quote_asset_ids: Span<felt252>,
+    external_sides: Span<felt252>,
+    external_max_base_amounts: Span<felt252>,
+    external_midpoint_prices: Span<felt252>,
+    external_price_base_scales: Span<felt252>,
+    external_consumed_base_amounts: Span<felt252>,
+}
+
+#[derive(Copy, Drop)]
+struct FinalMultiPairFillExpectation {
+    batch_id: felt252,
+    pair_id: felt252,
+    base_asset_id: felt252,
+    quote_asset_id: felt252,
+    side: felt252,
+    submitted_base_amount: u128,
+    limit_price: u128,
+    price_base_scale: u128,
+    filled_base_amount: u128,
+    quote_amount: u128,
+    taker_fee_bps: u128,
+    fee_amount: u128,
+}
 const MULTI_PAIR_BATCH_ROOT_DOMAIN: felt252 =
     0x039f98f789ba5c8e01cb79a02c22b9d9e3d71e692cc6c17cb60f2ab76a4e9090;
+const BATCH_ORDER_ROOT_DOMAIN: felt252 =
+    0x40c317b270c4b0a209944388e3403aade81c19ab712f370986c555da92c6cdc;
+// Keep the specialized root verifiers aligned with the canonical settlement
+// vector order parsed by `verify_settlement_statement` above.
+const SETTLEMENT_VECTORS_BEFORE_CONSUMED_NOTES: usize = 57;
+const SETTLEMENT_VECTORS_AFTER_MATCHED_ORDERS_BEFORE_PARENT_FIELDS: usize = 11;
+const SETTLEMENT_VECTORS_AFTER_NULLIFIER_DATA: usize = 38;
+const SETTLEMENT_VECTORS_AFTER_PARENT_FIELDS_BEFORE_RENEWAL: usize = 55;
 
 fn assert_stwo_spend_authorization(
     message_hash: felt252,
     spend_authority: felt252,
-    authorization_secret: felt252,
-    authorization_tag: felt252,
+    signature_r: felt252,
+    signature_s: felt252,
     error_message: felt252,
 ) {
     assert(spend_authority != 0, error_message);
-    assert(authorization_secret != 0, error_message);
-    assert(authorization_tag != 0, error_message);
+    assert(signature_r != 0, error_message);
+    assert(signature_s != 0, error_message);
     assert(
-        poseidon_hash2(SPEND_AUTHORITY_DOMAIN, authorization_secret) == spend_authority,
-        error_message,
-    );
-    assert(
-        poseidon_hash2(
-            poseidon_hash2(SPEND_AUTHORIZATION_TAG_DOMAIN, message_hash), authorization_secret,
-        ) == authorization_tag,
+        check_ecdsa_signature(message_hash, spend_authority, signature_r, signature_s),
         error_message,
     );
 }
@@ -190,6 +249,18 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let batch_epoch = read_next(data, ref index);
     let order_commitment_root = read_next(data, ref index);
     let encrypted_order_set_commitment = read_next(data, ref index);
+    let auction_verifier_address = read_next(data, ref index);
+    let reference_price_attestation_domain = read_next(data, ref index);
+    let claimed_reference_price_attestation_commitment = read_next(data, ref index);
+    let reference_price_signer = read_next(data, ref index);
+    let reference_price_valid_until_unix_ms = read_next(data, ref index);
+    let reference_price_midpoint = read_next(data, ref index);
+    let reference_price_lower = read_next(data, ref index);
+    let reference_price_upper = read_next(data, ref index);
+    let reference_price_source_count = read_next(data, ref index);
+    let reference_price_observed_at_unix_ms = read_next(data, ref index);
+    let reference_price_source_set_commitment = read_next(data, ref index);
+    let reference_price_nonce = read_next(data, ref index);
     let transcript_commitment = read_next(data, ref index);
     let base_asset_id = read_next(data, ref index);
     let quote_asset_id = read_next(data, ref index);
@@ -204,6 +275,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let prior_nullifier_root = read_next(data, ref index);
     let prior_renewal_root = read_next(data, ref index);
     let prior_fee_root = read_next(data, ref index);
+    let claimed_new_note_root = read_next(data, ref index);
     let consumed_note_root_domain = read_next(data, ref index);
     let consumed_nullifier_root_domain = read_next(data, ref index);
     let renewal_child_root_domain = read_next(data, ref index);
@@ -222,6 +294,18 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     assert(batch_epoch != 0, 'E');
     assert(order_commitment_root != 0, 'E');
     assert(encrypted_order_set_commitment != 0, 'E');
+    assert(auction_verifier_address != 0, 'E');
+    assert(reference_price_attestation_domain == REFERENCE_PRICE_ATTESTATION_DOMAIN, 'E');
+    assert(claimed_reference_price_attestation_commitment != 0, 'E');
+    assert(reference_price_signer != 0, 'E');
+    assert(
+        felt_to_u128(
+            reference_price_valid_until_unix_ms,
+        ) > felt_to_u128(reference_price_observed_at_unix_ms),
+        'E',
+    );
+    assert(reference_price_source_set_commitment != 0, 'E');
+    assert(felt_to_u128(reference_price_source_count) >= 3, 'E');
     assert(transcript_commitment != 0, 'E');
     assert(pair_id != 0, 'E');
     assert(base_asset_id != 0, 'E');
@@ -241,6 +325,38 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     assert(nullifier_sparse_node_domain == NULLIFIER_SPARSE_NODE_DOMAIN_CANONICAL, 'E');
     assert(base_asset_id != quote_asset_id, 'E');
     assert_pair_config(pair_id, base_asset_id, quote_asset_id, price_base_scale);
+    let reference_price_lower_u128 = felt_to_u128(reference_price_lower);
+    let reference_price_midpoint_u128 = felt_to_u128(reference_price_midpoint);
+    let reference_price_upper_u128 = felt_to_u128(reference_price_upper);
+    let clearing_price_u128 = felt_to_u128(clearing_price);
+    assert(reference_price_lower_u128 != 0, 'E');
+    assert(reference_price_lower_u128 <= reference_price_midpoint_u128, 'E');
+    assert(reference_price_midpoint_u128 <= reference_price_upper_u128, 'E');
+    if matched_order_count != 0 {
+        assert(reference_price_lower_u128 <= clearing_price_u128, 'E');
+        assert(clearing_price_u128 <= reference_price_upper_u128, 'E');
+    }
+    let recomputed_reference_price_attestation = reference_price_attestation_commitment(
+        reference_price_attestation_domain,
+        auction_verifier_address,
+        pair_id,
+        base_asset_id,
+        quote_asset_id,
+        reference_price_midpoint,
+        reference_price_lower,
+        reference_price_upper,
+        price_base_scale,
+        reference_price_source_count,
+        reference_price_observed_at_unix_ms,
+        reference_price_valid_until_unix_ms,
+        reference_price_source_set_commitment,
+        reference_price_nonce,
+        reference_price_signer,
+    );
+    assert(
+        recomputed_reference_price_attestation == claimed_reference_price_attestation_commitment,
+        'E',
+    );
 
     let matched_order_commitments = read_vector(data, ref index);
     let matched_fill_amounts = read_vector(data, ref index);
@@ -307,13 +423,13 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let nullifier_sparse_path_values = read_vector(data, ref index);
     let nullifier_sparse_path_directions = read_vector(data, ref index);
     let note_membership_kinds = read_vector(data, ref index);
-    let note_membership_prefix_roots = read_vector(data, ref index);
     let note_membership_batch_roots = read_vector(data, ref index);
     let note_membership_path_counts = read_vector(data, ref index);
     let note_membership_path_values = read_vector(data, ref index);
     let note_membership_path_directions = read_vector(data, ref index);
-    let note_membership_suffix_counts = read_vector(data, ref index);
-    let note_membership_suffix_roots = read_vector(data, ref index);
+    let note_membership_accumulator_path_counts = read_vector(data, ref index);
+    let note_membership_accumulator_path_values = read_vector(data, ref index);
+    let note_membership_accumulator_path_directions = read_vector(data, ref index);
     let renewal_parent_order_commitments = read_vector(data, ref index);
     let renewal_child_nullifiers = read_vector(data, ref index);
     let renewal_child_sparse_key_lows = read_vector(data, ref index);
@@ -404,14 +520,20 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         funding_input_count,
         array![
             consumed_note_commitments.len().into(), consumed_nullifiers.len().into(),
-            note_membership_kinds.len().into(), note_membership_prefix_roots.len().into(),
-            note_membership_batch_roots.len().into(), note_membership_path_counts.len().into(),
-            note_membership_suffix_counts.len().into(),
+            note_membership_kinds.len().into(), note_membership_batch_roots.len().into(),
+            note_membership_path_counts.len().into(),
+            note_membership_accumulator_path_counts.len().into(),
         ]
             .span(),
         'E',
     );
     assert(note_membership_path_values.len() == note_membership_path_directions.len(), 'E');
+    assert(
+        note_membership_accumulator_path_values
+            .len() == note_membership_accumulator_path_directions
+            .len(),
+        'E',
+    );
     assert(output_note_commitments.len() == output_note_asset_ids.len(), 'E');
     assert(output_note_commitments.len() == output_note_amounts.len(), 'E');
     assert(output_note_commitments.len() == output_note_withdraw_authorities.len(), 'E');
@@ -474,7 +596,7 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     let mut expected_quote_fee: u128 = 0;
     let mut renewal_cursor = 0;
     let mut note_membership_path_cursor = 0;
-    let mut note_membership_suffix_cursor = 0;
+    let mut note_membership_accumulator_path_cursor = 0;
     let mut funding_input_cursor = 0;
     let mut public_output_cursor = 0;
 
@@ -710,16 +832,15 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
                 funding_note_withdraw_authority,
                 prior_note_root,
                 *note_membership_kinds.at(flat_index),
-                *note_membership_prefix_roots.at(flat_index),
                 *note_membership_batch_roots.at(flat_index),
                 *note_membership_path_counts.at(flat_index),
                 ref note_membership_path_cursor,
                 note_membership_path_values.span(),
                 note_membership_path_directions.span(),
-                *note_membership_suffix_counts.at(flat_index),
-                ref note_membership_suffix_cursor,
-                note_membership_suffix_roots.span(),
-                state_transition_root_domain,
+                *note_membership_accumulator_path_counts.at(flat_index),
+                ref note_membership_accumulator_path_cursor,
+                note_membership_accumulator_path_values.span(),
+                note_membership_accumulator_path_directions.span(),
             );
             input_set_state = poseidon_hash2(input_set_state, funding_note_commitment);
             nullifier_set_state = poseidon_hash2(nullifier_set_state, input_nullifier);
@@ -860,7 +981,10 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     assert(funding_input_cursor == consumed_note_commitments.len(), 'E');
     assert(note_membership_path_cursor == note_membership_path_values.len(), 'E');
     assert(note_membership_path_cursor == note_membership_path_directions.len(), 'E');
-    assert(note_membership_suffix_cursor == note_membership_suffix_roots.len(), 'E');
+    assert(
+        note_membership_accumulator_path_cursor == note_membership_accumulator_path_values.len(),
+        'E',
+    );
 
     assert_fee_output(
         ref public_output_cursor,
@@ -939,9 +1063,8 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         expected_base_fee,
         expected_quote_fee,
     );
-    let new_note_root = state_transition_root(
-        state_transition_root_domain, prior_note_root, output_note_root,
-    );
+    let new_note_root = claimed_new_note_root;
+    assert(new_note_root != prior_note_root, 'NOTE_ACC_ADVANCE');
     let new_nullifier_root = read_next(data, ref index);
     if consumed_nullifiers.len() == 0 {
         assert(new_nullifier_root == prior_nullifier_root, 'E');
@@ -959,8 +1082,13 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
         batch_id,
         pair_id,
         batch_epoch,
+        auction_verifier_address,
         order_commitment_root,
         encrypted_order_set_commitment,
+        claimed_reference_price_attestation_commitment,
+        reference_price_signer,
+        reference_price_observed_at_unix_ms,
+        reference_price_valid_until_unix_ms,
         clearing_price,
         price_base_scale,
         taker_fee_bps,
@@ -987,6 +1115,37 @@ pub fn verify_settlement_statement(data: Span<felt252>) -> felt252 {
     transcript_commitment
 }
 
+// Aggregate proving needs the roots already checked by the full settlement
+// verifier. Returning them from the same statement call avoids rerunning the
+// full witness through the specialized nullifier and renewal entry points.
+pub fn verify_settlement_statement_with_roots(
+    data: Span<felt252>,
+) -> (felt252, felt252, felt252, felt252, felt252, felt252, felt252) {
+    let transcript_commitment = verify_settlement_statement(data);
+    let (
+        facts_transcript_commitment,
+        prior_nullifier_root,
+        consumed_nullifier_root,
+        new_nullifier_root,
+        prior_renewal_root,
+        renewal_child_root,
+        new_renewal_root,
+    ) =
+        settlement_root_facts(
+        data,
+    );
+    assert(facts_transcript_commitment == transcript_commitment, 'E');
+    (
+        transcript_commitment,
+        prior_nullifier_root,
+        consumed_nullifier_root,
+        new_nullifier_root,
+        prior_renewal_root,
+        renewal_child_root,
+        new_renewal_root,
+    )
+}
+
 pub fn verify_settlement_note_fee_statement(data: Span<felt252>) -> felt252 {
     verify_settlement_statement(data)
 }
@@ -1003,12 +1162,73 @@ pub fn verify_settlement_input_membership_statement(data: Span<felt252>) -> felt
     verify_settlement_statement(data)
 }
 
+pub fn settlement_root_facts(
+    data: Span<felt252>,
+) -> (felt252, felt252, felt252, felt252, felt252, felt252, felt252) {
+    let mut nullifier_index: usize = 0;
+    read_next(data, ref nullifier_index);
+    skip_fields(data, ref nullifier_index, 23);
+    let transcript_commitment = read_next(data, ref nullifier_index);
+    skip_fields(data, ref nullifier_index, 10);
+    let prior_nullifier_root = read_next(data, ref nullifier_index);
+    skip_fields(data, ref nullifier_index, 3);
+    let consumed_nullifier_root_domain = read_next(data, ref nullifier_index);
+    skip_fields(data, ref nullifier_index, 4);
+    read_next(data, ref nullifier_index);
+    read_next(data, ref nullifier_index);
+
+    skip_vectors_without_alloc(data, ref nullifier_index, SETTLEMENT_VECTORS_BEFORE_CONSUMED_NOTES);
+    skip_vector_without_alloc(data, ref nullifier_index);
+    let consumed_nullifier_root = single_field_root_vector(
+        data, ref nullifier_index, consumed_nullifier_root_domain,
+    );
+    skip_vectors_without_alloc(data, ref nullifier_index, SETTLEMENT_VECTORS_AFTER_NULLIFIER_DATA);
+    let new_nullifier_root = read_next(data, ref nullifier_index);
+    let new_renewal_root = read_next(data, ref nullifier_index);
+    assert(nullifier_index == data.len(), 'E');
+
+    let mut renewal_index: usize = 0;
+    read_next(data, ref renewal_index);
+    skip_fields(data, ref renewal_index, 23);
+    read_next(data, ref renewal_index);
+    skip_fields(data, ref renewal_index, 11);
+    let prior_renewal_root = read_next(data, ref renewal_index);
+    skip_fields(data, ref renewal_index, 3);
+    let renewal_child_root_domain = read_next(data, ref renewal_index);
+    skip_fields(data, ref renewal_index, 3);
+    read_next(data, ref renewal_index);
+    read_next(data, ref renewal_index);
+
+    skip_vector_without_alloc(data, ref renewal_index);
+    skip_vectors_without_alloc(
+        data, ref renewal_index, SETTLEMENT_VECTORS_AFTER_MATCHED_ORDERS_BEFORE_PARENT_FIELDS,
+    );
+    skip_vectors_without_alloc(data, ref renewal_index, 5);
+    skip_vectors_without_alloc(
+        data, ref renewal_index, SETTLEMENT_VECTORS_AFTER_PARENT_FIELDS_BEFORE_RENEWAL,
+    );
+    skip_vector_without_alloc(data, ref renewal_index);
+    let renewal_child_root = single_field_root_vector(
+        data, ref renewal_index, renewal_child_root_domain,
+    );
+
+    (
+        transcript_commitment,
+        prior_nullifier_root,
+        consumed_nullifier_root,
+        new_nullifier_root,
+        prior_renewal_root,
+        renewal_child_root,
+        new_renewal_root,
+    )
+}
+
 pub fn verify_nullifier_statement(data: Span<felt252>) -> (felt252, felt252, felt252, felt252) {
     let mut index: usize = 0;
 
     let statement_type = read_next(data, ref index);
     assert(statement_type == STATEMENT_TYPE_SETTLEMENT, 'E');
-    skip_fields(data, ref index, 10);
+    skip_fields(data, ref index, 22);
     let transcript_commitment = read_next(data, ref index);
     skip_fields(data, ref index, 10);
     let prior_nullifier_root = read_next(data, ref index);
@@ -1023,7 +1243,7 @@ pub fn verify_nullifier_statement(data: Span<felt252>) -> (felt252, felt252, fel
     assert(nullifier_sparse_leaf_domain == NULLIFIER_SPARSE_LEAF_DOMAIN_CANONICAL, 'E');
     assert(nullifier_sparse_node_domain == NULLIFIER_SPARSE_NODE_DOMAIN_CANONICAL, 'E');
 
-    skip_vectors(data, ref index, 56);
+    skip_vectors(data, ref index, SETTLEMENT_VECTORS_BEFORE_CONSUMED_NOTES);
     let consumed_note_commitments = read_vector(data, ref index);
     let consumed_nullifiers = read_vector(data, ref index);
     let nullifier_sparse_key_lows = read_vector(data, ref index);
@@ -1075,7 +1295,7 @@ pub fn verify_renewal_statement(data: Span<felt252>) -> (felt252, felt252, felt2
 
     let statement_type = read_next(data, ref index);
     assert(statement_type == STATEMENT_TYPE_SETTLEMENT, 'E');
-    skip_fields(data, ref index, 10);
+    skip_fields(data, ref index, 22);
     let transcript_commitment = read_next(data, ref index);
     skip_fields(data, ref index, 11);
     let prior_renewal_root = read_next(data, ref index);
@@ -1091,7 +1311,7 @@ pub fn verify_renewal_statement(data: Span<felt252>) -> (felt252, felt252, felt2
     assert(nullifier_sparse_node_domain == NULLIFIER_SPARSE_NODE_DOMAIN_CANONICAL, 'E');
 
     let matched_order_commitments = read_vector(data, ref index);
-    skip_vectors(data, ref index, 10);
+    skip_vectors(data, ref index, SETTLEMENT_VECTORS_AFTER_MATCHED_ORDERS_BEFORE_PARENT_FIELDS);
     let matched_parent_order_commitments = read_vector(data, ref index);
     let matched_parent_child_indexes = read_vector(data, ref index);
     let matched_parent_secret_commitments = read_vector(data, ref index);
@@ -1239,6 +1459,7 @@ pub fn verify_multi_pair_statement(data: Span<felt252>) -> felt252 {
     let price_base_scales = read_vector(data, ref index);
     let filled_base_amounts = read_vector(data, ref index);
     let quote_amounts = read_vector(data, ref index);
+    let fill_taker_fee_bps = read_vector(data, ref index);
     let fee_amounts = read_vector(data, ref index);
 
     let delta_asset_ids = read_vector(data, ref index);
@@ -1267,6 +1488,7 @@ pub fn verify_multi_pair_statement(data: Span<felt252>) -> felt252 {
     let candidate_price_base_scales = read_vector(data, ref index);
     let candidate_filled_base_amounts = read_vector(data, ref index);
     let candidate_quote_amounts = read_vector(data, ref index);
+    let candidate_taker_fee_bps = read_vector(data, ref index);
     let candidate_fee_amounts = read_vector(data, ref index);
 
     let candidate_delta_asset_ids = read_vector(data, ref index);
@@ -1289,6 +1511,7 @@ pub fn verify_multi_pair_statement(data: Span<felt252>) -> felt252 {
         price_base_scales.span(),
         filled_base_amounts.span(),
         quote_amounts.span(),
+        fill_taker_fee_bps.span(),
         fee_amounts.span(),
         0,
         order_commitments.len(),
@@ -1333,6 +1556,18 @@ pub fn verify_multi_pair_statement(data: Span<felt252>) -> felt252 {
     assert_multi_pair_objective_weights(
         objective_asset_ids.span(), objective_numerators.span(), objective_denominators.span(),
     );
+    assert_multi_pair_reference_pricing(
+        base_asset_ids.span(),
+        quote_asset_ids.span(),
+        sides.span(),
+        filled_base_amounts.span(),
+        quote_amounts.span(),
+        0,
+        order_commitments.len(),
+        objective_asset_ids.span(),
+        objective_numerators.span(),
+        objective_denominators.span(),
+    );
 
     let chosen_objective = multi_pair_objective_score(
         base_asset_ids.span(),
@@ -1364,8 +1599,7 @@ pub fn verify_multi_pair_statement(data: Span<felt252>) -> felt252 {
         let delta_count: usize = (*candidate_delta_counts.at(candidate_index))
             .try_into()
             .expect('MP_CAND');
-        assert(fill_count != 0, 'MP_CAND');
-        assert(delta_count != 0, 'MP_CAND');
+        assert((fill_count == 0) == (delta_count == 0), 'MP_CAND');
 
         assert_multi_pair_fill_vectors(
             candidate_order_commitments.span(),
@@ -1379,6 +1613,7 @@ pub fn verify_multi_pair_statement(data: Span<felt252>) -> felt252 {
             candidate_price_base_scales.span(),
             candidate_filled_base_amounts.span(),
             candidate_quote_amounts.span(),
+            candidate_taker_fee_bps.span(),
             candidate_fee_amounts.span(),
             fill_cursor,
             fill_count,
@@ -1422,6 +1657,18 @@ pub fn verify_multi_pair_statement(data: Span<felt252>) -> felt252 {
             candidate_delta_source_commitments.span(),
             delta_cursor,
             delta_count,
+        );
+        assert_multi_pair_reference_pricing(
+            candidate_base_asset_ids.span(),
+            candidate_quote_asset_ids.span(),
+            candidate_sides.span(),
+            candidate_filled_base_amounts.span(),
+            candidate_quote_amounts.span(),
+            fill_cursor,
+            fill_count,
+            objective_asset_ids.span(),
+            objective_numerators.span(),
+            objective_denominators.span(),
         );
         let candidate_objective = multi_pair_objective_score(
             candidate_base_asset_ids.span(),
@@ -1470,6 +1717,8 @@ fn read_multi_pair_settlement_header(
         public_multi_pair_settlement_domain: read_next(data, ref index),
         group_id: read_next(data, ref index),
         batch_epoch: read_next(data, ref index),
+        auction_verifier_address: read_next(data, ref index),
+        reference_price_attestation_domain: read_next(data, ref index),
         transcript_commitment: read_next(data, ref index),
         protocol_fee_recipient: read_next(data, ref index),
         matched_order_count: read_next(data, ref index),
@@ -1500,6 +1749,11 @@ fn read_multi_pair_settlement_header(
     );
     assert(header.group_id != 0, 'MPS_GROUP');
     assert(header.batch_epoch != 0, 'MPS_EPOCH');
+    assert(header.auction_verifier_address != 0, 'MPS_VERIFIER');
+    assert(
+        header.reference_price_attestation_domain == REFERENCE_PRICE_ATTESTATION_DOMAIN,
+        'MPS_REF_DOMAIN',
+    );
     assert(header.transcript_commitment != 0, 'MPS_TRANSCRIPT');
     assert(header.protocol_fee_recipient != 0, 'MPS_FEE_RECIPIENT');
     assert(header.output_bundle_ref != 0, 'MPS_OUTPUT_BUNDLE');
@@ -1508,14 +1762,18 @@ fn read_multi_pair_settlement_header(
     header
 }
 
-fn assert_multi_pair_settlement_public_commitment(header: MultiPairSettlementHeader) {
+fn assert_multi_pair_settlement_public_commitment(
+    header: MultiPairSettlementHeader, external_match_root: felt252,
+) {
     let recomputed_commitment = public_multi_pair_settlement_commitment(
         header.group_id,
         header.batch_epoch,
+        header.auction_verifier_address,
         header.batch_binding_root,
         header.protocol_fee_recipient,
         header.output_bundle_ref,
         header.multi_pair_commitment,
+        external_match_root,
         header.prior_note_root,
         header.prior_nullifier_root,
         header.prior_renewal_root,
@@ -1545,6 +1803,8 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
     let public_multi_pair_settlement_domain = read_next(data, ref index);
     let group_id = read_next(data, ref index);
     let batch_epoch = read_next(data, ref index);
+    let auction_verifier_address = read_next(data, ref index);
+    let reference_price_attestation_domain = read_next(data, ref index);
     let transcript_commitment = read_next(data, ref index);
     let protocol_fee_recipient = read_next(data, ref index);
     let matched_order_count = read_next(data, ref index);
@@ -1574,6 +1834,10 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
     );
     assert(group_id != 0, 'MPS_GROUP');
     assert(batch_epoch != 0, 'MPS_EPOCH');
+    assert(auction_verifier_address != 0, 'MPS_VERIFIER');
+    assert(
+        reference_price_attestation_domain == REFERENCE_PRICE_ATTESTATION_DOMAIN, 'MPS_REF_DOMAIN',
+    );
     assert(transcript_commitment != 0, 'MPS_TRANSCRIPT');
     assert(protocol_fee_recipient != 0, 'MPS_FEE_RECIPIENT');
     assert(output_bundle_ref != 0, 'MPS_OUTPUT_BUNDLE');
@@ -1583,7 +1847,18 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
     let batch_ids = read_vector(data, ref index);
     let pair_ids = read_vector(data, ref index);
     let order_commitment_roots = read_vector(data, ref index);
+    let admission_roots = read_vector(data, ref index);
     let encrypted_order_set_commitments = read_vector(data, ref index);
+    let reference_price_attestation_commitments = read_vector(data, ref index);
+    let reference_price_signers = read_vector(data, ref index);
+    let reference_price_observed_at_unix_ms_values = read_vector(data, ref index);
+    let reference_price_valid_until_unix_ms_values = read_vector(data, ref index);
+    let reference_price_midpoints = read_vector(data, ref index);
+    let reference_price_lowers = read_vector(data, ref index);
+    let reference_price_uppers = read_vector(data, ref index);
+    let reference_price_source_counts = read_vector(data, ref index);
+    let reference_price_source_set_commitments = read_vector(data, ref index);
+    let reference_price_nonces = read_vector(data, ref index);
     let base_asset_ids = read_vector(data, ref index);
     let quote_asset_ids = read_vector(data, ref index);
     let price_base_scales = read_vector(data, ref index);
@@ -1666,13 +1941,13 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
     let nullifier_sparse_path_values = read_vector(data, ref index);
     let nullifier_sparse_path_directions = read_vector(data, ref index);
     let note_membership_kinds = read_vector(data, ref index);
-    let note_membership_prefix_roots = read_vector(data, ref index);
     let note_membership_batch_roots = read_vector(data, ref index);
     let note_membership_path_counts = read_vector(data, ref index);
     let note_membership_path_values = read_vector(data, ref index);
     let note_membership_path_directions = read_vector(data, ref index);
-    let note_membership_suffix_counts = read_vector(data, ref index);
-    let note_membership_suffix_roots = read_vector(data, ref index);
+    let note_membership_accumulator_path_counts = read_vector(data, ref index);
+    let note_membership_accumulator_path_values = read_vector(data, ref index);
+    let note_membership_accumulator_path_directions = read_vector(data, ref index);
     let renewal_child_sparse_key_lows = read_vector(data, ref index);
     let renewal_child_sparse_key_highs = read_vector(data, ref index);
     let renewal_child_sparse_path_counts = read_vector(data, ref index);
@@ -1692,13 +1967,61 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
     let output_recovery_auth_tags = read_vector(data, ref index);
     let output_recovery_ciphertext_fields = read_vector(data, ref index);
     let output_recovery_dummy_commitments = read_vector(data, ref index);
+    let admission_summary_batch_ids = read_vector(data, ref index);
+    let admission_summary_order_commitments = read_vector(data, ref index);
+    let admission_summary_sides = read_vector(data, ref index);
+    let admission_summary_order_types = read_vector(data, ref index);
+    let admission_summary_relay_modes = read_vector(data, ref index);
+    let admission_summary_limit_prices = read_vector(data, ref index);
+    let admission_summary_order_amounts = read_vector(data, ref index);
+    let admission_summary_min_fills = read_vector(data, ref index);
+    let admission_summary_time_in_force = read_vector(data, ref index);
+    let admission_summary_execution_preferences = read_vector(data, ref index);
+    let admission_summary_funding_note_amounts = read_vector(data, ref index);
+    let admission_summary_funding_note_owner_keys = read_vector(data, ref index);
+    let external_request_ids = read_vector(data, ref index);
+    let external_batch_ids = read_vector(data, ref index);
+    let external_pair_ids = read_vector(data, ref index);
+    let external_base_asset_ids = read_vector(data, ref index);
+    let external_quote_asset_ids = read_vector(data, ref index);
+    let external_sides = read_vector(data, ref index);
+    let external_max_base_amounts = read_vector(data, ref index);
+    let external_midpoint_prices = read_vector(data, ref index);
+    let external_price_base_scales = read_vector(data, ref index);
+    let external_valid_until_values = read_vector(data, ref index);
+    let external_consumed_base_amounts = read_vector(data, ref index);
     assert(index == data.len(), 'MPS_LEN');
+
+    let external_match_root = assert_external_match_settlement_records(
+        group_id,
+        external_request_ids.span(),
+        external_batch_ids.span(),
+        external_pair_ids.span(),
+        external_base_asset_ids.span(),
+        external_quote_asset_ids.span(),
+        external_sides.span(),
+        external_max_base_amounts.span(),
+        external_midpoint_prices.span(),
+        external_price_base_scales.span(),
+        external_valid_until_values.span(),
+        external_consumed_base_amounts.span(),
+        pair_ids.span(),
+        base_asset_ids.span(),
+        quote_asset_ids.span(),
+        price_base_scales.span(),
+        reference_price_midpoints.span(),
+    );
 
     assert_multi_pair_settlement_binding_vectors(
         batch_ids.span(),
         pair_ids.span(),
         order_commitment_roots.span(),
+        admission_roots.span(),
         encrypted_order_set_commitments.span(),
+        reference_price_attestation_commitments.span(),
+        reference_price_signers.span(),
+        reference_price_observed_at_unix_ms_values.span(),
+        reference_price_valid_until_unix_ms_values.span(),
         base_asset_ids.span(),
         quote_asset_ids.span(),
         price_base_scales.span(),
@@ -1707,7 +2030,11 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
     assert_all_nonzero(batch_ids.span(), 'MPS_BATCH');
     assert_all_nonzero(pair_ids.span(), 'MPS_PAIR');
     assert_all_nonzero(order_commitment_roots.span(), 'MPS_ORDER_ROOT');
+    assert_all_nonzero(admission_roots.span(), 'MPS_ADMISSION_ROOT');
     assert_all_nonzero(encrypted_order_set_commitments.span(), 'MPS_ENC_ROOT');
+    assert_all_nonzero(reference_price_attestation_commitments.span(), 'MPS_REF_COMMITMENT');
+    assert_all_nonzero(reference_price_signers.span(), 'MPS_REF_SIGNER');
+    assert_all_nonzero(reference_price_valid_until_unix_ms_values.span(), 'MPS_REF_EXPIRY');
     assert_all_nonzero(base_asset_ids.span(), 'MPS_BASE');
     assert_all_nonzero(quote_asset_ids.span(), 'MPS_QUOTE');
     assert_unique_nonzero(batch_ids.span(), 'MPS_BATCH_DUP');
@@ -1726,7 +2053,12 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
             pair_ids.span(),
             batch_epoch,
             order_commitment_roots.span(),
+            admission_roots.span(),
             encrypted_order_set_commitments.span(),
+            reference_price_attestation_commitments.span(),
+            reference_price_signers.span(),
+            reference_price_observed_at_unix_ms_values.span(),
+            reference_price_valid_until_unix_ms_values.span(),
             base_asset_ids.span(),
             quote_asset_ids.span(),
             price_base_scales.span(),
@@ -1738,53 +2070,139 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
     let nested_commitment = verify_multi_pair_statement(nested_multi_pair.span());
     assert(nested_commitment == multi_pair_commitment, 'MPS_MP_BIND');
     assert(multi_pair_payload_group_id(nested_multi_pair.span()) == group_id, 'MPS_MP_GROUP');
+    let (objective_asset_ids, objective_numerators, objective_denominators) =
+        multi_pair_payload_objective_weights(
+        nested_multi_pair.span(),
+    );
+    assert_multi_pair_reference_price_attestations(
+        auction_verifier_address,
+        reference_price_attestation_domain,
+        pair_ids.span(),
+        base_asset_ids.span(),
+        quote_asset_ids.span(),
+        price_base_scales.span(),
+        reference_price_attestation_commitments.span(),
+        reference_price_signers.span(),
+        reference_price_valid_until_unix_ms_values.span(),
+        reference_price_midpoints.span(),
+        reference_price_lowers.span(),
+        reference_price_uppers.span(),
+        reference_price_source_counts.span(),
+        reference_price_observed_at_unix_ms_values.span(),
+        reference_price_source_set_commitments.span(),
+        reference_price_nonces.span(),
+        objective_asset_ids.span(),
+        objective_numerators.span(),
+        objective_denominators.span(),
+    );
+    let nested_eligible_order_commitments = multi_pair_payload_eligible_order_commitments(
+        nested_multi_pair.span(),
+    );
+    assert_multi_pair_admission_summaries(
+        batch_ids.span(),
+        order_commitment_roots.span(),
+        admission_roots.span(),
+        admission_summary_batch_ids.span(),
+        admission_summary_order_commitments.span(),
+        admission_summary_sides.span(),
+        admission_summary_order_types.span(),
+        admission_summary_relay_modes.span(),
+        admission_summary_limit_prices.span(),
+        admission_summary_order_amounts.span(),
+        admission_summary_min_fills.span(),
+        admission_summary_time_in_force.span(),
+        admission_summary_execution_preferences.span(),
+        admission_summary_funding_note_amounts.span(),
+        admission_summary_funding_note_owner_keys.span(),
+        nested_eligible_order_commitments.span(),
+    );
     let (
         nested_order_commitments,
-        nested_pair_ids,
-        nested_base_asset_ids,
-        nested_quote_asset_ids,
-        nested_sides,
-        nested_submitted_base_amounts,
-        nested_min_fill_base_amounts,
-        nested_limit_prices,
-        nested_price_base_scales,
+        _nested_pair_ids,
+        _nested_base_asset_ids,
+        _nested_quote_asset_ids,
+        _nested_sides,
+        _nested_submitted_base_amounts,
+        _nested_min_fill_base_amounts,
+        _nested_limit_prices,
+        _nested_price_base_scales,
         nested_filled_base_amounts,
         nested_quote_amounts,
-        nested_fee_amounts,
+        _nested_taker_fee_bps,
+        _nested_fee_amounts,
     ) =
         multi_pair_payload_chosen_fill_vectors(
         nested_multi_pair.span(),
     );
 
+    let final_fill_inputs = FinalMultiPairFillInputs {
+        binding_batch_ids: batch_ids.span(),
+        binding_pair_ids: pair_ids.span(),
+        binding_base_asset_ids: base_asset_ids.span(),
+        binding_quote_asset_ids: quote_asset_ids.span(),
+        binding_price_base_scales: price_base_scales.span(),
+        binding_taker_fee_bps: taker_fee_bps_values.span(),
+        admission_batch_ids: admission_summary_batch_ids.span(),
+        admission_order_commitments: admission_summary_order_commitments.span(),
+        admission_sides: admission_summary_sides.span(),
+        admission_order_types: admission_summary_order_types.span(),
+        admission_limit_prices: admission_summary_limit_prices.span(),
+        admission_order_amounts: admission_summary_order_amounts.span(),
+        admission_execution_preferences: admission_summary_execution_preferences.span(),
+        admission_funding_amounts: admission_summary_funding_note_amounts.span(),
+        private_order_commitments: nested_order_commitments.span(),
+        private_filled_base_amounts: nested_filled_base_amounts.span(),
+        private_quote_amounts: nested_quote_amounts.span(),
+        external_pair_ids: external_pair_ids.span(),
+        external_base_asset_ids: external_base_asset_ids.span(),
+        external_quote_asset_ids: external_quote_asset_ids.span(),
+        external_sides: external_sides.span(),
+        external_max_base_amounts: external_max_base_amounts.span(),
+        external_midpoint_prices: external_midpoint_prices.span(),
+        external_price_base_scales: external_price_base_scales.span(),
+        external_consumed_base_amounts: external_consumed_base_amounts.span(),
+    };
+    let (
+        final_pair_ids,
+        final_base_asset_ids,
+        final_quote_asset_ids,
+        final_price_base_scales,
+        final_taker_fee_bps,
+        final_quote_amounts,
+        final_fee_amounts,
+    ) =
+        assert_final_multi_pair_fill_vectors(
+        @final_fill_inputs,
+        matched_order_batch_ids.span(),
+        matched_order_commitments.span(),
+        matched_fill_amounts.span(),
+        matched_sides.span(),
+        matched_order_amounts.span(),
+        matched_limit_prices.span(),
+    );
     assert(matched_order_count == matched_order_commitments.len().into(), 'MPS_MATCHED');
-    assert(matched_order_count == matched_order_batch_ids.len().into(), 'MPS_MATCHED');
-    assert(matched_order_count == matched_fill_amounts.len().into(), 'MPS_MATCHED');
-    assert(matched_order_count == nested_order_commitments.len().into(), 'MPS_MATCHED');
-    assert_equal_vectors(
-        matched_order_commitments.span(), nested_order_commitments.span(), 'MPS_MATCHED',
-    );
-    assert_equal_vectors(
-        matched_fill_amounts.span(), nested_filled_base_amounts.span(), 'MPS_FILL',
-    );
-    assert_equal_vectors(matched_sides.span(), nested_sides.span(), 'MPS_SIDE');
-    assert_equal_vectors(
-        matched_order_amounts.span(), nested_submitted_base_amounts.span(), 'MPS_AMOUNT',
-    );
-    assert_equal_vectors(
-        matched_min_fills.span(), nested_min_fill_base_amounts.span(), 'MPS_MIN_FILL',
-    );
-    assert_equal_vectors(matched_limit_prices.span(), nested_limit_prices.span(), 'MPS_LIMIT');
     assert_matched_fill_batch_bindings(
         matched_order_batch_ids.span(),
-        nested_pair_ids.span(),
-        nested_base_asset_ids.span(),
-        nested_quote_asset_ids.span(),
-        nested_price_base_scales.span(),
+        final_pair_ids.span(),
+        final_base_asset_ids.span(),
+        final_quote_asset_ids.span(),
+        final_price_base_scales.span(),
+        final_taker_fee_bps.span(),
         batch_ids.span(),
         pair_ids.span(),
         base_asset_ids.span(),
         quote_asset_ids.span(),
         price_base_scales.span(),
+        taker_fee_bps_values.span(),
+    );
+    let (candidate_pair_ids, candidate_taker_fee_bps) = multi_pair_payload_candidate_fee_vectors(
+        nested_multi_pair.span(),
+    );
+    assert_multi_pair_fill_fee_bindings(
+        candidate_pair_ids.span(),
+        candidate_taker_fee_bps.span(),
+        pair_ids.span(),
+        taker_fee_bps_values.span(),
     );
 
     let funding_input_count = sum_funding_input_counts(matched_funding_input_counts.span());
@@ -1842,15 +2260,21 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
             matched_funding_note_blindings.len().into(), matched_funding_note_nonces.len().into(),
             matched_funding_note_metadata_commitments.len().into(),
             consumed_note_commitments.len().into(), consumed_nullifiers.len().into(),
-            note_membership_kinds.len().into(), note_membership_prefix_roots.len().into(),
-            note_membership_batch_roots.len().into(), note_membership_path_counts.len().into(),
-            note_membership_suffix_counts.len().into(),
+            note_membership_kinds.len().into(), note_membership_batch_roots.len().into(),
+            note_membership_path_counts.len().into(),
+            note_membership_accumulator_path_counts.len().into(),
         ]
             .span(),
         'MPS_FUNDING_LEN',
     );
     assert(
         note_membership_path_values.len() == note_membership_path_directions.len(), 'MPS_NOTE_PATH',
+    );
+    assert(
+        note_membership_accumulator_path_values
+            .len() == note_membership_accumulator_path_directions
+            .len(),
+        'MPS_NOTE_ACC_PATH',
     );
     assert(renewal_parent_order_commitments.len() == renewal_child_nullifiers.len(), 'MPS_RENEWAL');
     assert(renewal_child_sparse_key_lows.len() == renewal_child_nullifiers.len(), 'MPS_RENEWAL');
@@ -1907,13 +2331,13 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
     let mut running_renewal_root = prior_renewal_root;
     let mut public_output_cursor = 0;
     let mut note_membership_path_cursor = 0;
-    let mut note_membership_suffix_cursor = 0;
+    let mut note_membership_accumulator_path_cursor = 0;
     while order_index < matched_order_commitments.len() {
         let order_commitment = *matched_order_commitments.at(order_index);
         let batch_id_for_order = *matched_order_batch_ids.at(order_index);
-        let pair_id_for_order = *nested_pair_ids.at(order_index);
-        let base_asset_id_for_order = *nested_base_asset_ids.at(order_index);
-        let quote_asset_id_for_order = *nested_quote_asset_ids.at(order_index);
+        let pair_id_for_order = *final_pair_ids.at(order_index);
+        let base_asset_id_for_order = *final_base_asset_ids.at(order_index);
+        let quote_asset_id_for_order = *final_quote_asset_ids.at(order_index);
         let side = *matched_sides.at(order_index);
         let order_type = *matched_order_types.at(order_index);
         let relay_mode = *matched_relay_modes.at(order_index);
@@ -1966,9 +2390,9 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
         let residual_note_metadata_commitment = *matched_residual_note_metadata_commitments
             .at(order_index);
 
-        let filled_base_amount = felt_to_u128(*nested_filled_base_amounts.at(order_index));
-        let quote_amount = felt_to_u128(*nested_quote_amounts.at(order_index));
-        let fee_amount = felt_to_u128(*nested_fee_amounts.at(order_index));
+        let filled_base_amount = felt_to_u128(*matched_fill_amounts.at(order_index));
+        let quote_amount = felt_to_u128(*final_quote_amounts.at(order_index));
+        let fee_amount = felt_to_u128(*final_fee_amounts.at(order_index));
         let order_amount = felt_to_u128(order_amount_felt);
         let min_fill = felt_to_u128(min_fill_felt);
         let funding_note_amount = felt_to_u128(funding_note_amount_felt);
@@ -2152,16 +2576,15 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
                 funding_note_withdraw_authority,
                 prior_note_root,
                 *note_membership_kinds.at(flat_index),
-                *note_membership_prefix_roots.at(flat_index),
                 *note_membership_batch_roots.at(flat_index),
                 *note_membership_path_counts.at(flat_index),
                 ref note_membership_path_cursor,
                 note_membership_path_values.span(),
                 note_membership_path_directions.span(),
-                *note_membership_suffix_counts.at(flat_index),
-                ref note_membership_suffix_cursor,
-                note_membership_suffix_roots.span(),
-                STATE_TRANSITION_ROOT_DOMAIN,
+                *note_membership_accumulator_path_counts.at(flat_index),
+                ref note_membership_accumulator_path_cursor,
+                note_membership_accumulator_path_values.span(),
+                note_membership_accumulator_path_directions.span(),
             );
             input_set_state = poseidon_hash2(input_set_state, funding_note_commitment);
             nullifier_set_state = poseidon_hash2(nullifier_set_state, input_nullifier);
@@ -2306,7 +2729,10 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
     );
     assert(note_membership_path_cursor == note_membership_path_values.len(), 'MPS_NOTE_PATH');
     assert(note_membership_path_cursor == note_membership_path_directions.len(), 'MPS_NOTE_PATH');
-    assert(note_membership_suffix_cursor == note_membership_suffix_roots.len(), 'MPS_NOTE_SUFFIX');
+    assert(
+        note_membership_accumulator_path_cursor == note_membership_accumulator_path_values.len(),
+        'MPS_NOTE_ACC_PATH',
+    );
 
     assert(
         single_field_root(
@@ -2342,12 +2768,7 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
         ) == fee_root,
         'MPS_FEE_ROOT',
     );
-    assert(
-        new_note_root == state_transition_root(
-            STATE_TRANSITION_ROOT_DOMAIN, prior_note_root, output_note_root,
-        ),
-        'MPS_NOTE_ROOT',
-    );
+    assert(new_note_root != prior_note_root, 'MPS_NOTE_ACC_ADVANCE');
     let running_nullifier_root = assert_sparse_nullifier_updates(
         prior_nullifier_root,
         consumed_nullifiers.span(),
@@ -2372,18 +2793,18 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
     assert_multi_pair_all_positive_fees_have_entries(
         fee_asset_ids.span(),
         fee_amounts.span(),
-        nested_base_asset_ids.span(),
-        nested_quote_asset_ids.span(),
-        nested_sides.span(),
-        nested_fee_amounts.span(),
+        final_base_asset_ids.span(),
+        final_quote_asset_ids.span(),
+        matched_sides.span(),
+        final_fee_amounts.span(),
     );
     assert_multi_pair_fee_entries_are_exact(
         fee_asset_ids.span(),
         fee_amounts.span(),
-        nested_base_asset_ids.span(),
-        nested_quote_asset_ids.span(),
-        nested_sides.span(),
-        nested_fee_amounts.span(),
+        final_base_asset_ids.span(),
+        final_quote_asset_ids.span(),
+        matched_sides.span(),
+        final_fee_amounts.span(),
     );
     let mut fee_index = 0;
     while fee_index < fee_asset_ids.len() {
@@ -2436,10 +2857,12 @@ pub fn verify_multi_pair_settlement_statement(data: Span<felt252>) -> felt252 {
     let recomputed_commitment = public_multi_pair_settlement_commitment(
         group_id,
         batch_epoch,
+        auction_verifier_address,
         batch_binding_root,
         protocol_fee_recipient,
         output_bundle_ref,
         multi_pair_commitment,
+        external_match_root,
         prior_note_root,
         prior_nullifier_root,
         prior_renewal_root,
@@ -2465,19 +2888,48 @@ pub fn verify_multi_pair_settlement_public_statement(data: Span<felt252>) -> fel
     let batch_ids = read_vector(data, ref index);
     let pair_ids = read_vector(data, ref index);
     let order_commitment_roots = read_vector(data, ref index);
+    let admission_roots = read_vector(data, ref index);
     let encrypted_order_set_commitments = read_vector(data, ref index);
+    let reference_price_attestation_commitments = read_vector(data, ref index);
+    let reference_price_signers = read_vector(data, ref index);
+    let reference_price_observed_at_unix_ms_values = read_vector(data, ref index);
+    let reference_price_valid_until_unix_ms_values = read_vector(data, ref index);
+    let reference_price_midpoints = read_vector(data, ref index);
+    let reference_price_lowers = read_vector(data, ref index);
+    let reference_price_uppers = read_vector(data, ref index);
+    let reference_price_source_counts = read_vector(data, ref index);
+    let reference_price_source_set_commitments = read_vector(data, ref index);
+    let reference_price_nonces = read_vector(data, ref index);
     let base_asset_ids = read_vector(data, ref index);
     let quote_asset_ids = read_vector(data, ref index);
     let price_base_scales = read_vector(data, ref index);
     let taker_fee_bps_values = read_vector(data, ref index);
-    skip_vectors(data, ref index, 101);
+    let nested_multi_pair_serialized = read_vector(data, ref index);
+    let nested_multi_pair = length_prefixed_payload(nested_multi_pair_serialized.span(), 'MPS_MP');
+    skip_vectors(data, ref index, 112);
+    let external_request_ids = read_vector(data, ref index);
+    let external_batch_ids = read_vector(data, ref index);
+    let external_pair_ids = read_vector(data, ref index);
+    let external_base_asset_ids = read_vector(data, ref index);
+    let external_quote_asset_ids = read_vector(data, ref index);
+    let external_sides = read_vector(data, ref index);
+    let external_max_base_amounts = read_vector(data, ref index);
+    let external_midpoint_prices = read_vector(data, ref index);
+    let external_price_base_scales = read_vector(data, ref index);
+    let external_valid_until_values = read_vector(data, ref index);
+    let external_consumed_base_amounts = read_vector(data, ref index);
     assert(index == data.len(), 'MPS_PUBLIC_LEN');
 
     assert_multi_pair_settlement_binding_vectors(
         batch_ids.span(),
         pair_ids.span(),
         order_commitment_roots.span(),
+        admission_roots.span(),
         encrypted_order_set_commitments.span(),
+        reference_price_attestation_commitments.span(),
+        reference_price_signers.span(),
+        reference_price_observed_at_unix_ms_values.span(),
+        reference_price_valid_until_unix_ms_values.span(),
         base_asset_ids.span(),
         quote_asset_ids.span(),
         price_base_scales.span(),
@@ -2486,7 +2938,11 @@ pub fn verify_multi_pair_settlement_public_statement(data: Span<felt252>) -> fel
     assert_all_nonzero(batch_ids.span(), 'MPS_BATCH');
     assert_all_nonzero(pair_ids.span(), 'MPS_PAIR');
     assert_all_nonzero(order_commitment_roots.span(), 'MPS_ORDER_ROOT');
+    assert_all_nonzero(admission_roots.span(), 'MPS_ADMISSION_ROOT');
     assert_all_nonzero(encrypted_order_set_commitments.span(), 'MPS_ENC_ROOT');
+    assert_all_nonzero(reference_price_attestation_commitments.span(), 'MPS_REF_COMMITMENT');
+    assert_all_nonzero(reference_price_signers.span(), 'MPS_REF_SIGNER');
+    assert_all_nonzero(reference_price_valid_until_unix_ms_values.span(), 'MPS_REF_EXPIRY');
     assert_all_nonzero(base_asset_ids.span(), 'MPS_BASE');
     assert_all_nonzero(quote_asset_ids.span(), 'MPS_QUOTE');
     assert_unique_nonzero(batch_ids.span(), 'MPS_BATCH_DUP');
@@ -2505,7 +2961,12 @@ pub fn verify_multi_pair_settlement_public_statement(data: Span<felt252>) -> fel
             pair_ids.span(),
             header.batch_epoch,
             order_commitment_roots.span(),
+            admission_roots.span(),
             encrypted_order_set_commitments.span(),
+            reference_price_attestation_commitments.span(),
+            reference_price_signers.span(),
+            reference_price_observed_at_unix_ms_values.span(),
+            reference_price_valid_until_unix_ms_values.span(),
             base_asset_ids.span(),
             quote_asset_ids.span(),
             price_base_scales.span(),
@@ -2514,14 +2975,70 @@ pub fn verify_multi_pair_settlement_public_statement(data: Span<felt252>) -> fel
             .batch_binding_root,
         'MPS_BINDING',
     );
-    assert_multi_pair_settlement_public_commitment(header);
+    assert(
+        verify_multi_pair_statement(nested_multi_pair.span()) == header.multi_pair_commitment,
+        'MPS_MP_BIND',
+    );
+    let (objective_asset_ids, objective_numerators, objective_denominators) =
+        multi_pair_payload_objective_weights(
+        nested_multi_pair.span(),
+    );
+    assert_multi_pair_reference_price_attestations(
+        header.auction_verifier_address,
+        header.reference_price_attestation_domain,
+        pair_ids.span(),
+        base_asset_ids.span(),
+        quote_asset_ids.span(),
+        price_base_scales.span(),
+        reference_price_attestation_commitments.span(),
+        reference_price_signers.span(),
+        reference_price_valid_until_unix_ms_values.span(),
+        reference_price_midpoints.span(),
+        reference_price_lowers.span(),
+        reference_price_uppers.span(),
+        reference_price_source_counts.span(),
+        reference_price_observed_at_unix_ms_values.span(),
+        reference_price_source_set_commitments.span(),
+        reference_price_nonces.span(),
+        objective_asset_ids.span(),
+        objective_numerators.span(),
+        objective_denominators.span(),
+    );
+    let external_match_root = assert_external_match_settlement_records(
+        header.group_id,
+        external_request_ids.span(),
+        external_batch_ids.span(),
+        external_pair_ids.span(),
+        external_base_asset_ids.span(),
+        external_quote_asset_ids.span(),
+        external_sides.span(),
+        external_max_base_amounts.span(),
+        external_midpoint_prices.span(),
+        external_price_base_scales.span(),
+        external_valid_until_values.span(),
+        external_consumed_base_amounts.span(),
+        pair_ids.span(),
+        base_asset_ids.span(),
+        quote_asset_ids.span(),
+        price_base_scales.span(),
+        reference_price_midpoints.span(),
+    );
+    assert_multi_pair_settlement_public_commitment(header, external_match_root);
     header.transcript_commitment
 }
 
 pub fn verify_multi_pair_settlement_order_state_statement(data: Span<felt252>) -> felt252 {
     let mut index: usize = 0;
     let header = read_multi_pair_settlement_header(data, ref index);
-    skip_vectors(data, ref index, 8);
+    let batch_ids = read_vector(data, ref index);
+    let pair_ids = read_vector(data, ref index);
+    let order_commitment_roots = read_vector(data, ref index);
+    let admission_roots = read_vector(data, ref index);
+    skip_vectors(data, ref index, 11);
+    let base_asset_ids = read_vector(data, ref index);
+    let quote_asset_ids = read_vector(data, ref index);
+    let price_base_scales = read_vector(data, ref index);
+    let taker_fee_bps_values = read_vector(data, ref index);
     let nested_multi_pair_serialized = read_vector(data, ref index);
     let nested_multi_pair = length_prefixed_payload(nested_multi_pair_serialized.span(), 'MPS_MP');
     assert(
@@ -2529,17 +3046,18 @@ pub fn verify_multi_pair_settlement_order_state_statement(data: Span<felt252>) -
     );
     let (
         nested_order_commitments,
-        nested_pair_ids,
-        nested_base_asset_ids,
-        nested_quote_asset_ids,
-        nested_sides,
-        nested_submitted_base_amounts,
-        nested_min_fill_base_amounts,
-        nested_limit_prices,
+        _nested_pair_ids,
+        _nested_base_asset_ids,
+        _nested_quote_asset_ids,
+        _nested_sides,
+        _nested_submitted_base_amounts,
+        _nested_min_fill_base_amounts,
+        _nested_limit_prices,
         _nested_price_base_scales,
         nested_filled_base_amounts,
         nested_quote_amounts,
-        nested_fee_amounts,
+        _nested_taker_fee_bps,
+        _nested_fee_amounts,
     ) =
         multi_pair_payload_chosen_fill_vectors(
         nested_multi_pair.span(),
@@ -2618,13 +3136,13 @@ pub fn verify_multi_pair_settlement_order_state_statement(data: Span<felt252>) -
     let nullifier_sparse_path_values = read_vector(data, ref index);
     let nullifier_sparse_path_directions = read_vector(data, ref index);
     let note_membership_kinds = read_vector(data, ref index);
-    let note_membership_prefix_roots = read_vector(data, ref index);
     let note_membership_batch_roots = read_vector(data, ref index);
     let note_membership_path_counts = read_vector(data, ref index);
     let note_membership_path_values = read_vector(data, ref index);
     let note_membership_path_directions = read_vector(data, ref index);
-    let note_membership_suffix_counts = read_vector(data, ref index);
-    let note_membership_suffix_roots = read_vector(data, ref index);
+    let note_membership_accumulator_path_counts = read_vector(data, ref index);
+    let note_membership_accumulator_path_values = read_vector(data, ref index);
+    let note_membership_accumulator_path_directions = read_vector(data, ref index);
     let renewal_child_sparse_key_lows = read_vector(data, ref index);
     let renewal_child_sparse_key_highs = read_vector(data, ref index);
     let renewal_child_sparse_path_counts = read_vector(data, ref index);
@@ -2637,26 +3155,99 @@ pub fn verify_multi_pair_settlement_order_state_statement(data: Span<felt252>) -
     let renewal_cancel_sparse_path_directions = read_vector(data, ref index);
     skip_vectors(data, ref index, 5);
     skip_vectors(data, ref index, 4);
+    let admission_summary_batch_ids = read_vector(data, ref index);
+    let admission_summary_order_commitments = read_vector(data, ref index);
+    let admission_summary_sides = read_vector(data, ref index);
+    let admission_summary_order_types = read_vector(data, ref index);
+    let admission_summary_relay_modes = read_vector(data, ref index);
+    let admission_summary_limit_prices = read_vector(data, ref index);
+    let admission_summary_order_amounts = read_vector(data, ref index);
+    let admission_summary_min_fills = read_vector(data, ref index);
+    let admission_summary_time_in_force = read_vector(data, ref index);
+    let admission_summary_execution_preferences = read_vector(data, ref index);
+    let admission_summary_funding_note_amounts = read_vector(data, ref index);
+    let admission_summary_funding_note_owner_keys = read_vector(data, ref index);
+    let _external_request_ids = read_vector(data, ref index);
+    let _external_batch_ids = read_vector(data, ref index);
+    let external_pair_ids = read_vector(data, ref index);
+    let external_base_asset_ids = read_vector(data, ref index);
+    let external_quote_asset_ids = read_vector(data, ref index);
+    let external_sides = read_vector(data, ref index);
+    let external_max_base_amounts = read_vector(data, ref index);
+    let external_midpoint_prices = read_vector(data, ref index);
+    let external_price_base_scales = read_vector(data, ref index);
+    let _external_valid_until_values = read_vector(data, ref index);
+    let external_consumed_base_amounts = read_vector(data, ref index);
     assert(index == data.len(), 'MPS_ORDER_STATE_LEN');
 
+    let nested_eligible_order_commitments = multi_pair_payload_eligible_order_commitments(
+        nested_multi_pair.span(),
+    );
+    assert_multi_pair_admission_summaries(
+        batch_ids.span(),
+        order_commitment_roots.span(),
+        admission_roots.span(),
+        admission_summary_batch_ids.span(),
+        admission_summary_order_commitments.span(),
+        admission_summary_sides.span(),
+        admission_summary_order_types.span(),
+        admission_summary_relay_modes.span(),
+        admission_summary_limit_prices.span(),
+        admission_summary_order_amounts.span(),
+        admission_summary_min_fills.span(),
+        admission_summary_time_in_force.span(),
+        admission_summary_execution_preferences.span(),
+        admission_summary_funding_note_amounts.span(),
+        admission_summary_funding_note_owner_keys.span(),
+        nested_eligible_order_commitments.span(),
+    );
+
+    let final_fill_inputs = FinalMultiPairFillInputs {
+        binding_batch_ids: batch_ids.span(),
+        binding_pair_ids: pair_ids.span(),
+        binding_base_asset_ids: base_asset_ids.span(),
+        binding_quote_asset_ids: quote_asset_ids.span(),
+        binding_price_base_scales: price_base_scales.span(),
+        binding_taker_fee_bps: taker_fee_bps_values.span(),
+        admission_batch_ids: admission_summary_batch_ids.span(),
+        admission_order_commitments: admission_summary_order_commitments.span(),
+        admission_sides: admission_summary_sides.span(),
+        admission_order_types: admission_summary_order_types.span(),
+        admission_limit_prices: admission_summary_limit_prices.span(),
+        admission_order_amounts: admission_summary_order_amounts.span(),
+        admission_execution_preferences: admission_summary_execution_preferences.span(),
+        admission_funding_amounts: admission_summary_funding_note_amounts.span(),
+        private_order_commitments: nested_order_commitments.span(),
+        private_filled_base_amounts: nested_filled_base_amounts.span(),
+        private_quote_amounts: nested_quote_amounts.span(),
+        external_pair_ids: external_pair_ids.span(),
+        external_base_asset_ids: external_base_asset_ids.span(),
+        external_quote_asset_ids: external_quote_asset_ids.span(),
+        external_sides: external_sides.span(),
+        external_max_base_amounts: external_max_base_amounts.span(),
+        external_midpoint_prices: external_midpoint_prices.span(),
+        external_price_base_scales: external_price_base_scales.span(),
+        external_consumed_base_amounts: external_consumed_base_amounts.span(),
+    };
+    let (
+        final_pair_ids,
+        final_base_asset_ids,
+        final_quote_asset_ids,
+        _final_price_base_scales,
+        _final_taker_fee_bps,
+        final_quote_amounts,
+        final_fee_amounts,
+    ) =
+        assert_final_multi_pair_fill_vectors(
+        @final_fill_inputs,
+        matched_order_batch_ids.span(),
+        matched_order_commitments.span(),
+        matched_fill_amounts.span(),
+        matched_sides.span(),
+        matched_order_amounts.span(),
+        matched_limit_prices.span(),
+    );
     assert(header.matched_order_count == matched_order_commitments.len().into(), 'MPS_MATCHED');
-    assert(header.matched_order_count == matched_order_batch_ids.len().into(), 'MPS_MATCHED');
-    assert(header.matched_order_count == matched_fill_amounts.len().into(), 'MPS_MATCHED');
-    assert(header.matched_order_count == nested_order_commitments.len().into(), 'MPS_MATCHED');
-    assert_equal_vectors(
-        matched_order_commitments.span(), nested_order_commitments.span(), 'MPS_MATCHED',
-    );
-    assert_equal_vectors(
-        matched_fill_amounts.span(), nested_filled_base_amounts.span(), 'MPS_FILL',
-    );
-    assert_equal_vectors(matched_sides.span(), nested_sides.span(), 'MPS_SIDE');
-    assert_equal_vectors(
-        matched_order_amounts.span(), nested_submitted_base_amounts.span(), 'MPS_AMOUNT',
-    );
-    assert_equal_vectors(
-        matched_min_fills.span(), nested_min_fill_base_amounts.span(), 'MPS_MIN_FILL',
-    );
-    assert_equal_vectors(matched_limit_prices.span(), nested_limit_prices.span(), 'MPS_LIMIT');
 
     let funding_input_count = sum_funding_input_counts(matched_funding_input_counts.span());
     assert_settlement_bounds(
@@ -2713,15 +3304,21 @@ pub fn verify_multi_pair_settlement_order_state_statement(data: Span<felt252>) -
             matched_funding_note_blindings.len().into(), matched_funding_note_nonces.len().into(),
             matched_funding_note_metadata_commitments.len().into(),
             consumed_note_commitments.len().into(), consumed_nullifiers.len().into(),
-            note_membership_kinds.len().into(), note_membership_prefix_roots.len().into(),
-            note_membership_batch_roots.len().into(), note_membership_path_counts.len().into(),
-            note_membership_suffix_counts.len().into(),
+            note_membership_kinds.len().into(), note_membership_batch_roots.len().into(),
+            note_membership_path_counts.len().into(),
+            note_membership_accumulator_path_counts.len().into(),
         ]
             .span(),
         'MPS_FUNDING_LEN',
     );
     assert(
         note_membership_path_values.len() == note_membership_path_directions.len(), 'MPS_NOTE_PATH',
+    );
+    assert(
+        note_membership_accumulator_path_values
+            .len() == note_membership_accumulator_path_directions
+            .len(),
+        'MPS_NOTE_ACC_PATH',
     );
     assert(renewal_parent_order_commitments.len() == renewal_child_nullifiers.len(), 'MPS_RENEWAL');
     assert(renewal_child_sparse_key_lows.len() == renewal_child_nullifiers.len(), 'MPS_RENEWAL');
@@ -2760,13 +3357,13 @@ pub fn verify_multi_pair_settlement_order_state_statement(data: Span<felt252>) -
     let mut running_renewal_root = header.prior_renewal_root;
     let mut public_output_cursor = 0;
     let mut note_membership_path_cursor = 0;
-    let mut note_membership_suffix_cursor = 0;
+    let mut note_membership_accumulator_path_cursor = 0;
     while order_index < matched_order_commitments.len() {
         let order_commitment = *matched_order_commitments.at(order_index);
         let batch_id_for_order = *matched_order_batch_ids.at(order_index);
-        let pair_id_for_order = *nested_pair_ids.at(order_index);
-        let base_asset_id_for_order = *nested_base_asset_ids.at(order_index);
-        let quote_asset_id_for_order = *nested_quote_asset_ids.at(order_index);
+        let pair_id_for_order = *final_pair_ids.at(order_index);
+        let base_asset_id_for_order = *final_base_asset_ids.at(order_index);
+        let quote_asset_id_for_order = *final_quote_asset_ids.at(order_index);
         let side = *matched_sides.at(order_index);
         let order_type = *matched_order_types.at(order_index);
         let relay_mode = *matched_relay_modes.at(order_index);
@@ -2819,9 +3416,9 @@ pub fn verify_multi_pair_settlement_order_state_statement(data: Span<felt252>) -
         let residual_note_metadata_commitment = *matched_residual_note_metadata_commitments
             .at(order_index);
 
-        let filled_base_amount = felt_to_u128(*nested_filled_base_amounts.at(order_index));
-        let quote_amount = felt_to_u128(*nested_quote_amounts.at(order_index));
-        let fee_amount = felt_to_u128(*nested_fee_amounts.at(order_index));
+        let filled_base_amount = felt_to_u128(*matched_fill_amounts.at(order_index));
+        let quote_amount = felt_to_u128(*final_quote_amounts.at(order_index));
+        let fee_amount = felt_to_u128(*final_fee_amounts.at(order_index));
         let order_amount = felt_to_u128(order_amount_felt);
         let min_fill = felt_to_u128(min_fill_felt);
         let funding_note_amount = felt_to_u128(funding_note_amount_felt);
@@ -3005,16 +3602,15 @@ pub fn verify_multi_pair_settlement_order_state_statement(data: Span<felt252>) -
                 funding_note_withdraw_authority,
                 header.prior_note_root,
                 *note_membership_kinds.at(flat_index),
-                *note_membership_prefix_roots.at(flat_index),
                 *note_membership_batch_roots.at(flat_index),
                 *note_membership_path_counts.at(flat_index),
                 ref note_membership_path_cursor,
                 note_membership_path_values.span(),
                 note_membership_path_directions.span(),
-                *note_membership_suffix_counts.at(flat_index),
-                ref note_membership_suffix_cursor,
-                note_membership_suffix_roots.span(),
-                STATE_TRANSITION_ROOT_DOMAIN,
+                *note_membership_accumulator_path_counts.at(flat_index),
+                ref note_membership_accumulator_path_cursor,
+                note_membership_accumulator_path_values.span(),
+                note_membership_accumulator_path_directions.span(),
             );
             input_set_state = poseidon_hash2(input_set_state, funding_note_commitment);
             nullifier_set_state = poseidon_hash2(nullifier_set_state, input_nullifier);
@@ -3159,7 +3755,10 @@ pub fn verify_multi_pair_settlement_order_state_statement(data: Span<felt252>) -
     );
     assert(note_membership_path_cursor == note_membership_path_values.len(), 'MPS_NOTE_PATH');
     assert(note_membership_path_cursor == note_membership_path_directions.len(), 'MPS_NOTE_PATH');
-    assert(note_membership_suffix_cursor == note_membership_suffix_roots.len(), 'MPS_NOTE_SUFFIX');
+    assert(
+        note_membership_accumulator_path_cursor == note_membership_accumulator_path_values.len(),
+        'MPS_NOTE_ACC_PATH',
+    );
 
     assert(
         single_field_root(CONSUMED_NOTE_ROOT_DOMAIN, consumed_note_commitments.span()) == header
@@ -3187,13 +3786,7 @@ pub fn verify_multi_pair_settlement_order_state_statement(data: Span<felt252>) -
             .output_note_root,
         'MPS_OUTPUT_ROOT',
     );
-    assert(
-        header
-            .new_note_root == state_transition_root(
-                STATE_TRANSITION_ROOT_DOMAIN, header.prior_note_root, header.output_note_root,
-            ),
-        'MPS_NOTE_ROOT',
-    );
+    assert(header.new_note_root != header.prior_note_root, 'MPS_NOTE_ACC_ADVANCE');
     let running_nullifier_root = assert_sparse_nullifier_updates(
         header.prior_nullifier_root,
         consumed_nullifiers.span(),
@@ -3226,11 +3819,13 @@ pub fn verify_multi_pair_settlement_completion_statement(data: Span<felt252>) ->
     let batch_ids = read_vector(data, ref index);
     let pair_ids = read_vector(data, ref index);
     let _order_commitment_roots = read_vector(data, ref index);
+    let _admission_roots = read_vector(data, ref index);
     let _encrypted_order_set_commitments = read_vector(data, ref index);
+    skip_vectors(data, ref index, 10);
     let base_asset_ids = read_vector(data, ref index);
     let quote_asset_ids = read_vector(data, ref index);
     let price_base_scales = read_vector(data, ref index);
-    let _taker_fee_bps_values = read_vector(data, ref index);
+    let taker_fee_bps_values = read_vector(data, ref index);
     let nested_multi_pair_serialized = read_vector(data, ref index);
     let nested_multi_pair = length_prefixed_payload(nested_multi_pair_serialized.span(), 'MPS_MP');
 
@@ -3242,8 +3837,29 @@ pub fn verify_multi_pair_settlement_completion_statement(data: Span<felt252>) ->
     skip_vectors(data, ref index, 2);
     let matched_limit_prices = read_vector(data, ref index);
     let matched_order_amounts = read_vector(data, ref index);
-    let matched_min_fills = read_vector(data, ref index);
-    skip_vectors(data, ref index, 80);
+    let _matched_min_fills = read_vector(data, ref index);
+    skip_vectors(data, ref index, 81);
+    let admission_summary_batch_ids = read_vector(data, ref index);
+    let admission_summary_order_commitments = read_vector(data, ref index);
+    let admission_summary_sides = read_vector(data, ref index);
+    let admission_summary_order_types = read_vector(data, ref index);
+    skip_vectors(data, ref index, 1);
+    let admission_summary_limit_prices = read_vector(data, ref index);
+    let admission_summary_order_amounts = read_vector(data, ref index);
+    skip_vectors(data, ref index, 2);
+    let admission_summary_execution_preferences = read_vector(data, ref index);
+    let admission_summary_funding_note_amounts = read_vector(data, ref index);
+    skip_vectors(data, ref index, 1);
+    skip_vectors(data, ref index, 2);
+    let external_pair_ids = read_vector(data, ref index);
+    let external_base_asset_ids = read_vector(data, ref index);
+    let external_quote_asset_ids = read_vector(data, ref index);
+    let external_sides = read_vector(data, ref index);
+    let external_max_base_amounts = read_vector(data, ref index);
+    let external_midpoint_prices = read_vector(data, ref index);
+    let external_price_base_scales = read_vector(data, ref index);
+    skip_vectors(data, ref index, 1);
+    let external_consumed_base_amounts = read_vector(data, ref index);
     assert(index == data.len(), 'MPS_COMPLETE_LEN');
 
     let nested_commitment = verify_multi_pair_statement(nested_multi_pair.span());
@@ -3253,51 +3869,91 @@ pub fn verify_multi_pair_settlement_completion_statement(data: Span<felt252>) ->
     );
     let (
         nested_order_commitments,
-        nested_pair_ids,
-        nested_base_asset_ids,
-        nested_quote_asset_ids,
-        nested_sides,
-        nested_submitted_base_amounts,
-        nested_min_fill_base_amounts,
-        nested_limit_prices,
-        nested_price_base_scales,
+        _nested_pair_ids,
+        _nested_base_asset_ids,
+        _nested_quote_asset_ids,
+        _nested_sides,
+        _nested_submitted_base_amounts,
+        _nested_min_fill_base_amounts,
+        _nested_limit_prices,
+        _nested_price_base_scales,
         nested_filled_base_amounts,
-        _nested_quote_amounts,
+        nested_quote_amounts,
+        _nested_taker_fee_bps,
         _nested_fee_amounts,
     ) =
         multi_pair_payload_chosen_fill_vectors(
         nested_multi_pair.span(),
     );
 
+    let final_fill_inputs = FinalMultiPairFillInputs {
+        binding_batch_ids: batch_ids.span(),
+        binding_pair_ids: pair_ids.span(),
+        binding_base_asset_ids: base_asset_ids.span(),
+        binding_quote_asset_ids: quote_asset_ids.span(),
+        binding_price_base_scales: price_base_scales.span(),
+        binding_taker_fee_bps: taker_fee_bps_values.span(),
+        admission_batch_ids: admission_summary_batch_ids.span(),
+        admission_order_commitments: admission_summary_order_commitments.span(),
+        admission_sides: admission_summary_sides.span(),
+        admission_order_types: admission_summary_order_types.span(),
+        admission_limit_prices: admission_summary_limit_prices.span(),
+        admission_order_amounts: admission_summary_order_amounts.span(),
+        admission_execution_preferences: admission_summary_execution_preferences.span(),
+        admission_funding_amounts: admission_summary_funding_note_amounts.span(),
+        private_order_commitments: nested_order_commitments.span(),
+        private_filled_base_amounts: nested_filled_base_amounts.span(),
+        private_quote_amounts: nested_quote_amounts.span(),
+        external_pair_ids: external_pair_ids.span(),
+        external_base_asset_ids: external_base_asset_ids.span(),
+        external_quote_asset_ids: external_quote_asset_ids.span(),
+        external_sides: external_sides.span(),
+        external_max_base_amounts: external_max_base_amounts.span(),
+        external_midpoint_prices: external_midpoint_prices.span(),
+        external_price_base_scales: external_price_base_scales.span(),
+        external_consumed_base_amounts: external_consumed_base_amounts.span(),
+    };
+    let (
+        final_pair_ids,
+        final_base_asset_ids,
+        final_quote_asset_ids,
+        final_price_base_scales,
+        final_taker_fee_bps,
+        _final_quote_amounts,
+        _final_fee_amounts,
+    ) =
+        assert_final_multi_pair_fill_vectors(
+        @final_fill_inputs,
+        matched_order_batch_ids.span(),
+        matched_order_commitments.span(),
+        matched_fill_amounts.span(),
+        matched_sides.span(),
+        matched_order_amounts.span(),
+        matched_limit_prices.span(),
+    );
     assert(header.matched_order_count == matched_order_commitments.len().into(), 'MPS_MATCHED');
-    assert(header.matched_order_count == matched_order_batch_ids.len().into(), 'MPS_MATCHED');
-    assert(header.matched_order_count == matched_fill_amounts.len().into(), 'MPS_MATCHED');
-    assert(header.matched_order_count == nested_order_commitments.len().into(), 'MPS_MATCHED');
-    assert_equal_vectors(
-        matched_order_commitments.span(), nested_order_commitments.span(), 'MPS_MATCHED',
-    );
-    assert_equal_vectors(
-        matched_fill_amounts.span(), nested_filled_base_amounts.span(), 'MPS_FILL',
-    );
-    assert_equal_vectors(matched_sides.span(), nested_sides.span(), 'MPS_SIDE');
-    assert_equal_vectors(
-        matched_order_amounts.span(), nested_submitted_base_amounts.span(), 'MPS_AMOUNT',
-    );
-    assert_equal_vectors(
-        matched_min_fills.span(), nested_min_fill_base_amounts.span(), 'MPS_MIN_FILL',
-    );
-    assert_equal_vectors(matched_limit_prices.span(), nested_limit_prices.span(), 'MPS_LIMIT');
     assert_matched_fill_batch_bindings(
         matched_order_batch_ids.span(),
-        nested_pair_ids.span(),
-        nested_base_asset_ids.span(),
-        nested_quote_asset_ids.span(),
-        nested_price_base_scales.span(),
+        final_pair_ids.span(),
+        final_base_asset_ids.span(),
+        final_quote_asset_ids.span(),
+        final_price_base_scales.span(),
+        final_taker_fee_bps.span(),
         batch_ids.span(),
         pair_ids.span(),
         base_asset_ids.span(),
         quote_asset_ids.span(),
         price_base_scales.span(),
+        taker_fee_bps_values.span(),
+    );
+    let (candidate_pair_ids, candidate_taker_fee_bps) = multi_pair_payload_candidate_fee_vectors(
+        nested_multi_pair.span(),
+    );
+    assert_multi_pair_fill_fee_bindings(
+        candidate_pair_ids.span(),
+        candidate_taker_fee_bps.span(),
+        pair_ids.span(),
+        taker_fee_bps_values.span(),
     );
     header.transcript_commitment
 }
@@ -3305,15 +3961,22 @@ pub fn verify_multi_pair_settlement_completion_statement(data: Span<felt252>) ->
 pub fn verify_multi_pair_settlement_fee_recovery_statement(data: Span<felt252>) -> felt252 {
     let mut index: usize = 0;
     let header = read_multi_pair_settlement_header(data, ref index);
-    skip_vectors(data, ref index, 8);
+    let batch_ids = read_vector(data, ref index);
+    let pair_ids = read_vector(data, ref index);
+    skip_vectors(data, ref index, 13);
+    let base_asset_ids = read_vector(data, ref index);
+    let quote_asset_ids = read_vector(data, ref index);
+    let price_base_scales = read_vector(data, ref index);
+    let taker_fee_bps_values = read_vector(data, ref index);
     let nested_multi_pair_serialized = read_vector(data, ref index);
     let nested_multi_pair = length_prefixed_payload(nested_multi_pair_serialized.span(), 'MPS_MP');
     assert(
         multi_pair_payload_group_id(nested_multi_pair.span()) == header.group_id, 'MPS_MP_GROUP',
     );
-    skip_vectors(data, ref index, 1);
+    let matched_order_batch_ids = read_vector(data, ref index);
     let matched_order_commitments = read_vector(data, ref index);
-    skip_vectors(data, ref index, 5);
+    let matched_fill_amounts = read_vector(data, ref index);
+    skip_vectors(data, ref index, 4);
     let output_note_commitments = read_vector(data, ref index);
     let output_note_asset_ids = read_vector(data, ref index);
     let output_note_amounts = read_vector(data, ref index);
@@ -3321,24 +3984,29 @@ pub fn verify_multi_pair_settlement_fee_recovery_statement(data: Span<felt252>) 
     let fee_asset_ids = read_vector(data, ref index);
     let fee_amounts = read_vector(data, ref index);
     let fee_recipients = read_vector(data, ref index);
+    let matched_sides = read_vector(data, ref index);
+    skip_vectors(data, ref index, 2);
+    let matched_limit_prices = read_vector(data, ref index);
+    let matched_order_amounts = read_vector(data, ref index);
     let (
-        _nested_order_commitments,
+        nested_order_commitments,
         _nested_pair_ids,
-        nested_base_asset_ids,
-        nested_quote_asset_ids,
-        nested_sides,
+        _nested_base_asset_ids,
+        _nested_quote_asset_ids,
+        _nested_sides,
         _nested_submitted_base_amounts,
         _nested_min_fill_base_amounts,
         _nested_limit_prices,
         _nested_price_base_scales,
-        _nested_filled_base_amounts,
-        _nested_quote_amounts,
-        nested_fee_amounts,
+        nested_filled_base_amounts,
+        nested_quote_amounts,
+        _nested_taker_fee_bps,
+        _nested_fee_amounts,
     ) =
         multi_pair_payload_chosen_fill_vectors(
         nested_multi_pair.span(),
     );
-    skip_vectors(data, ref index, 44);
+    skip_vectors(data, ref index, 40);
     let matched_residual_note_flags = read_vector(data, ref index);
     skip_vectors(data, ref index, 32);
     let output_note_owner_keys = read_vector(data, ref index);
@@ -3350,7 +4018,74 @@ pub fn verify_multi_pair_settlement_fee_recovery_statement(data: Span<felt252>) 
     let output_recovery_auth_tags = read_vector(data, ref index);
     let output_recovery_ciphertext_fields = read_vector(data, ref index);
     let output_recovery_dummy_commitments = read_vector(data, ref index);
+    let admission_summary_batch_ids = read_vector(data, ref index);
+    let admission_summary_order_commitments = read_vector(data, ref index);
+    let admission_summary_sides = read_vector(data, ref index);
+    let admission_summary_order_types = read_vector(data, ref index);
+    skip_vectors(data, ref index, 1);
+    let admission_summary_limit_prices = read_vector(data, ref index);
+    let admission_summary_order_amounts = read_vector(data, ref index);
+    skip_vectors(data, ref index, 2);
+    let admission_summary_execution_preferences = read_vector(data, ref index);
+    let admission_summary_funding_note_amounts = read_vector(data, ref index);
+    skip_vectors(data, ref index, 1);
+    skip_vectors(data, ref index, 2);
+    let external_pair_ids = read_vector(data, ref index);
+    let external_base_asset_ids = read_vector(data, ref index);
+    let external_quote_asset_ids = read_vector(data, ref index);
+    let external_sides = read_vector(data, ref index);
+    let external_max_base_amounts = read_vector(data, ref index);
+    let external_midpoint_prices = read_vector(data, ref index);
+    let external_price_base_scales = read_vector(data, ref index);
+    skip_vectors(data, ref index, 1);
+    let external_consumed_base_amounts = read_vector(data, ref index);
     assert(index == data.len(), 'MPS_FEE_LEN');
+
+    let final_fill_inputs = FinalMultiPairFillInputs {
+        binding_batch_ids: batch_ids.span(),
+        binding_pair_ids: pair_ids.span(),
+        binding_base_asset_ids: base_asset_ids.span(),
+        binding_quote_asset_ids: quote_asset_ids.span(),
+        binding_price_base_scales: price_base_scales.span(),
+        binding_taker_fee_bps: taker_fee_bps_values.span(),
+        admission_batch_ids: admission_summary_batch_ids.span(),
+        admission_order_commitments: admission_summary_order_commitments.span(),
+        admission_sides: admission_summary_sides.span(),
+        admission_order_types: admission_summary_order_types.span(),
+        admission_limit_prices: admission_summary_limit_prices.span(),
+        admission_order_amounts: admission_summary_order_amounts.span(),
+        admission_execution_preferences: admission_summary_execution_preferences.span(),
+        admission_funding_amounts: admission_summary_funding_note_amounts.span(),
+        private_order_commitments: nested_order_commitments.span(),
+        private_filled_base_amounts: nested_filled_base_amounts.span(),
+        private_quote_amounts: nested_quote_amounts.span(),
+        external_pair_ids: external_pair_ids.span(),
+        external_base_asset_ids: external_base_asset_ids.span(),
+        external_quote_asset_ids: external_quote_asset_ids.span(),
+        external_sides: external_sides.span(),
+        external_max_base_amounts: external_max_base_amounts.span(),
+        external_midpoint_prices: external_midpoint_prices.span(),
+        external_price_base_scales: external_price_base_scales.span(),
+        external_consumed_base_amounts: external_consumed_base_amounts.span(),
+    };
+    let (
+        _final_pair_ids,
+        final_base_asset_ids,
+        final_quote_asset_ids,
+        _final_price_base_scales,
+        _final_taker_fee_bps,
+        _final_quote_amounts,
+        final_fee_amounts,
+    ) =
+        assert_final_multi_pair_fill_vectors(
+        @final_fill_inputs,
+        matched_order_batch_ids.span(),
+        matched_order_commitments.span(),
+        matched_fill_amounts.span(),
+        matched_sides.span(),
+        matched_order_amounts.span(),
+        matched_limit_prices.span(),
+    );
 
     assert(output_note_commitments.len() == output_note_asset_ids.len(), 'MPS_OUTPUT');
     assert(output_note_commitments.len() == output_note_amounts.len(), 'MPS_OUTPUT');
@@ -3391,18 +4126,18 @@ pub fn verify_multi_pair_settlement_fee_recovery_statement(data: Span<felt252>) 
     assert_multi_pair_all_positive_fees_have_entries(
         fee_asset_ids.span(),
         fee_amounts.span(),
-        nested_base_asset_ids.span(),
-        nested_quote_asset_ids.span(),
-        nested_sides.span(),
-        nested_fee_amounts.span(),
+        final_base_asset_ids.span(),
+        final_quote_asset_ids.span(),
+        matched_sides.span(),
+        final_fee_amounts.span(),
     );
     assert_multi_pair_fee_entries_are_exact(
         fee_asset_ids.span(),
         fee_amounts.span(),
-        nested_base_asset_ids.span(),
-        nested_quote_asset_ids.span(),
-        nested_sides.span(),
-        nested_fee_amounts.span(),
+        final_base_asset_ids.span(),
+        final_quote_asset_ids.span(),
+        matched_sides.span(),
+        final_fee_amounts.span(),
     );
     let mut fee_index = 0;
     let mut public_output_cursor = matched_public_output_count(
@@ -3473,7 +4208,7 @@ pub fn verify_note_consolidation_statement(data: Span<felt252>) -> felt252 {
     let consumed_note_root_domain = read_next(data, ref index);
     let consumed_nullifier_root_domain = read_next(data, ref index);
     let output_note_root_domain = read_next(data, ref index);
-    let state_transition_root_domain = read_next(data, ref index);
+    let claimed_new_note_root = read_next(data, ref index);
     let nullifier_sparse_leaf_domain = read_next(data, ref index);
     let nullifier_sparse_node_domain = read_next(data, ref index);
     assert(note_commitment_domain == NOTE_COMMITMENT_DOMAIN, 'E');
@@ -3485,7 +4220,6 @@ pub fn verify_note_consolidation_statement(data: Span<felt252>) -> felt252 {
     assert(consumed_note_root_domain == CONSUMED_NOTE_ROOT_DOMAIN, 'E');
     assert(consumed_nullifier_root_domain == CONSUMED_NULLIFIER_ROOT_DOMAIN, 'E');
     assert(output_note_root_domain == OUTPUT_NOTE_ROOT_DOMAIN, 'E');
-    assert(state_transition_root_domain == STATE_TRANSITION_ROOT_DOMAIN, 'E');
     assert(nullifier_sparse_leaf_domain == NULLIFIER_SPARSE_LEAF_DOMAIN_CANONICAL, 'E');
     assert(nullifier_sparse_node_domain == NULLIFIER_SPARSE_NODE_DOMAIN_CANONICAL, 'E');
 
@@ -3503,13 +4237,13 @@ pub fn verify_note_consolidation_statement(data: Span<felt252>) -> felt252 {
     let spend_authorization_s = read_next(data, ref index);
 
     let note_membership_kinds = read_vector(data, ref index);
-    let note_membership_prefix_roots = read_vector(data, ref index);
     let note_membership_batch_roots = read_vector(data, ref index);
     let note_membership_path_counts = read_vector(data, ref index);
     let note_membership_path_values = read_vector(data, ref index);
     let note_membership_path_directions = read_vector(data, ref index);
-    let note_membership_suffix_counts = read_vector(data, ref index);
-    let note_membership_suffix_roots = read_vector(data, ref index);
+    let note_membership_accumulator_path_counts = read_vector(data, ref index);
+    let note_membership_accumulator_path_values = read_vector(data, ref index);
+    let note_membership_accumulator_path_directions = read_vector(data, ref index);
 
     let nullifier_sparse_key_lows = read_vector(data, ref index);
     let nullifier_sparse_key_highs = read_vector(data, ref index);
@@ -3544,10 +4278,11 @@ pub fn verify_note_consolidation_statement(data: Span<felt252>) -> felt252 {
             input_spend_authorities.len().into(), input_withdraw_authorities.len().into(),
             input_blindings.len().into(), input_nonces.len().into(),
             input_metadata_commitments.len().into(), input_nullifiers.len().into(),
-            note_membership_kinds.len().into(), note_membership_prefix_roots.len().into(),
-            note_membership_batch_roots.len().into(), note_membership_path_counts.len().into(),
-            note_membership_suffix_counts.len().into(), nullifier_sparse_key_lows.len().into(),
-            nullifier_sparse_key_highs.len().into(), nullifier_sparse_path_counts.len().into(),
+            note_membership_kinds.len().into(), note_membership_batch_roots.len().into(),
+            note_membership_path_counts.len().into(),
+            note_membership_accumulator_path_counts.len().into(),
+            nullifier_sparse_key_lows.len().into(), nullifier_sparse_key_highs.len().into(),
+            nullifier_sparse_path_counts.len().into(),
         ]
             .span(),
         'E',
@@ -3568,6 +4303,12 @@ pub fn verify_note_consolidation_statement(data: Span<felt252>) -> felt252 {
         'E',
     );
     assert(note_membership_path_values.len() == note_membership_path_directions.len(), 'E');
+    assert(
+        note_membership_accumulator_path_values
+            .len() == note_membership_accumulator_path_directions
+            .len(),
+        'E',
+    );
     assert(nullifier_sparse_path_values.len() == nullifier_sparse_path_directions.len(), 'E');
     assert(spend_authorization_r != 0, 'E');
     assert(spend_authorization_s != 0, 'E');
@@ -3589,7 +4330,7 @@ pub fn verify_note_consolidation_statement(data: Span<felt252>) -> felt252 {
 
     let mut input_total: u128 = 0;
     let mut membership_path_cursor = 0;
-    let mut membership_suffix_cursor = 0;
+    let mut membership_accumulator_path_cursor = 0;
     let mut input_index = 0;
     while input_index < input_note_commitments.len() {
         let input_commitment = *input_note_commitments.at(input_index);
@@ -3630,23 +4371,24 @@ pub fn verify_note_consolidation_statement(data: Span<felt252>) -> felt252 {
             input_withdraw,
             prior_note_root,
             *note_membership_kinds.at(input_index),
-            *note_membership_prefix_roots.at(input_index),
             *note_membership_batch_roots.at(input_index),
             *note_membership_path_counts.at(input_index),
             ref membership_path_cursor,
             note_membership_path_values.span(),
             note_membership_path_directions.span(),
-            *note_membership_suffix_counts.at(input_index),
-            ref membership_suffix_cursor,
-            note_membership_suffix_roots.span(),
-            state_transition_root_domain,
+            *note_membership_accumulator_path_counts.at(input_index),
+            ref membership_accumulator_path_cursor,
+            note_membership_accumulator_path_values.span(),
+            note_membership_accumulator_path_directions.span(),
         );
         input_total += input_amount.try_into().expect('E');
         input_index += 1;
     }
     assert(membership_path_cursor == note_membership_path_values.len(), 'E');
     assert(membership_path_cursor == note_membership_path_directions.len(), 'E');
-    assert(membership_suffix_cursor == note_membership_suffix_roots.len(), 'E');
+    assert(
+        membership_accumulator_path_cursor == note_membership_accumulator_path_values.len(), 'E',
+    );
 
     let mut output_total: u128 = 0;
     let mut output_index = 0;
@@ -3722,9 +4464,8 @@ pub fn verify_note_consolidation_statement(data: Span<felt252>) -> felt252 {
         output_recovery_ciphertext_fields.span(),
         output_recovery_dummy_commitments.span(),
     );
-    let new_note_root = state_transition_root(
-        state_transition_root_domain, prior_note_root, output_note_root,
-    );
+    let new_note_root = claimed_new_note_root;
+    assert(new_note_root != prior_note_root, 'NOTE_ACC_ADVANCE');
     let recomputed_commitment = public_note_consolidation_commitment(
         public_consolidation_domain,
         consolidation_id,
@@ -4103,7 +4844,7 @@ pub fn verify_auction_result_statement(
             matched_order_commitments.span(),
             matched_fill_amounts.span(),
         );
-        assert_best_clearing_price(
+        assert_optimal_clearing_score(
             clearing_price_u128,
             price_base_scale_u128,
             sides.span(),
@@ -4120,21 +4861,21 @@ pub fn verify_auction_result_statement(
 }
 
 fn settlement_clearing_price(settlement_payload: Span<felt252>) -> felt252 {
-    assert(settlement_payload.len() > 14, 'E');
+    assert(settlement_payload.len() > 26, 'E');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'E');
-    *settlement_payload.at(14)
+    *settlement_payload.at(26)
 }
 
 fn settlement_price_base_scale(settlement_payload: Span<felt252>) -> felt252 {
-    assert(settlement_payload.len() > 15, 'E');
+    assert(settlement_payload.len() > 27, 'E');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'E');
-    *settlement_payload.at(15)
+    *settlement_payload.at(27)
 }
 
 fn settlement_transcript_commitment(settlement_payload: Span<felt252>) -> felt252 {
-    assert(settlement_payload.len() > 11, 'E');
+    assert(settlement_payload.len() > 23, 'E');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'E');
-    *settlement_payload.at(11)
+    *settlement_payload.at(23)
 }
 
 fn settlement_order_commitment_root(settlement_payload: Span<felt252>) -> felt252 {
@@ -4186,15 +4927,15 @@ fn settlement_batch_epoch(settlement_payload: Span<felt252>) -> felt252 {
 }
 
 fn settlement_base_asset_id(settlement_payload: Span<felt252>) -> felt252 {
-    assert(settlement_payload.len() > 12, 'E');
+    assert(settlement_payload.len() > 24, 'E');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'E');
-    *settlement_payload.at(12)
+    *settlement_payload.at(24)
 }
 
 fn settlement_quote_asset_id(settlement_payload: Span<felt252>) -> felt252 {
-    assert(settlement_payload.len() > 13, 'E');
+    assert(settlement_payload.len() > 25, 'E');
     assert(*settlement_payload.at(0) == STATEMENT_TYPE_SETTLEMENT, 'E');
-    *settlement_payload.at(13)
+    *settlement_payload.at(25)
 }
 
 fn settlement_matched_order_commitments(settlement_payload: Span<felt252>) -> Array<felt252> {
@@ -4925,10 +5666,6 @@ fn should_update_best(
     0
 }
 
-fn midpoint_u128(low: u128, high: u128) -> u128 {
-    (low / 2) + (high / 2) + (((low % 2) + (high % 2)) / 2)
-}
-
 fn assert_all_zero(values: Span<felt252>, message: felt252) {
     let mut index = 0;
     while index < values.len() {
@@ -4990,7 +5727,7 @@ fn auction_score_at_price(
     (matched, imbalance)
 }
 
-fn assert_best_clearing_price(
+fn assert_optimal_clearing_score(
     clearing_price: u128,
     price_base_scale: u128,
     sides: Span<felt252>,
@@ -5002,8 +5739,6 @@ fn assert_best_clearing_price(
     funding_note_amounts: Span<felt252>,
 ) {
     let mut best_initialized = 0;
-    let mut best_low_price: u128 = 0;
-    let mut best_high_price: u128 = 0;
     let mut best_matched: u128 = 0;
     let mut best_imbalance: u128 = 0;
     let mut order_index = 0;
@@ -5028,17 +5763,8 @@ fn assert_best_clearing_price(
                 );
                 if update == 1 {
                     best_initialized = 1;
-                    best_low_price = candidate;
-                    best_high_price = candidate;
                     best_matched = matched;
                     best_imbalance = imbalance;
-                } else if matched == best_matched && imbalance == best_imbalance {
-                    if candidate < best_low_price {
-                        best_low_price = candidate;
-                    }
-                    if candidate > best_high_price {
-                        best_high_price = candidate;
-                    }
                 }
             }
         }
@@ -5046,11 +5772,19 @@ fn assert_best_clearing_price(
     }
 
     assert(best_initialized == 1, 'E');
-    if best_matched == 0 {
-        assert(clearing_price == best_low_price, 'E');
-    } else {
-        assert(clearing_price == midpoint_u128(best_low_price, best_high_price), 'E');
-    }
+    let (clearing_matched, clearing_imbalance) = auction_score_at_price(
+        clearing_price,
+        price_base_scale,
+        sides,
+        order_types,
+        limit_prices,
+        order_amounts,
+        min_fills,
+        time_in_force,
+        funding_note_amounts,
+    );
+    assert(clearing_matched == best_matched, 'AR_OPT_VOLUME');
+    assert(clearing_imbalance == best_imbalance, 'AR_OPT_BALANCE');
 }
 
 fn assert_no_executable_auction(
@@ -5200,11 +5934,11 @@ fn assert_multi_pair_fill_vectors(
     price_base_scales: Span<felt252>,
     filled_base_amounts: Span<felt252>,
     quote_amounts: Span<felt252>,
+    taker_fee_bps_values: Span<felt252>,
     fee_amounts: Span<felt252>,
     start: usize,
     count: usize,
 ) {
-    assert(count != 0, 'MP_FILL');
     assert(count <= MAX_MULTI_PAIR_FILLS, 'MP_FILL');
     assert(start + count <= order_commitments.len(), 'MP_FILL');
     assert_all_lengths_match(
@@ -5214,7 +5948,7 @@ fn assert_multi_pair_fill_vectors(
             sides.len().into(), submitted_base_amounts.len().into(),
             min_fill_base_amounts.len().into(), limit_prices.len().into(),
             price_base_scales.len().into(), filled_base_amounts.len().into(),
-            quote_amounts.len().into(), fee_amounts.len().into(),
+            quote_amounts.len().into(), taker_fee_bps_values.len().into(), fee_amounts.len().into(),
         ]
             .span(),
         'MP_FILL',
@@ -5236,6 +5970,7 @@ fn assert_multi_pair_fill_vectors(
         let quote_amount = felt_to_u128(*quote_amounts.at(cursor));
         let limit_price = felt_to_u128(*limit_prices.at(cursor));
         let price_base_scale = felt_to_u128(*price_base_scales.at(cursor));
+        let taker_fee_bps = felt_to_u128(*taker_fee_bps_values.at(cursor));
         let fee_amount = felt_to_u128(*fee_amounts.at(cursor));
         assert(submitted_base != 0, 'MP_FILL');
         assert(filled_base != 0, 'MP_FILL');
@@ -5250,6 +5985,8 @@ fn assert_multi_pair_fill_vectors(
         } else {
             quote_amount
         };
+        assert(taker_fee_bps <= FEE_BPS_DENOMINATOR, 'MP_FILL');
+        assert(fee_amount == ceil_fee_amount(gross_output, taker_fee_bps), 'MP_FILL_FEE');
         assert(fee_amount < gross_output, 'MP_FILL');
 
         let limit_quote_amount = quote_amount_for_base_amount(
@@ -5279,7 +6016,6 @@ fn assert_multi_pair_delta_vectors(
     start: usize,
     count: usize,
 ) {
-    assert(count != 0, 'MP_DELTA');
     assert(count <= MAX_MULTI_PAIR_ASSET_DELTAS, 'MP_DELTA');
     assert(start + count <= asset_ids.len(), 'MP_DELTA');
     assert_all_lengths_match(
@@ -5304,9 +6040,7 @@ fn assert_multi_pair_delta_vectors(
         );
         let source = *sources.at(cursor);
         assert(
-            source == MULTI_PAIR_DELTA_SOURCE_USER
-                || source == MULTI_PAIR_DELTA_SOURCE_EXTERNAL_COMPLETION
-                || source == MULTI_PAIR_DELTA_SOURCE_FEE,
+            source == MULTI_PAIR_DELTA_SOURCE_USER || source == MULTI_PAIR_DELTA_SOURCE_FEE,
             'MP_DELTA',
         );
         assert(*source_commitments.at(cursor) != 0, 'MP_DELTA');
@@ -5657,6 +6391,53 @@ fn assert_multi_pair_objective_weights(
     while index < asset_ids.len() {
         assert(felt_to_u128(*numerators.at(index)) != 0, 'MP_WEIGHT');
         assert(felt_to_u128(*denominators.at(index)) != 0, 'MP_WEIGHT');
+        assert(
+            felt_to_u128(*numerators.at(index)) <= MAX_MULTI_PAIR_REFERENCE_COMPONENT, 'MP_WEIGHT',
+        );
+        assert(
+            felt_to_u128(*denominators.at(index)) <= MAX_MULTI_PAIR_REFERENCE_COMPONENT,
+            'MP_WEIGHT',
+        );
+        index += 1;
+    }
+}
+
+fn assert_multi_pair_reference_pricing(
+    base_asset_ids: Span<felt252>,
+    quote_asset_ids: Span<felt252>,
+    sides: Span<felt252>,
+    filled_base_amounts: Span<felt252>,
+    quote_amounts: Span<felt252>,
+    start: usize,
+    count: usize,
+    reference_asset_ids: Span<felt252>,
+    reference_numerators: Span<felt252>,
+    reference_denominators: Span<felt252>,
+) {
+    let mut index = 0;
+    while index < count {
+        let cursor = start + index;
+        let side = *sides.at(cursor);
+        let filled_base = felt_to_u128(*filled_base_amounts.at(cursor));
+        let quote_amount = felt_to_u128(*quote_amounts.at(cursor));
+        let (input_asset, input_amount, output_asset, actual_output) = if side == ORDER_SIDE_BUY {
+            (*quote_asset_ids.at(cursor), quote_amount, *base_asset_ids.at(cursor), filled_base)
+        } else {
+            (*base_asset_ids.at(cursor), filled_base, *quote_asset_ids.at(cursor), quote_amount)
+        };
+        let (input_numerator, input_denominator) = multi_pair_objective_weight_for_asset(
+            input_asset, reference_asset_ids, reference_numerators, reference_denominators,
+        );
+        let (output_numerator, output_denominator) = multi_pair_objective_weight_for_asset(
+            output_asset, reference_asset_ids, reference_numerators, reference_denominators,
+        );
+        let mut numerator: u256 = input_amount.into();
+        numerator *= input_numerator.into();
+        numerator *= output_denominator.into();
+        let denominator: u256 = input_denominator.into() * output_numerator.into();
+        let expected_output = numerator / denominator;
+        assert(expected_output.high == 0, 'MP_REF_PRICE');
+        assert(expected_output.low == actual_output, 'MP_REF_PRICE');
         index += 1;
     }
 }
@@ -5782,6 +6563,7 @@ fn multi_pair_payload_chosen_fill_vectors(
     Array<felt252>,
     Array<felt252>,
     Array<felt252>,
+    Array<felt252>,
 ) {
     let mut index: usize = 2;
     let order_commitments = read_vector(payload, ref index);
@@ -5795,6 +6577,7 @@ fn multi_pair_payload_chosen_fill_vectors(
     let price_base_scales = read_vector(payload, ref index);
     let filled_base_amounts = read_vector(payload, ref index);
     let quote_amounts = read_vector(payload, ref index);
+    let taker_fee_bps_values = read_vector(payload, ref index);
     let fee_amounts = read_vector(payload, ref index);
     (
         order_commitments,
@@ -5808,6 +6591,7 @@ fn multi_pair_payload_chosen_fill_vectors(
         price_base_scales,
         filled_base_amounts,
         quote_amounts,
+        taker_fee_bps_values,
         fee_amounts,
     )
 }
@@ -5816,7 +6600,7 @@ fn multi_pair_payload_chosen_delta_vectors(
     payload: Span<felt252>,
 ) -> (Array<felt252>, Array<felt252>, Array<felt252>, Array<felt252>, Array<felt252>) {
     let mut index: usize = 2;
-    skip_vectors(payload, ref index, 12);
+    skip_vectors(payload, ref index, 13);
     let delta_asset_ids = read_vector(payload, ref index);
     let delta_amounts = read_vector(payload, ref index);
     let delta_directions = read_vector(payload, ref index);
@@ -5825,11 +6609,46 @@ fn multi_pair_payload_chosen_delta_vectors(
     (delta_asset_ids, delta_amounts, delta_directions, delta_sources, delta_source_commitments)
 }
 
+fn multi_pair_payload_eligible_order_commitments(payload: Span<felt252>) -> Array<felt252> {
+    let mut index: usize = 2;
+    skip_vectors(payload, ref index, 18);
+    read_vector(payload, ref index)
+}
+
+fn multi_pair_payload_objective_weights(
+    payload: Span<felt252>,
+) -> (Array<felt252>, Array<felt252>, Array<felt252>) {
+    let mut index: usize = 2;
+    skip_vectors(payload, ref index, 19);
+    let asset_ids = read_vector(payload, ref index);
+    let numerators = read_vector(payload, ref index);
+    let denominators = read_vector(payload, ref index);
+    (asset_ids, numerators, denominators)
+}
+
+fn multi_pair_payload_candidate_fee_vectors(
+    payload: Span<felt252>,
+) -> (Array<felt252>, Array<felt252>) {
+    let mut index: usize = 2;
+    skip_vectors(payload, ref index, 13);
+    skip_vectors(payload, ref index, 12);
+    let _candidate_order_commitments = read_vector(payload, ref index);
+    let candidate_pair_ids = read_vector(payload, ref index);
+    skip_vectors(payload, ref index, 9);
+    let candidate_taker_fee_bps = read_vector(payload, ref index);
+    (candidate_pair_ids, candidate_taker_fee_bps)
+}
+
 fn assert_multi_pair_settlement_binding_vectors(
     batch_ids: Span<felt252>,
     pair_ids: Span<felt252>,
     order_commitment_roots: Span<felt252>,
+    admission_roots: Span<felt252>,
     encrypted_order_set_commitments: Span<felt252>,
+    reference_price_attestation_commitments: Span<felt252>,
+    reference_price_signers: Span<felt252>,
+    reference_price_observed_at_unix_ms_values: Span<felt252>,
+    reference_price_valid_until_unix_ms_values: Span<felt252>,
     base_asset_ids: Span<felt252>,
     quote_asset_ids: Span<felt252>,
     price_base_scales: Span<felt252>,
@@ -5839,11 +6658,108 @@ fn assert_multi_pair_settlement_binding_vectors(
     assert(batch_ids.len() <= MAX_MULTI_PAIR_ASSETS, 'MPS_BATCH');
     assert(batch_ids.len() == pair_ids.len(), 'MPS_BIND_LEN');
     assert(batch_ids.len() == order_commitment_roots.len(), 'MPS_BIND_LEN');
+    assert(batch_ids.len() == admission_roots.len(), 'MPS_BIND_LEN');
     assert(batch_ids.len() == encrypted_order_set_commitments.len(), 'MPS_BIND_LEN');
+    assert(batch_ids.len() == reference_price_attestation_commitments.len(), 'MPS_BIND_LEN');
+    assert(batch_ids.len() == reference_price_signers.len(), 'MPS_BIND_LEN');
+    assert(batch_ids.len() == reference_price_observed_at_unix_ms_values.len(), 'MPS_BIND_LEN');
+    assert(batch_ids.len() == reference_price_valid_until_unix_ms_values.len(), 'MPS_BIND_LEN');
     assert(batch_ids.len() == base_asset_ids.len(), 'MPS_BIND_LEN');
     assert(batch_ids.len() == quote_asset_ids.len(), 'MPS_BIND_LEN');
     assert(batch_ids.len() == price_base_scales.len(), 'MPS_BIND_LEN');
     assert(batch_ids.len() == taker_fee_bps_values.len(), 'MPS_BIND_LEN');
+}
+
+fn assert_multi_pair_reference_price_attestations(
+    auction_verifier_address: felt252,
+    attestation_domain: felt252,
+    pair_ids: Span<felt252>,
+    base_asset_ids: Span<felt252>,
+    quote_asset_ids: Span<felt252>,
+    price_base_scales: Span<felt252>,
+    commitments: Span<felt252>,
+    signers: Span<felt252>,
+    valid_until_unix_ms_values: Span<felt252>,
+    midpoints: Span<felt252>,
+    lowers: Span<felt252>,
+    uppers: Span<felt252>,
+    source_counts: Span<felt252>,
+    observed_at_unix_ms_values: Span<felt252>,
+    source_set_commitments: Span<felt252>,
+    nonces: Span<felt252>,
+    objective_asset_ids: Span<felt252>,
+    objective_numerators: Span<felt252>,
+    objective_denominators: Span<felt252>,
+) {
+    assert(attestation_domain == REFERENCE_PRICE_ATTESTATION_DOMAIN, 'MPS_REF_DOMAIN');
+    let length = pair_ids.len();
+    assert(length == base_asset_ids.len(), 'MPS_REF_LEN');
+    assert(length == quote_asset_ids.len(), 'MPS_REF_LEN');
+    assert(length == price_base_scales.len(), 'MPS_REF_LEN');
+    assert(length == commitments.len(), 'MPS_REF_LEN');
+    assert(length == signers.len(), 'MPS_REF_LEN');
+    assert(length == valid_until_unix_ms_values.len(), 'MPS_REF_LEN');
+    assert(length == midpoints.len(), 'MPS_REF_LEN');
+    assert(length == lowers.len(), 'MPS_REF_LEN');
+    assert(length == uppers.len(), 'MPS_REF_LEN');
+    assert(length == source_counts.len(), 'MPS_REF_LEN');
+    assert(length == observed_at_unix_ms_values.len(), 'MPS_REF_LEN');
+    assert(length == source_set_commitments.len(), 'MPS_REF_LEN');
+    assert(length == nonces.len(), 'MPS_REF_LEN');
+
+    let mut index = 0;
+    while index < length {
+        let midpoint = felt_to_u128(*midpoints.at(index));
+        let lower = felt_to_u128(*lowers.at(index));
+        let upper = felt_to_u128(*uppers.at(index));
+        let price_base_scale = felt_to_u128(*price_base_scales.at(index));
+        let observed_at = felt_to_u128(*observed_at_unix_ms_values.at(index));
+        let valid_until = felt_to_u128(*valid_until_unix_ms_values.at(index));
+        assert(midpoint != 0, 'MPS_REF_PRICE');
+        assert(lower != 0 && lower <= midpoint && midpoint <= upper, 'MPS_REF_PRICE');
+        assert(felt_to_u128(*source_counts.at(index)) >= 3, 'MPS_REF_SOURCES');
+        assert(observed_at < valid_until, 'MPS_REF_EXPIRY');
+        assert(*source_set_commitments.at(index) != 0, 'MPS_REF_SOURCES');
+
+        let commitment = reference_price_attestation_commitment(
+            attestation_domain,
+            auction_verifier_address,
+            *pair_ids.at(index),
+            *base_asset_ids.at(index),
+            *quote_asset_ids.at(index),
+            *midpoints.at(index),
+            *lowers.at(index),
+            *uppers.at(index),
+            *price_base_scales.at(index),
+            *source_counts.at(index),
+            *observed_at_unix_ms_values.at(index),
+            *valid_until_unix_ms_values.at(index),
+            *source_set_commitments.at(index),
+            *nonces.at(index),
+            *signers.at(index),
+        );
+        assert(commitment == *commitments.at(index), 'MPS_REF_COMMITMENT');
+        let (base_numerator, base_denominator) = multi_pair_objective_weight_for_asset(
+            *base_asset_ids.at(index),
+            objective_asset_ids,
+            objective_numerators,
+            objective_denominators,
+        );
+        let (quote_numerator, quote_denominator) = multi_pair_objective_weight_for_asset(
+            *quote_asset_ids.at(index),
+            objective_asset_ids,
+            objective_numerators,
+            objective_denominators,
+        );
+        let mut left: u256 = base_numerator.into();
+        left *= quote_denominator.into();
+        left *= price_base_scale.into();
+        let mut right: u256 = midpoint.into();
+        right *= base_denominator.into();
+        right *= quote_numerator.into();
+        assert(left == right, 'MPS_REF_OBJECTIVE');
+        index += 1;
+    }
 }
 
 fn assert_all_nonzero(values: Span<felt252>, message: felt252) {
@@ -5852,6 +6768,124 @@ fn assert_all_nonzero(values: Span<felt252>, message: felt252) {
         assert(*values.at(index) != 0, message);
         index += 1;
     }
+}
+
+fn assert_multi_pair_admission_summaries(
+    batch_ids: Span<felt252>,
+    order_commitment_roots: Span<felt252>,
+    admission_roots: Span<felt252>,
+    summary_batch_ids: Span<felt252>,
+    summary_order_commitments: Span<felt252>,
+    summary_sides: Span<felt252>,
+    summary_order_types: Span<felt252>,
+    summary_relay_modes: Span<felt252>,
+    summary_limit_prices: Span<felt252>,
+    summary_order_amounts: Span<felt252>,
+    summary_min_fills: Span<felt252>,
+    summary_time_in_force: Span<felt252>,
+    summary_execution_preferences: Span<felt252>,
+    summary_funding_note_amounts: Span<felt252>,
+    summary_funding_note_owner_keys: Span<felt252>,
+    eligible_order_commitments: Span<felt252>,
+) {
+    assert(batch_ids.len() == order_commitment_roots.len(), 'MPS_ADMISSION_LEN');
+    assert(batch_ids.len() == admission_roots.len(), 'MPS_ADMISSION_LEN');
+    assert_all_lengths_match(
+        summary_batch_ids.len(),
+        array![
+            summary_order_commitments.len().into(), summary_sides.len().into(),
+            summary_order_types.len().into(), summary_relay_modes.len().into(),
+            summary_limit_prices.len().into(), summary_order_amounts.len().into(),
+            summary_min_fills.len().into(), summary_time_in_force.len().into(),
+            summary_execution_preferences.len().into(), summary_funding_note_amounts.len().into(),
+            summary_funding_note_owner_keys.len().into(),
+        ]
+            .span(),
+        'MPS_ADMISSION_LEN',
+    );
+    assert_unique_nonzero(batch_ids, 'MPS_BATCH_DUP');
+    assert_unique_nonzero(summary_order_commitments, 'MPS_ADMISSION_DUP');
+    assert_unique_nonzero(eligible_order_commitments, 'MPS_ELIGIBLE_DUP');
+
+    let mut binding_index = 0;
+    while binding_index < batch_ids.len() {
+        let batch_id = *batch_ids.at(binding_index);
+        let mut summary_count: usize = 0;
+        let mut summary_index = 0;
+        while summary_index < summary_batch_ids.len() {
+            if *summary_batch_ids.at(summary_index) == batch_id {
+                summary_count += 1;
+            }
+            summary_index += 1;
+        }
+
+        let mut order_root = poseidon_hash2(BATCH_ORDER_ROOT_DOMAIN, summary_count.into());
+        let mut admission_root = poseidon_hash2(ADMISSION_ROOT_DOMAIN, summary_count.into());
+        summary_index = 0;
+        while summary_index < summary_batch_ids.len() {
+            if *summary_batch_ids.at(summary_index) == batch_id {
+                let order_commitment = *summary_order_commitments.at(summary_index);
+                order_root = poseidon_hash2(order_root, order_commitment);
+                admission_root =
+                    poseidon_hash2(
+                        admission_root,
+                        admission_summary_leaf(
+                            order_commitment,
+                            *summary_sides.at(summary_index),
+                            *summary_order_types.at(summary_index),
+                            *summary_relay_modes.at(summary_index),
+                            *summary_limit_prices.at(summary_index),
+                            *summary_order_amounts.at(summary_index),
+                            *summary_min_fills.at(summary_index),
+                            *summary_time_in_force.at(summary_index),
+                            *summary_execution_preferences.at(summary_index),
+                            *summary_funding_note_amounts.at(summary_index),
+                            *summary_funding_note_owner_keys.at(summary_index),
+                        ),
+                    );
+            }
+            summary_index += 1;
+        }
+        assert(order_root == *order_commitment_roots.at(binding_index), 'MPS_ORDER_ROOT');
+        assert(admission_root == *admission_roots.at(binding_index), 'MPS_ADMISSION_ROOT');
+        binding_index += 1;
+    }
+
+    let mut non_cover_count: usize = 0;
+    let mut summary_index = 0;
+    while summary_index < summary_batch_ids.len() {
+        let summary_batch_id = *summary_batch_ids.at(summary_index);
+        let mut matching_batch_count: usize = 0;
+        binding_index = 0;
+        while binding_index < batch_ids.len() {
+            if summary_batch_id == *batch_ids.at(binding_index) {
+                matching_batch_count += 1;
+            }
+            binding_index += 1;
+        }
+        assert(matching_batch_count == 1, 'MPS_ADMISSION_BATCH');
+
+        let order_type = *summary_order_types.at(summary_index);
+        assert(
+            order_type == ORDER_TYPE_LIMIT_BATCH || order_type == ORDER_TYPE_HEARTBEAT_COVER,
+            'MPS_ADMISSION_TYPE',
+        );
+        if order_type != ORDER_TYPE_HEARTBEAT_COVER {
+            non_cover_count += 1;
+            let order_commitment = *summary_order_commitments.at(summary_index);
+            let mut eligible_match_count: usize = 0;
+            let mut eligible_index = 0;
+            while eligible_index < eligible_order_commitments.len() {
+                if order_commitment == *eligible_order_commitments.at(eligible_index) {
+                    eligible_match_count += 1;
+                }
+                eligible_index += 1;
+            }
+            assert(eligible_match_count == 1, 'MPS_ELIGIBLE_SET');
+        }
+        summary_index += 1;
+    }
+    assert(non_cover_count == eligible_order_commitments.len(), 'MPS_ELIGIBLE_SET');
 }
 
 fn assert_equal_vectors(left: Span<felt252>, right: Span<felt252>, message: felt252) {
@@ -5869,16 +6903,19 @@ fn assert_matched_fill_batch_bindings(
     fill_base_asset_ids: Span<felt252>,
     fill_quote_asset_ids: Span<felt252>,
     fill_price_base_scales: Span<felt252>,
+    fill_taker_fee_bps: Span<felt252>,
     batch_ids: Span<felt252>,
     pair_ids: Span<felt252>,
     base_asset_ids: Span<felt252>,
     quote_asset_ids: Span<felt252>,
     price_base_scales: Span<felt252>,
+    taker_fee_bps_values: Span<felt252>,
 ) {
     assert(matched_batch_ids.len() == fill_pair_ids.len(), 'MPS_FILL_BIND');
     assert(matched_batch_ids.len() == fill_base_asset_ids.len(), 'MPS_FILL_BIND');
     assert(matched_batch_ids.len() == fill_quote_asset_ids.len(), 'MPS_FILL_BIND');
     assert(matched_batch_ids.len() == fill_price_base_scales.len(), 'MPS_FILL_BIND');
+    assert(matched_batch_ids.len() == fill_taker_fee_bps.len(), 'MPS_FILL_BIND');
     let mut fill_index = 0;
     while fill_index < matched_batch_ids.len() {
         let mut found = false;
@@ -5898,11 +6935,41 @@ fn assert_matched_fill_batch_bindings(
                     *fill_price_base_scales.at(fill_index) == *price_base_scales.at(binding_index),
                     'MPS_FILL_BIND',
                 );
+                assert(
+                    *fill_taker_fee_bps.at(fill_index) == *taker_fee_bps_values.at(binding_index),
+                    'MPS_FILL_FEE_BIND',
+                );
                 found = true;
             }
             binding_index += 1;
         }
         assert(found, 'MPS_FILL_BIND');
+        fill_index += 1;
+    }
+}
+
+fn assert_multi_pair_fill_fee_bindings(
+    fill_pair_ids: Span<felt252>,
+    fill_taker_fee_bps: Span<felt252>,
+    pair_ids: Span<felt252>,
+    taker_fee_bps_values: Span<felt252>,
+) {
+    assert(fill_pair_ids.len() == fill_taker_fee_bps.len(), 'MPS_FILL_FEE_BIND');
+    let mut fill_index = 0;
+    while fill_index < fill_pair_ids.len() {
+        let mut found = false;
+        let mut binding_index = 0;
+        while binding_index < pair_ids.len() {
+            if *fill_pair_ids.at(fill_index) == *pair_ids.at(binding_index) {
+                assert(
+                    *fill_taker_fee_bps.at(fill_index) == *taker_fee_bps_values.at(binding_index),
+                    'MPS_FILL_FEE_BIND',
+                );
+                found = true;
+            }
+            binding_index += 1;
+        }
+        assert(found, 'MPS_FILL_FEE_BIND');
         fill_index += 1;
     }
 }
@@ -5997,7 +7064,12 @@ fn multi_pair_batch_binding_root(
     pair_ids: Span<felt252>,
     batch_epoch: felt252,
     order_commitment_roots: Span<felt252>,
+    admission_roots: Span<felt252>,
     encrypted_order_set_commitments: Span<felt252>,
+    reference_price_attestation_commitments: Span<felt252>,
+    reference_price_signers: Span<felt252>,
+    reference_price_observed_at_unix_ms_values: Span<felt252>,
+    reference_price_valid_until_unix_ms_values: Span<felt252>,
     base_asset_ids: Span<felt252>,
     quote_asset_ids: Span<felt252>,
     price_base_scales: Span<felt252>,
@@ -6007,7 +7079,12 @@ fn multi_pair_batch_binding_root(
         batch_ids,
         pair_ids,
         order_commitment_roots,
+        admission_roots,
         encrypted_order_set_commitments,
+        reference_price_attestation_commitments,
+        reference_price_signers,
+        reference_price_observed_at_unix_ms_values,
+        reference_price_valid_until_unix_ms_values,
         base_asset_ids,
         quote_asset_ids,
         price_base_scales,
@@ -6020,7 +7097,12 @@ fn multi_pair_batch_binding_root(
         state = poseidon_hash2(state, *pair_ids.at(index));
         state = poseidon_hash2(state, batch_epoch);
         state = poseidon_hash2(state, *order_commitment_roots.at(index));
+        state = poseidon_hash2(state, *admission_roots.at(index));
         state = poseidon_hash2(state, *encrypted_order_set_commitments.at(index));
+        state = poseidon_hash2(state, *reference_price_attestation_commitments.at(index));
+        state = poseidon_hash2(state, *reference_price_signers.at(index));
+        state = poseidon_hash2(state, *reference_price_observed_at_unix_ms_values.at(index));
+        state = poseidon_hash2(state, *reference_price_valid_until_unix_ms_values.at(index));
         state = poseidon_hash2(state, *base_asset_ids.at(index));
         state = poseidon_hash2(state, *quote_asset_ids.at(index));
         state = poseidon_hash2(state, *price_base_scales.at(index));
@@ -6046,13 +7128,114 @@ fn multi_pair_fee_root(
     poseidon_hash2(state, asset_ids.len().into())
 }
 
+fn assert_external_match_settlement_records(
+    group_id: felt252,
+    request_ids: Span<felt252>,
+    batch_ids: Span<felt252>,
+    pair_ids: Span<felt252>,
+    base_asset_ids: Span<felt252>,
+    quote_asset_ids: Span<felt252>,
+    sides: Span<felt252>,
+    max_base_amounts: Span<felt252>,
+    midpoint_prices: Span<felt252>,
+    price_base_scales: Span<felt252>,
+    valid_until_values: Span<felt252>,
+    consumed_base_amounts: Span<felt252>,
+    binding_pair_ids: Span<felt252>,
+    binding_base_asset_ids: Span<felt252>,
+    binding_quote_asset_ids: Span<felt252>,
+    binding_price_base_scales: Span<felt252>,
+    binding_midpoint_prices: Span<felt252>,
+) -> felt252 {
+    assert_all_lengths_match(
+        request_ids.len(),
+        array![
+            batch_ids.len().into(), pair_ids.len().into(), base_asset_ids.len().into(),
+            quote_asset_ids.len().into(), sides.len().into(), max_base_amounts.len().into(),
+            midpoint_prices.len().into(), price_base_scales.len().into(),
+            valid_until_values.len().into(), consumed_base_amounts.len().into(),
+        ]
+            .span(),
+        'MPS_EXTERNAL_LEN',
+    );
+    assert_unique_nonzero(request_ids, 'MPS_EXTERNAL_ID');
+    let mut state = poseidon_hash2(EXTERNAL_MATCH_SETTLEMENT_DOMAIN, request_ids.len().into());
+    let mut index = 0;
+    let mut previous_request_id = 0;
+    while index < request_ids.len() {
+        let request_id = *request_ids.at(index);
+        let batch_id = *batch_ids.at(index);
+        let pair_id = *pair_ids.at(index);
+        let base_asset_id = *base_asset_ids.at(index);
+        let quote_asset_id = *quote_asset_ids.at(index);
+        let side = *sides.at(index);
+        let max_base_amount = felt_to_u128(*max_base_amounts.at(index));
+        let midpoint_price = felt_to_u128(*midpoint_prices.at(index));
+        let price_base_scale = felt_to_u128(*price_base_scales.at(index));
+        let valid_until = *valid_until_values.at(index);
+        let consumed_base_amount = felt_to_u128(*consumed_base_amounts.at(index));
+        let previous_request_u256: u256 = previous_request_id.into();
+        let request_u256: u256 = request_id.into();
+        assert(index == 0 || previous_request_u256 < request_u256, 'MPS_EXTERNAL_ORDER');
+        assert(batch_id == group_id, 'MPS_EXTERNAL_BATCH');
+        assert(base_asset_id != 0 && quote_asset_id != 0, 'MPS_EXTERNAL_ASSET');
+        assert(base_asset_id != quote_asset_id, 'MPS_EXTERNAL_ASSET');
+        assert(side == ORDER_SIDE_BUY || side == ORDER_SIDE_SELL, 'MPS_EXTERNAL_SIDE');
+        assert(max_base_amount != 0, 'MPS_EXTERNAL_MAX');
+        assert(midpoint_price != 0, 'MPS_EXTERNAL_MID');
+        assert(price_base_scale != 0, 'MPS_EXTERNAL_SCALE');
+        assert(valid_until != 0, 'MPS_EXTERNAL_EXPIRY');
+        assert(consumed_base_amount <= max_base_amount, 'MPS_EXTERNAL_FILL');
+        let mut binding_index = 0;
+        let mut binding_found = false;
+        while binding_index < binding_pair_ids.len() {
+            if *binding_pair_ids.at(binding_index) == pair_id {
+                assert(
+                    *binding_base_asset_ids.at(binding_index) == base_asset_id, 'MPS_EXTERNAL_BASE',
+                );
+                assert(
+                    *binding_quote_asset_ids.at(binding_index) == quote_asset_id,
+                    'MPS_EXTERNAL_QUOTE',
+                );
+                assert(
+                    felt_to_u128(*binding_price_base_scales.at(binding_index)) == price_base_scale,
+                    'MPS_EXTERNAL_SCALE',
+                );
+                assert(
+                    felt_to_u128(*binding_midpoint_prices.at(binding_index)) == midpoint_price,
+                    'MPS_EXTERNAL_MID',
+                );
+                binding_found = true;
+            }
+            binding_index += 1;
+        }
+        assert(binding_found, 'MPS_EXTERNAL_PAIR');
+        state = poseidon_hash2(state, request_id);
+        state = poseidon_hash2(state, batch_id);
+        state = poseidon_hash2(state, pair_id);
+        state = poseidon_hash2(state, base_asset_id);
+        state = poseidon_hash2(state, quote_asset_id);
+        state = poseidon_hash2(state, side);
+        state = poseidon_hash2(state, max_base_amount.into());
+        state = poseidon_hash2(state, midpoint_price.into());
+        state = poseidon_hash2(state, price_base_scale.into());
+        state = poseidon_hash2(state, valid_until);
+        state = poseidon_hash2(state, consumed_base_amount.into());
+        previous_request_id = request_id;
+        index += 1;
+    }
+    state
+}
+
 fn public_multi_pair_settlement_commitment(
     group_id: felt252,
     batch_epoch: felt252,
+    auction_verifier_address: felt252,
     batch_binding_root: felt252,
     protocol_fee_recipient: felt252,
     output_bundle_ref: felt252,
     multi_pair_commitment: felt252,
+    external_match_root: felt252,
     prior_note_root: felt252,
     prior_nullifier_root: felt252,
     prior_renewal_root: felt252,
@@ -6069,10 +7252,12 @@ fn public_multi_pair_settlement_commitment(
 ) -> felt252 {
     let mut state = poseidon_hash2(PUBLIC_MULTI_PAIR_SETTLEMENT_DOMAIN, group_id);
     state = poseidon_hash2(state, batch_epoch);
+    state = poseidon_hash2(state, auction_verifier_address);
     state = poseidon_hash2(state, batch_binding_root);
     state = poseidon_hash2(state, protocol_fee_recipient);
     state = poseidon_hash2(state, output_bundle_ref);
     state = poseidon_hash2(state, multi_pair_commitment);
+    state = poseidon_hash2(state, external_match_root);
     state = poseidon_hash2(state, prior_note_root);
     state = poseidon_hash2(state, prior_nullifier_root);
     state = poseidon_hash2(state, prior_renewal_root);
@@ -6087,6 +7272,423 @@ fn public_multi_pair_settlement_commitment(
     state = poseidon_hash2(state, new_renewal_root);
     state = poseidon_hash2(state, new_fee_root);
     state
+}
+
+fn final_fill_binding_index(inputs: @FinalMultiPairFillInputs, batch_id: felt252) -> usize {
+    let mut index = 0;
+    let mut found = false;
+    let mut result = 0;
+    while index < inputs.binding_batch_ids.len() {
+        if *inputs.binding_batch_ids.at(index) == batch_id {
+            assert(!found, 'MPS_FINAL_BIND_DUP');
+            found = true;
+            result = index;
+        }
+        index += 1;
+    }
+    assert(found, 'MPS_FINAL_BIND');
+    result
+}
+
+fn final_fill_private_amounts(
+    inputs: @FinalMultiPairFillInputs, order_commitment: felt252,
+) -> (u128, u128) {
+    let mut index = 0;
+    let mut found = false;
+    let mut base_amount = 0;
+    let mut quote_amount = 0;
+    while index < inputs.private_order_commitments.len() {
+        if *inputs.private_order_commitments.at(index) == order_commitment {
+            assert(!found, 'MPS_FINAL_PRIVATE_DUP');
+            found = true;
+            base_amount = felt_to_u128(*inputs.private_filled_base_amounts.at(index));
+            quote_amount = felt_to_u128(*inputs.private_quote_amounts.at(index));
+        }
+        index += 1;
+    }
+    (base_amount, quote_amount)
+}
+
+fn final_fill_order_capacity_for_request(
+    inputs: @FinalMultiPairFillInputs, admission_index: usize, external_index: usize,
+) -> u128 {
+    if *inputs.admission_order_types.at(admission_index) == ORDER_TYPE_HEARTBEAT_COVER
+        || *inputs
+            .admission_execution_preferences
+            .at(admission_index) != EXECUTION_PRIVATE_THEN_EXTERNAL {
+        return 0;
+    }
+    let binding_index = final_fill_binding_index(
+        inputs, *inputs.admission_batch_ids.at(admission_index),
+    );
+    if *inputs.binding_pair_ids.at(binding_index) != *inputs.external_pair_ids.at(external_index)
+        || *inputs
+            .binding_base_asset_ids
+            .at(binding_index) != *inputs
+            .external_base_asset_ids
+            .at(external_index)
+        || *inputs
+            .binding_quote_asset_ids
+            .at(binding_index) != *inputs
+            .external_quote_asset_ids
+            .at(external_index)
+        || *inputs
+            .binding_price_base_scales
+            .at(binding_index) != *inputs
+            .external_price_base_scales
+            .at(external_index)
+        || *inputs
+            .admission_sides
+            .at(admission_index) != *inputs
+            .external_sides
+            .at(external_index) {
+        return 0;
+    }
+    let order_commitment = *inputs.admission_order_commitments.at(admission_index);
+    let (private_base, private_quote) = final_fill_private_amounts(inputs, order_commitment);
+    let submitted_base = felt_to_u128(*inputs.admission_order_amounts.at(admission_index));
+    let funding_amount = felt_to_u128(*inputs.admission_funding_amounts.at(admission_index));
+    assert(private_base <= submitted_base, 'MPS_FINAL_PRIVATE');
+    let remaining_base = submitted_base - private_base;
+    let side = *inputs.admission_sides.at(admission_index);
+    let midpoint = felt_to_u128(*inputs.external_midpoint_prices.at(external_index));
+    let scale = felt_to_u128(*inputs.external_price_base_scales.at(external_index));
+    let limit = felt_to_u128(*inputs.admission_limit_prices.at(admission_index));
+    if side == ORDER_SIDE_BUY {
+        if midpoint > limit {
+            return 0;
+        }
+        assert(private_quote <= funding_amount, 'MPS_FINAL_FUNDING');
+        let affordable = base_amount_affordable_for_quote(
+            funding_amount - private_quote, midpoint, scale,
+        );
+        if affordable < remaining_base {
+            affordable
+        } else {
+            remaining_base
+        }
+    } else {
+        assert(side == ORDER_SIDE_SELL, 'MPS_FINAL_SIDE');
+        if midpoint < limit {
+            return 0;
+        }
+        assert(private_base <= funding_amount, 'MPS_FINAL_FUNDING');
+        let remaining_input = funding_amount - private_base;
+        if remaining_input < remaining_base {
+            remaining_input
+        } else {
+            remaining_base
+        }
+    }
+}
+
+fn u128_mul_div_with_remainder(left: u128, right: u128, denominator: u128) -> (u128, u128) {
+    assert(denominator != 0, 'MPS_FINAL_DIV');
+    let product: u256 = left.into() * right.into();
+    let denominator_u256: u256 = denominator.into();
+    let quotient: u128 = (product / denominator_u256).try_into().expect('MPS_FINAL_QUOT');
+    let remainder: u128 = (product % denominator_u256).try_into().expect('MPS_FINAL_REM');
+    (quotient, remainder)
+}
+
+fn final_fill_external_allocation_matrix(
+    inputs: @FinalMultiPairFillInputs,
+) -> (Array<felt252>, Array<felt252>) {
+    let mut base_matrix = array![];
+    let mut quote_matrix = array![];
+    let mut external_index = 0;
+    while external_index < inputs.external_pair_ids.len() {
+        let consumed = felt_to_u128(*inputs.external_consumed_base_amounts.at(external_index));
+        let max_base = felt_to_u128(*inputs.external_max_base_amounts.at(external_index));
+        let midpoint = felt_to_u128(*inputs.external_midpoint_prices.at(external_index));
+        let scale = felt_to_u128(*inputs.external_price_base_scales.at(external_index));
+        let mut capacities = array![];
+        let mut base_floors = array![];
+        let mut base_remainders = array![];
+        let mut total_capacity = 0;
+        let mut allocated_base_floor = 0;
+        let mut admission_index = 0;
+        while admission_index < inputs.admission_order_commitments.len() {
+            let capacity = final_fill_order_capacity_for_request(
+                inputs, admission_index, external_index,
+            );
+            capacities.append(capacity);
+            total_capacity += capacity;
+            admission_index += 1;
+        }
+        assert(total_capacity == max_base, 'MPS_FINAL_MAX');
+        assert(consumed <= total_capacity, 'MPS_FINAL_CONSUMED');
+        admission_index = 0;
+        while admission_index < capacities.len() {
+            let capacity = *capacities.at(admission_index);
+            let (base_floor, base_remainder) = if capacity == 0 || consumed == 0 {
+                (0, 0)
+            } else {
+                u128_mul_div_with_remainder(consumed, capacity, total_capacity)
+            };
+            base_floors.append(base_floor);
+            base_remainders.append(base_remainder);
+            allocated_base_floor += base_floor;
+            admission_index += 1;
+        }
+        let base_dust = consumed - allocated_base_floor;
+        let mut request_base_allocations = array![];
+        admission_index = 0;
+        while admission_index < capacities.len() {
+            let capacity = *capacities.at(admission_index);
+            let base_floor = *base_floors.at(admission_index);
+            let base_remainder = *base_remainders.at(admission_index);
+            let mut priority_rank: u128 = 0;
+            let order_commitment: u256 = (*inputs.admission_order_commitments.at(admission_index))
+                .into();
+            let mut cursor = 0;
+            while cursor < capacities.len() {
+                let candidate_capacity = *capacities.at(cursor);
+                let candidate_floor = *base_floors.at(cursor);
+                let candidate_remainder = *base_remainders.at(cursor);
+                let candidate_commitment: u256 = (*inputs.admission_order_commitments.at(cursor))
+                    .into();
+                if candidate_floor < candidate_capacity
+                    && (candidate_remainder > base_remainder
+                        || (candidate_remainder == base_remainder
+                            && candidate_commitment < order_commitment)) {
+                    priority_rank += 1;
+                }
+                cursor += 1;
+            }
+            let allocation = if capacity != 0
+                && base_floor < capacity
+                && priority_rank < base_dust {
+                base_floor + 1
+            } else {
+                base_floor
+            };
+            request_base_allocations.append(allocation);
+            base_matrix.append(allocation.into());
+            admission_index += 1;
+        }
+
+        let (aggregate_quote, _) = if consumed == 0 {
+            (0, 0)
+        } else {
+            u128_mul_div_with_remainder(consumed, midpoint, scale)
+        };
+        let mut quote_floors = array![];
+        let mut quote_remainders = array![];
+        let mut allocated_quote_floor = 0;
+        admission_index = 0;
+        while admission_index < request_base_allocations.len() {
+            let base_amount = *request_base_allocations.at(admission_index);
+            let (quote_floor, quote_remainder) = if base_amount == 0 {
+                (0, 0)
+            } else {
+                u128_mul_div_with_remainder(base_amount, midpoint, scale)
+            };
+            quote_floors.append(quote_floor);
+            quote_remainders.append(quote_remainder);
+            allocated_quote_floor += quote_floor;
+            admission_index += 1;
+        }
+        let quote_dust = aggregate_quote - allocated_quote_floor;
+        admission_index = 0;
+        while admission_index < request_base_allocations.len() {
+            let base_amount = *request_base_allocations.at(admission_index);
+            let quote_floor = *quote_floors.at(admission_index);
+            let quote_remainder = *quote_remainders.at(admission_index);
+            let mut priority_rank: u128 = 0;
+            let order_commitment: u256 = (*inputs.admission_order_commitments.at(admission_index))
+                .into();
+            let mut cursor = 0;
+            while cursor < request_base_allocations.len() {
+                if *request_base_allocations.at(cursor) != 0 {
+                    let candidate_remainder = *quote_remainders.at(cursor);
+                    let candidate_commitment: u256 = (*inputs
+                        .admission_order_commitments
+                        .at(cursor))
+                        .into();
+                    if candidate_remainder > quote_remainder
+                        || (candidate_remainder == quote_remainder
+                            && candidate_commitment < order_commitment) {
+                        priority_rank += 1;
+                    }
+                }
+                cursor += 1;
+            }
+            let allocation = if base_amount != 0 && priority_rank < quote_dust {
+                quote_floor + 1
+            } else {
+                quote_floor
+            };
+            quote_matrix.append(allocation.into());
+            admission_index += 1;
+        }
+        external_index += 1;
+    }
+    (base_matrix, quote_matrix)
+}
+
+fn final_multi_pair_fill_expectation(
+    inputs: @FinalMultiPairFillInputs,
+    external_base_allocations: Span<felt252>,
+    external_quote_allocations: Span<felt252>,
+    admission_index: usize,
+) -> FinalMultiPairFillExpectation {
+    let batch_id = *inputs.admission_batch_ids.at(admission_index);
+    let binding_index = final_fill_binding_index(inputs, batch_id);
+    let order_commitment = *inputs.admission_order_commitments.at(admission_index);
+    let (private_base, private_quote) = final_fill_private_amounts(inputs, order_commitment);
+    let mut external_base = 0;
+    let mut external_quote = 0;
+    let mut external_index = 0;
+    while external_index < inputs.external_pair_ids.len() {
+        let matrix_index = external_index * inputs.admission_order_commitments.len()
+            + admission_index;
+        external_base += felt_to_u128(*external_base_allocations.at(matrix_index));
+        external_quote += felt_to_u128(*external_quote_allocations.at(matrix_index));
+        external_index += 1;
+    }
+    let filled_base_amount = private_base + external_base;
+    let quote_amount = private_quote + external_quote;
+    let side = *inputs.admission_sides.at(admission_index);
+    let taker_fee_bps = felt_to_u128(*inputs.binding_taker_fee_bps.at(binding_index));
+    let gross_output = if side == ORDER_SIDE_BUY {
+        filled_base_amount
+    } else {
+        assert(side == ORDER_SIDE_SELL, 'MPS_FINAL_SIDE');
+        quote_amount
+    };
+    let fee_amount = ceil_fee_amount(gross_output, taker_fee_bps);
+    if gross_output != 0 {
+        assert(fee_amount < gross_output, 'MPS_FINAL_FEE');
+    }
+    FinalMultiPairFillExpectation {
+        batch_id,
+        pair_id: *inputs.binding_pair_ids.at(binding_index),
+        base_asset_id: *inputs.binding_base_asset_ids.at(binding_index),
+        quote_asset_id: *inputs.binding_quote_asset_ids.at(binding_index),
+        side,
+        submitted_base_amount: felt_to_u128(*inputs.admission_order_amounts.at(admission_index)),
+        limit_price: felt_to_u128(*inputs.admission_limit_prices.at(admission_index)),
+        price_base_scale: felt_to_u128(*inputs.binding_price_base_scales.at(binding_index)),
+        filled_base_amount,
+        quote_amount,
+        taker_fee_bps,
+        fee_amount,
+    }
+}
+
+fn final_fill_admission_index(
+    inputs: @FinalMultiPairFillInputs, order_commitment: felt252,
+) -> usize {
+    let mut index = 0;
+    let mut found = false;
+    let mut result = 0;
+    while index < inputs.admission_order_commitments.len() {
+        if *inputs.admission_order_commitments.at(index) == order_commitment {
+            assert(!found, 'MPS_FINAL_ORDER_DUP');
+            found = true;
+            result = index;
+        }
+        index += 1;
+    }
+    assert(found, 'MPS_FINAL_ORDER');
+    result
+}
+
+fn assert_final_multi_pair_fill_vectors(
+    inputs: @FinalMultiPairFillInputs,
+    matched_order_batch_ids: Span<felt252>,
+    matched_order_commitments: Span<felt252>,
+    matched_fill_amounts: Span<felt252>,
+    matched_sides: Span<felt252>,
+    matched_order_amounts: Span<felt252>,
+    matched_limit_prices: Span<felt252>,
+) -> (
+    Array<felt252>,
+    Array<felt252>,
+    Array<felt252>,
+    Array<felt252>,
+    Array<felt252>,
+    Array<felt252>,
+    Array<felt252>,
+) {
+    assert(matched_order_batch_ids.len() == matched_order_commitments.len(), 'MPS_FINAL_LEN');
+    assert(matched_fill_amounts.len() == matched_order_commitments.len(), 'MPS_FINAL_LEN');
+    assert(matched_sides.len() == matched_order_commitments.len(), 'MPS_FINAL_LEN');
+    assert(matched_order_amounts.len() == matched_order_commitments.len(), 'MPS_FINAL_LEN');
+    assert(matched_limit_prices.len() == matched_order_commitments.len(), 'MPS_FINAL_LEN');
+    let (external_base_allocations, external_quote_allocations) =
+        final_fill_external_allocation_matrix(
+        inputs,
+    );
+    let mut expected_count = 0;
+    let mut admission_index = 0;
+    while admission_index < inputs.admission_order_commitments.len() {
+        if *inputs.admission_order_types.at(admission_index) != ORDER_TYPE_HEARTBEAT_COVER {
+            let expected = final_multi_pair_fill_expectation(
+                inputs,
+                external_base_allocations.span(),
+                external_quote_allocations.span(),
+                admission_index,
+            );
+            if expected.filled_base_amount != 0 {
+                expected_count += 1;
+            }
+        }
+        admission_index += 1;
+    }
+    assert(expected_count == matched_order_commitments.len(), 'MPS_FINAL_COUNT');
+
+    let mut pair_ids = array![];
+    let mut base_asset_ids = array![];
+    let mut quote_asset_ids = array![];
+    let mut price_base_scales = array![];
+    let mut taker_fee_bps_values = array![];
+    let mut quote_amounts = array![];
+    let mut fee_amounts = array![];
+    let mut index = 0;
+    let mut previous_commitment: u256 = 0_u256;
+    while index < matched_order_commitments.len() {
+        let order_commitment = *matched_order_commitments.at(index);
+        let commitment_u256: u256 = order_commitment.into();
+        assert(index == 0 || previous_commitment < commitment_u256, 'MPS_FINAL_ORDERING');
+        let expected_index = final_fill_admission_index(inputs, order_commitment);
+        let expected = final_multi_pair_fill_expectation(
+            inputs,
+            external_base_allocations.span(),
+            external_quote_allocations.span(),
+            expected_index,
+        );
+        assert(expected.filled_base_amount != 0, 'MPS_FINAL_ZERO');
+        assert(*matched_order_batch_ids.at(index) == expected.batch_id, 'MPS_FINAL_BATCH');
+        assert(
+            *matched_fill_amounts.at(index) == expected.filled_base_amount.into(), 'MPS_FINAL_BASE',
+        );
+        assert(*matched_sides.at(index) == expected.side, 'MPS_FINAL_SIDE');
+        assert(
+            *matched_order_amounts.at(index) == expected.submitted_base_amount.into(),
+            'MPS_FINAL_AMOUNT',
+        );
+        assert(*matched_limit_prices.at(index) == expected.limit_price.into(), 'MPS_FINAL_LIMIT');
+        pair_ids.append(expected.pair_id);
+        base_asset_ids.append(expected.base_asset_id);
+        quote_asset_ids.append(expected.quote_asset_id);
+        price_base_scales.append(expected.price_base_scale.into());
+        taker_fee_bps_values.append(expected.taker_fee_bps.into());
+        quote_amounts.append(expected.quote_amount.into());
+        fee_amounts.append(expected.fee_amount.into());
+        previous_commitment = commitment_u256;
+        index += 1;
+    }
+    (
+        pair_ids,
+        base_asset_ids,
+        quote_asset_ids,
+        price_base_scales,
+        taker_fee_bps_values,
+        quote_amounts,
+        fee_amounts,
+    )
 }
 
 fn quote_amount_for_base_amount(base_amount: u128, price: u128, price_base_scale: u128) -> u128 {
@@ -6199,6 +7801,34 @@ fn skip_vectors(data: Span<felt252>, ref index: usize, count: usize) {
         read_vector(data, ref index);
         cursor += 1;
     }
+}
+
+fn skip_vector_without_alloc(data: Span<felt252>, ref index: usize) {
+    let length: usize = read_next(data, ref index).try_into().expect('E');
+    let mut cursor: usize = 0;
+    while cursor < length {
+        read_next(data, ref index);
+        cursor += 1;
+    }
+}
+
+fn skip_vectors_without_alloc(data: Span<felt252>, ref index: usize, count: usize) {
+    let mut cursor: usize = 0;
+    while cursor < count {
+        skip_vector_without_alloc(data, ref index);
+        cursor += 1;
+    }
+}
+
+fn single_field_root_vector(data: Span<felt252>, ref index: usize, domain: felt252) -> felt252 {
+    let length: usize = read_next(data, ref index).try_into().expect('E');
+    let mut state = domain;
+    let mut cursor: usize = 0;
+    while cursor < length {
+        state = poseidon_hash2(state, read_next(data, ref index));
+        cursor += 1;
+    }
+    poseidon_hash2(state, length.into())
 }
 
 fn assert_all_lengths_match(expected_len: usize, lengths: Span<felt252>, message: felt252) {
@@ -6737,22 +8367,31 @@ fn assert_note_membership(
     withdraw_authority: felt252,
     prior_note_root: felt252,
     kind: felt252,
-    prefix_root: felt252,
     batch_root: felt252,
     path_count_felt: felt252,
     ref path_cursor: usize,
     path_values: Span<felt252>,
     path_directions: Span<felt252>,
-    suffix_count_felt: felt252,
-    ref suffix_cursor: usize,
-    suffix_roots: Span<felt252>,
-    state_transition_root_domain: felt252,
+    accumulator_path_count_felt: felt252,
+    ref accumulator_path_cursor: usize,
+    accumulator_path_values: Span<felt252>,
+    accumulator_path_directions: Span<felt252>,
 ) {
     let path_count: usize = path_count_felt.try_into().expect('NOTE_PATH');
-    let suffix_count: usize = suffix_count_felt.try_into().expect('NOTE_SUFFIX');
+    let accumulator_path_count: usize = accumulator_path_count_felt
+        .try_into()
+        .expect('NOTE_ACC_PATH');
     assert(path_cursor + path_count <= path_values.len(), 'NOTE_PATH');
     assert(path_cursor + path_count <= path_directions.len(), 'NOTE_PATH');
-    assert(suffix_cursor + suffix_count <= suffix_roots.len(), 'NOTE_SUFFIX');
+    assert(accumulator_path_count == NOTE_ACCUMULATOR_DEPTH, 'NOTE_ACC_DEPTH');
+    assert(
+        accumulator_path_cursor + accumulator_path_count <= accumulator_path_values.len(),
+        'NOTE_ACC_PATH',
+    );
+    assert(
+        accumulator_path_cursor + accumulator_path_count <= accumulator_path_directions.len(),
+        'NOTE_ACC_PATH',
+    );
 
     let recomputed_batch_root = if kind == NOTE_MEMBERSHIP_KIND_DEPOSIT {
         assert(path_count == 0, 'NOTE_DEPOSIT_PATH');
@@ -6778,16 +8417,37 @@ fn assert_note_membership(
     };
     assert(recomputed_batch_root == batch_root, 'NOTE_BATCH_ROOT');
 
-    let mut root = state_transition_root(state_transition_root_domain, prefix_root, batch_root);
-    let suffix_end = suffix_cursor + suffix_count;
-    while suffix_cursor < suffix_end {
-        root =
-            state_transition_root(
-                state_transition_root_domain, root, *suffix_roots.at(suffix_cursor),
-            );
-        suffix_cursor += 1;
+    let mut root = note_accumulator_leaf(batch_root);
+    let accumulator_path_end = accumulator_path_cursor + accumulator_path_count;
+    let mut level = 0;
+    while accumulator_path_cursor < accumulator_path_end {
+        let sibling = *accumulator_path_values.at(accumulator_path_cursor);
+        let direction = *accumulator_path_directions.at(accumulator_path_cursor);
+        if direction == 0 {
+            root = note_accumulator_node(root, sibling, level);
+        } else {
+            assert(direction == 1, 'NOTE_ACC_DIR');
+            root = note_accumulator_node(sibling, root, level);
+        }
+        accumulator_path_cursor += 1;
+        level += 1;
     }
     assert(root == prior_note_root, 'NOTE_PRIOR_ROOT');
+}
+
+fn note_accumulator_leaf(batch_root: felt252) -> felt252 {
+    assert(batch_root != 0, 'NOTE_ACC_LEAF');
+    poseidon_hash2(NOTE_ACCUMULATOR_LEAF_DOMAIN, batch_root)
+}
+
+fn note_accumulator_node(left: felt252, right: felt252, level: usize) -> felt252 {
+    if left == 0 && right == 0 {
+        0
+    } else {
+        let state = poseidon_hash2(NOTE_ACCUMULATOR_NODE_DOMAIN, level.into());
+        let state = poseidon_hash2(state, left);
+        poseidon_hash2(state, right)
+    }
 }
 
 fn assert_absent_residual(
@@ -7052,8 +8712,13 @@ fn public_settlement_commitment(
     batch_id: felt252,
     pair_id: felt252,
     batch_epoch: felt252,
+    auction_verifier_address: felt252,
     order_commitment_root: felt252,
     encrypted_order_set_commitment: felt252,
+    reference_price_attestation_commitment: felt252,
+    reference_price_signer: felt252,
+    reference_price_observed_at_unix_ms: felt252,
+    reference_price_valid_until_unix_ms: felt252,
     clearing_price: felt252,
     price_base_scale: felt252,
     taker_fee_bps: felt252,
@@ -7077,8 +8742,13 @@ fn public_settlement_commitment(
     let mut state = poseidon_hash2(seed, batch_id);
     state = poseidon_hash2(state, pair_id);
     state = poseidon_hash2(state, batch_epoch);
+    state = poseidon_hash2(state, auction_verifier_address);
     state = poseidon_hash2(state, order_commitment_root);
     state = poseidon_hash2(state, encrypted_order_set_commitment);
+    state = poseidon_hash2(state, reference_price_attestation_commitment);
+    state = poseidon_hash2(state, reference_price_signer);
+    state = poseidon_hash2(state, reference_price_observed_at_unix_ms);
+    state = poseidon_hash2(state, reference_price_valid_until_unix_ms);
     state = poseidon_hash2(state, clearing_price);
     state = poseidon_hash2(state, price_base_scale);
     state = poseidon_hash2(state, taker_fee_bps);
@@ -7098,6 +8768,40 @@ fn public_settlement_commitment(
     state = poseidon_hash2(state, new_nullifier_root);
     state = poseidon_hash2(state, new_renewal_root);
     state = poseidon_hash2(state, new_fee_root);
+    state
+}
+
+fn reference_price_attestation_commitment(
+    seed: felt252,
+    auction_verifier_address: felt252,
+    pair_id: felt252,
+    base_asset_id: felt252,
+    quote_asset_id: felt252,
+    midpoint_price: felt252,
+    lower_price: felt252,
+    upper_price: felt252,
+    price_base_scale: felt252,
+    source_count: felt252,
+    observed_at_unix_ms: felt252,
+    valid_until_unix_ms: felt252,
+    source_set_commitment: felt252,
+    nonce: felt252,
+    signer_public_key: felt252,
+) -> felt252 {
+    let mut state = poseidon_hash2(seed, auction_verifier_address);
+    state = poseidon_hash2(state, pair_id);
+    state = poseidon_hash2(state, base_asset_id);
+    state = poseidon_hash2(state, quote_asset_id);
+    state = poseidon_hash2(state, midpoint_price);
+    state = poseidon_hash2(state, lower_price);
+    state = poseidon_hash2(state, upper_price);
+    state = poseidon_hash2(state, price_base_scale);
+    state = poseidon_hash2(state, source_count);
+    state = poseidon_hash2(state, observed_at_unix_ms);
+    state = poseidon_hash2(state, valid_until_unix_ms);
+    state = poseidon_hash2(state, source_set_commitment);
+    state = poseidon_hash2(state, nonce);
+    state = poseidon_hash2(state, signer_public_key);
     state
 }
 

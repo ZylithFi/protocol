@@ -19,6 +19,9 @@ use zylith_protocol::commitment_registry::{
     ICommitmentRegistryDispatcher, ICommitmentRegistryDispatcherTrait,
 };
 use zylith_protocol::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
+use zylith_protocol::external_match_executor::{
+    IExternalMatchExecutorDispatcher, IExternalMatchExecutorDispatcherTrait,
+};
 use zylith_protocol::privacy_deposit_bridge::{
     IPrivacyDepositBridgeDispatcher, IPrivacyDepositBridgeDispatcherTrait,
 };
@@ -40,6 +43,12 @@ const TEST_PROOF_VERSION: felt252 = 'PROOF1';
 const TEST_PROOF_PROGRAM_HASH: felt252 = 0x987654321;
 const TEST_BASE_BLOCK_HASH: felt252 = 0xabcdef123;
 const TEST_OS_CONFIG_HASH: felt252 = 0x123456789abcdef;
+const TEST_REFERENCE_PRICE_SIGNER_SECRET: felt252 = 0x12345;
+const TEST_REFERENCE_PRICE_SIGNER: felt252 =
+    0x2f8ffcb446d2a062ef18561eb507b08ea01d52d4c594e90cfca47f075cb952;
+const TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT: felt252 = 0x777778;
+const TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS: u64 = 1;
+const TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS: u64 = 5001;
 const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
 const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
 const NULLIFIER_MESSAGE_DOMAIN: felt252 = 'zylith_null_v1';
@@ -63,10 +72,13 @@ const STATEMENT_NOTE_CONSOLIDATION: felt252 = 'NOTE_CONSOLIDATION';
 const STATEMENT_AGGREGATE_SETTLEMENT: felt252 = 'AGGREGATE_SETTLEMENT';
 const STATEMENT_WITHDRAWAL: felt252 = 'WITHDRAWAL';
 const STATEMENT_MULTI_PAIR: felt252 = 'MULTI_PAIR';
+const STATEMENT_EXTERNAL_MATCH_AUTHORIZATION: felt252 = 'EXTERNAL_MATCH_AUTH';
 const STATEMENT_MULTI_PAIR_SETTLEMENT: felt252 = 'MULTI_PAIR_SETTLEMENT';
 const PUBLIC_MULTI_PAIR_SETTLEMENT_DOMAIN: felt252 = 0x7a796c6974685f6d756c74695f736574746c655f7631;
 const MULTI_PAIR_BATCH_ROOT_DOMAIN: felt252 =
     0x039f98f789ba5c8e01cb79a02c22b9d9e3d71e692cc6c17cb60f2ab76a4e9090;
+const EXTERNAL_MATCH_SETTLEMENT_DOMAIN: felt252 =
+    0x0311a2ee2e3ee96d0021c80b411688504ca49cbb5bee8d3dcc19e1ae87f1c9ea;
 const PUBLIC_NOTE_CONSOLIDATION_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f636f6e736f6c5f7631;
 const PUBLIC_NOTE_WITHDRAWAL_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f77697468647261775f7631;
 const RENEWAL_PARENT_CANCEL_DOMAIN: felt252 =
@@ -81,6 +93,11 @@ const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
     0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
 const OUTPUT_NOTE_NODE_DOMAIN: felt252 =
     0x03c6998f476a618431be1c1764a6724f13c0739be395bab4c1217bc0a65b2ee7;
+const NOTE_ACCUMULATOR_LEAF_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f6163635f6c6561665f7631;
+const NOTE_ACCUMULATOR_NODE_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f6163635f6e6f64655f7631;
+const NOTE_ACCUMULATOR_DEPTH: u64 = 32;
+const EMPTY_OUTPUT_NOTE_ROOT_DOMAIN: felt252 =
+    0x0279c22958925b34e81138c0d651a82cdbfd3287fa3de370e021a7201b4ce30b;
 const OUTPUT_WITHDRAWAL_STRK20_EXIT_DOMAIN: felt252 = 0x7a796c6974685f7374726b32305f657869745f7631;
 const STRK20_EXIT_CLAIM_DOMAIN: felt252 = 0x7a796c6974685f7374726b32305f636c61696d5f7631;
 const CONSUMED_NOTE_ROOT_DOMAIN: felt252 =
@@ -96,6 +113,7 @@ const TEST_PROTOCOL_FEE_RECIPIENT: felt252 =
     0x02478731e01081aa57abe958afa8c29dfa83032c10d647a63b0394c23beb6192;
 const TEST_BASE_ASSET_ID: felt252 = 0x5354524b;
 const TEST_QUOTE_ASSET_ID: felt252 = 0x55534443;
+const EXTERNAL_MATCH_BUY_SIDE: felt252 = 0;
 const FUNDING_COMMITMENT: felt252 = 0x461001;
 const SECOND_FUNDING_COMMITMENT: felt252 = 0x461002;
 const ENCRYPTED_NOTE_ACTIVATION: felt252 = 0x463001;
@@ -165,9 +183,80 @@ fn deploy_privacy_proof_signer(signer_public_key: felt252) -> ContractAddress {
     address
 }
 
+fn deploy_external_match_executor_for_verifier(
+    admin: ContractAddress, bridge: ContractAddress, verifier: ContractAddress,
+) -> IExternalMatchExecutorDispatcher {
+    let class = declare("ExternalMatchExecutor").unwrap().contract_class();
+    let calldata = array![admin.into(), bridge.into(), verifier.into(), verifier.into()];
+    let (address, _) = class.deploy(@calldata).unwrap_syscall();
+    IExternalMatchExecutorDispatcher { contract_address: address }
+}
+
+#[test]
+fn authorized_settlement_account_closes_external_match_through_verifier() {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x333);
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let verifier_address = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: verifier_address };
+    let commitment_registry = deploy_commitment_registry(admin);
+    let bridge = deploy_privacy_deposit_bridge(admin, commitment_registry);
+    let executor = deploy_external_match_executor_for_verifier(admin, bridge, verifier_address);
+
+    start_cheat_caller_address(verifier_address, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    verifier.set_external_match_executor(executor.contract_address);
+    stop_cheat_caller_address(verifier_address);
+
+    start_cheat_caller_address(executor.contract_address, verifier_address);
+    executor
+        .register_authorized_external_match_requests(
+            0x100,
+            external_match_authorization_root_for_test(0xabc),
+            array![0xabc].span(),
+            array![0x200].span(),
+            array![TEST_BASE_ASSET_ID].span(),
+            array![TEST_QUOTE_ASSET_ID].span(),
+            array![EXTERNAL_MATCH_BUY_SIDE].span(),
+            array![100].span(),
+            array![4000].span(),
+            array![1].span(),
+            array![100000].span(),
+        );
+    stop_cheat_caller_address(executor.contract_address);
+
+    cheat_block_timestamp(executor.contract_address, 11, CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(verifier_address, settlement_account);
+    let consumed = verifier.close_external_match_request(0xabc);
+    stop_cheat_caller_address(verifier_address);
+
+    assert(consumed == 0, 'BAD_CONSUMED');
+    assert(executor.external_match_request(0xabc).closed, 'REQUEST_OPEN');
+}
+
+fn external_match_authorization_root_for_test(request_id: felt252) -> felt252 {
+    let request_domain = 0x20fb26bf6509d9087ab80295aca27ea56e22e440ffb6b50d276fc8d2fcf51d2;
+    let authorization_domain = 0x4944e3edf8c94cdca9ba99f3c9c626587e0f5108b1d4428ff2c8f23ceb69ed7;
+    let mut leaf = poseidon_hash2(request_domain, request_id);
+    leaf = poseidon_hash2(leaf, 0x100);
+    leaf = poseidon_hash2(leaf, 0x200);
+    leaf = poseidon_hash2(leaf, TEST_BASE_ASSET_ID);
+    leaf = poseidon_hash2(leaf, TEST_QUOTE_ASSET_ID);
+    leaf = poseidon_hash2(leaf, EXTERNAL_MATCH_BUY_SIDE);
+    leaf = poseidon_hash2(leaf, 100);
+    leaf = poseidon_hash2(leaf, 4000);
+    leaf = poseidon_hash2(leaf, 1);
+    leaf = poseidon_hash2(leaf, 100000);
+    poseidon_hash2(poseidon_hash2(authorization_domain, 1), leaf)
+}
+
 fn configure_statement_proof_hashes(verifier: IAuctionVerifierDispatcher) {
     configure_statement_proof_hashes_without_multi_pair(verifier);
     verifier.set_statement_proof_program_hash(STATEMENT_MULTI_PAIR, TEST_PROOF_PROGRAM_HASH);
+    verifier
+        .set_statement_proof_program_hash(
+            STATEMENT_EXTERNAL_MATCH_AUTHORIZATION, TEST_PROOF_PROGRAM_HASH,
+        );
     verifier
         .set_statement_proof_program_hash(STATEMENT_MULTI_PAIR_SETTLEMENT, TEST_PROOF_PROGRAM_HASH);
 }
@@ -207,6 +296,7 @@ fn deploy_auction_verifier(
     configure_statement_proof_hashes(verifier);
     verifier.set_expected_starknet_os_config_hash(TEST_OS_CONFIG_HASH);
     verifier.set_protocol_fee_recipient(TEST_PROTOCOL_FEE_RECIPIENT);
+    verifier.set_reference_price_signer(TEST_REFERENCE_PRICE_SIGNER);
     verifier.set_pair_fee_config(0x888, TEST_TAKER_FEE_BPS);
     verifier.set_pair_fee_config(0x889, TEST_TAKER_FEE_BPS);
     verifier.set_pair_fee_config(0x1888, TEST_TAKER_FEE_BPS);
@@ -232,15 +322,15 @@ fn configure_operational_lock_prereqs(verifier: IAuctionVerifierDispatcher) {
 }
 
 #[test]
-fn auction_verifier_constructor_preserves_nonzero_initial_roots() {
+fn auction_verifier_constructor_requires_empty_note_root_and_preserves_other_roots() {
     let admin = as_address(0x111);
     let batch_registry = as_address(0x444);
     let verifier_class = declare("AuctionVerifier").unwrap().contract_class();
-    let verifier_calldata = array![admin.into(), batch_registry.into(), 0x11, 0x22, 0x33, 0x44];
+    let verifier_calldata = array![admin.into(), batch_registry.into(), 0, 0x22, 0x33, 0x44];
     let (verifier_address, _) = verifier_class.deploy(@verifier_calldata).unwrap_syscall();
     let verifier = IAuctionVerifierDispatcher { contract_address: verifier_address };
 
-    assert(verifier.current_settlement_roots() == (0x11, 0x22, 0x33, 0x44), 'INITIAL_ROOTS');
+    assert(verifier.current_settlement_roots() == (0, 0x22, 0x33, 0x44), 'INITIAL_ROOTS');
 }
 
 #[test]
@@ -1426,8 +1516,8 @@ fn submit_note_consolidation_with_mutated_binding(
     let prior_nullifier_root = 0;
     let consumed_note_root = 0xabc;
     let consumed_nullifier_root = 0xdef;
-    let proof_new_note_root = root_only_state_transition(prior_note_root, proof_output_note_root);
-    let call_new_note_root = root_only_state_transition(prior_note_root, call_output_note_root);
+    let proof_new_note_root = note_accumulator_single_root(proof_output_note_root);
+    let call_new_note_root = note_accumulator_single_root(call_output_note_root);
     let new_nullifier_root = 0x5678;
     let batch_registry = deploy_batch_registry(admin, admin);
     let auction_verifier = deploy_auction_verifier(admin, batch_registry);
@@ -1662,6 +1752,7 @@ fn settle_single_output_note_for_withdrawal(
     );
     let empty_renewal_root = empty_renewal_child_root();
     let transcript_commitment = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -1678,7 +1769,7 @@ fn settle_single_output_note_for_withdrawal(
         empty_renewal_root,
         output_note_root,
         0,
-        root_only_state_transition(0, output_note_root),
+        note_accumulator_single_root(output_note_root),
         0,
         0,
         root_only_state_transition(0, 0),
@@ -1731,7 +1822,7 @@ fn settle_single_output_note_for_withdrawal(
         empty_renewal_root,
         output_note_root,
         0,
-        root_only_state_transition(0, output_note_root),
+        note_accumulator_single_root(output_note_root),
         0,
         0,
         root_only_state_transition(0, 0),
@@ -1797,6 +1888,7 @@ fn settle_single_output_note_for_strk20_exit(
     );
     let empty_renewal_root = empty_renewal_child_root();
     let transcript_commitment = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -1813,7 +1905,7 @@ fn settle_single_output_note_for_strk20_exit(
         empty_renewal_root,
         output_note_root,
         0,
-        root_only_state_transition(0, output_note_root),
+        note_accumulator_single_root(output_note_root),
         0,
         0,
         root_only_state_transition(0, 0),
@@ -1866,7 +1958,7 @@ fn settle_single_output_note_for_strk20_exit(
         empty_renewal_root,
         output_note_root,
         0,
-        root_only_state_transition(0, output_note_root),
+        note_accumulator_single_root(output_note_root),
         0,
         0,
         root_only_state_transition(0, 0),
@@ -1957,6 +2049,7 @@ fn renewal_parent_cancel_marker_message_hash_for_verifier(
 }
 
 fn empty_public_settlement_commitment(
+    auction_verifier: ContractAddress,
     batch_id: felt252,
     pair_id: felt252,
     batch_epoch: u64,
@@ -1970,10 +2063,12 @@ fn empty_public_settlement_commitment(
         CONSUMED_NULLIFIER_ROOT_DOMAIN, empty_nullifiers.span(),
     );
     let empty_renewal_root = empty_renewal_child_root();
-    let empty_new_root = root_only_state_transition(0, 0);
+    let output_note_root = empty_output_note_root(output_bundle_ref);
+    let empty_new_root = note_accumulator_single_root(output_note_root);
     let empty_new_renewal_root = 0;
     let empty_new_nullifier_root = 0;
     root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         batch_epoch,
@@ -1988,17 +2083,64 @@ fn empty_public_settlement_commitment(
         0,
         empty_nullifier_root,
         empty_renewal_root,
-        0,
+        output_note_root,
         0,
         empty_new_root,
         empty_new_nullifier_root,
         empty_new_renewal_root,
-        empty_new_root,
+        root_only_state_transition(0, empty_fee_root()),
     )
 }
 
 fn root_only_state_transition(prior_root: felt252, batch_root: felt252) -> felt252 {
     poseidon_hash2(poseidon_hash2(ROOT_ONLY_STATE_TRANSITION_DOMAIN, prior_root), batch_root)
+}
+
+fn empty_output_note_root(output_bundle_ref: felt252) -> felt252 {
+    poseidon_hash2(EMPTY_OUTPUT_NOTE_ROOT_DOMAIN, output_bundle_ref)
+}
+
+fn note_accumulator_leaf(batch_root: felt252) -> felt252 {
+    assert(batch_root != 0, 'BAD_TEST_NOTE_ROOT');
+    poseidon_hash2(NOTE_ACCUMULATOR_LEAF_DOMAIN, batch_root)
+}
+
+fn note_accumulator_node(left: felt252, right: felt252, level: u64) -> felt252 {
+    if left == 0 && right == 0 {
+        0
+    } else {
+        let state = poseidon_hash2(NOTE_ACCUMULATOR_NODE_DOMAIN, level.into());
+        let state = poseidon_hash2(state, left);
+        poseidon_hash2(state, right)
+    }
+}
+
+fn note_accumulator_single_root(batch_root: felt252) -> felt252 {
+    let mut root = note_accumulator_leaf(batch_root);
+    let mut level = 0;
+    loop {
+        if level == NOTE_ACCUMULATOR_DEPTH {
+            break;
+        }
+        root = note_accumulator_node(root, 0, level);
+        level += 1;
+    }
+    root
+}
+
+fn note_accumulator_two_roots(first_batch_root: felt252, second_batch_root: felt252) -> felt252 {
+    let mut root = note_accumulator_node(
+        note_accumulator_leaf(first_batch_root), note_accumulator_leaf(second_batch_root), 0,
+    );
+    let mut level = 1;
+    loop {
+        if level == NOTE_ACCUMULATOR_DEPTH {
+            break;
+        }
+        root = note_accumulator_node(root, 0, level);
+        level += 1;
+    }
+    root
 }
 
 fn single_field_root(domain: felt252, values: Span<felt252>) -> felt252 {
@@ -2040,6 +2182,7 @@ fn normalized_new_fee_root(
 }
 
 fn root_only_public_settlement_commitment(
+    auction_verifier: ContractAddress,
     batch_id: felt252,
     pair_id: felt252,
     batch_epoch: u64,
@@ -2068,8 +2211,13 @@ fn root_only_public_settlement_commitment(
     );
     state = poseidon_hash2(state, pair_id);
     state = poseidon_hash2(state, batch_epoch.into());
+    state = poseidon_hash2(state, auction_verifier.into());
     state = poseidon_hash2(state, order_commitment_root);
     state = poseidon_hash2(state, encrypted_order_set_commitment);
+    state = poseidon_hash2(state, TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT);
+    state = poseidon_hash2(state, TEST_REFERENCE_PRICE_SIGNER);
+    state = poseidon_hash2(state, TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS.into());
+    state = poseidon_hash2(state, TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS.into());
     state = poseidon_hash2(state, clearing_price.into());
     state = poseidon_hash2(state, TEST_PRICE_BASE_SCALE.into());
     state = poseidon_hash2(state, TEST_TAKER_FEE_BPS.into());
@@ -2097,6 +2245,7 @@ fn multi_pair_batch_binding_root(
     pair_ids: Span<felt252>,
     batch_epoch: u64,
     order_commitment_roots: Span<felt252>,
+    admission_roots: Span<felt252>,
     encrypted_order_set_commitments: Span<felt252>,
     base_asset_ids: Span<felt252>,
     quote_asset_ids: Span<felt252>,
@@ -2105,6 +2254,7 @@ fn multi_pair_batch_binding_root(
 ) -> felt252 {
     assert(batch_ids.len() == pair_ids.len(), 'MP_BIND_LEN');
     assert(batch_ids.len() == order_commitment_roots.len(), 'MP_BIND_LEN');
+    assert(batch_ids.len() == admission_roots.len(), 'MP_BIND_LEN');
     assert(batch_ids.len() == encrypted_order_set_commitments.len(), 'MP_BIND_LEN');
     assert(batch_ids.len() == base_asset_ids.len(), 'MP_BIND_LEN');
     assert(batch_ids.len() == quote_asset_ids.len(), 'MP_BIND_LEN');
@@ -2120,7 +2270,12 @@ fn multi_pair_batch_binding_root(
         state = poseidon_hash2(state, *pair_ids.at(index));
         state = poseidon_hash2(state, batch_epoch.into());
         state = poseidon_hash2(state, *order_commitment_roots.at(index));
+        state = poseidon_hash2(state, *admission_roots.at(index));
         state = poseidon_hash2(state, *encrypted_order_set_commitments.at(index));
+        state = poseidon_hash2(state, TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT + index.into());
+        state = poseidon_hash2(state, TEST_REFERENCE_PRICE_SIGNER);
+        state = poseidon_hash2(state, TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS.into());
+        state = poseidon_hash2(state, TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS.into());
         state = poseidon_hash2(state, *base_asset_ids.at(index));
         state = poseidon_hash2(state, *quote_asset_ids.at(index));
         state = poseidon_hash2(state, *price_base_scales.at(index));
@@ -2131,12 +2286,14 @@ fn multi_pair_batch_binding_root(
 }
 
 fn root_only_public_multi_pair_settlement_commitment(
+    auction_verifier: ContractAddress,
     group_id: felt252,
     batch_epoch: u64,
     batch_binding_root: felt252,
     protocol_fee_recipient: felt252,
     output_bundle_ref: felt252,
     multi_pair_commitment: felt252,
+    external_match_root: felt252,
     prior_note_root: felt252,
     prior_nullifier_root: felt252,
     prior_renewal_root: felt252,
@@ -2153,10 +2310,12 @@ fn root_only_public_multi_pair_settlement_commitment(
 ) -> felt252 {
     let mut state = poseidon_hash2(PUBLIC_MULTI_PAIR_SETTLEMENT_DOMAIN, group_id);
     state = poseidon_hash2(state, batch_epoch.into());
+    state = poseidon_hash2(state, auction_verifier.into());
     state = poseidon_hash2(state, batch_binding_root);
     state = poseidon_hash2(state, protocol_fee_recipient);
     state = poseidon_hash2(state, output_bundle_ref);
     state = poseidon_hash2(state, multi_pair_commitment);
+    state = poseidon_hash2(state, external_match_root);
     state = poseidon_hash2(state, prior_note_root);
     state = poseidon_hash2(state, prior_nullifier_root);
     state = poseidon_hash2(state, prior_renewal_root);
@@ -2171,6 +2330,13 @@ fn root_only_public_multi_pair_settlement_commitment(
     state = poseidon_hash2(state, new_renewal_root);
     state = poseidon_hash2(state, new_fee_root);
     state
+}
+
+fn test_reference_price_signature(commitment: felt252) -> (felt252, felt252) {
+    let key_pair: StarkCurveKeyPair = StarkCurveKeyPairImpl::from_secret_key(
+        TEST_REFERENCE_PRICE_SIGNER_SECRET,
+    );
+    StarkCurveSignerImpl::sign(key_pair, commitment).unwrap()
 }
 
 fn submit_root_settlement(
@@ -2198,11 +2364,20 @@ fn submit_root_settlement(
 ) {
     let bound_fee_root = normalized_fee_root(fee_root);
     let bound_new_fee_root = normalized_new_fee_root(prior_fee_root, fee_root, new_fee_root);
+    let (reference_price_signature_r, reference_price_signature_s) = test_reference_price_signature(
+        TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+    );
     verifier
         .submit_settlement_with_proof_facts(
             batch_id,
             order_commitment_root,
             encrypted_order_set_commitment,
+            TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+            TEST_REFERENCE_PRICE_SIGNER,
+            TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS,
+            TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS,
+            reference_price_signature_r,
+            reference_price_signature_s,
             transcript_commitment,
             proof_artifact_commitment,
             clearing_price,
@@ -2253,11 +2428,20 @@ fn submit_root_settlement_with_fee_config(
     new_renewal_root: felt252,
     new_fee_root: felt252,
 ) {
+    let (reference_price_signature_r, reference_price_signature_s) = test_reference_price_signature(
+        TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+    );
     verifier
         .submit_settlement_with_proof_facts(
             batch_id,
             order_commitment_root,
             encrypted_order_set_commitment,
+            TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+            TEST_REFERENCE_PRICE_SIGNER,
+            TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS,
+            TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS,
+            reference_price_signature_r,
+            reference_price_signature_s,
             transcript_commitment,
             proof_artifact_commitment,
             clearing_price,
@@ -2292,36 +2476,84 @@ fn submit_empty_root_settlement(
     clearing_price: u128,
     output_bundle_ref: felt252,
 ) {
-    let empty_new_root = root_only_state_transition(0, 0);
+    let (reference_price_signature_r, reference_price_signature_s) = test_reference_price_signature(
+        TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+    );
+    submit_empty_root_settlement_with_reference(
+        verifier,
+        batch_id,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+        TEST_REFERENCE_PRICE_SIGNER,
+        TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS,
+        TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS,
+        reference_price_signature_r,
+        reference_price_signature_s,
+        transcript_commitment,
+        proof_artifact_commitment,
+        clearing_price,
+        output_bundle_ref,
+    );
+}
+
+fn submit_empty_root_settlement_with_reference(
+    verifier: IAuctionVerifierDispatcher,
+    batch_id: felt252,
+    order_commitment_root: felt252,
+    encrypted_order_set_commitment: felt252,
+    reference_price_attestation_commitment: felt252,
+    reference_price_signer: felt252,
+    reference_price_observed_at_unix_ms: u64,
+    reference_price_valid_until_unix_ms: u64,
+    reference_price_signature_r: felt252,
+    reference_price_signature_s: felt252,
+    transcript_commitment: felt252,
+    proof_artifact_commitment: felt252,
+    clearing_price: u128,
+    output_bundle_ref: felt252,
+) {
+    let output_note_root = empty_output_note_root(output_bundle_ref);
+    let empty_new_root = note_accumulator_single_root(output_note_root);
     let empty_nullifiers = array![];
     let empty_nullifier_root = single_field_root(
         CONSUMED_NULLIFIER_ROOT_DOMAIN, empty_nullifiers.span(),
     );
     let empty_renewal_root = empty_renewal_child_root();
     let empty_new_nullifier_root = 0;
-    submit_root_settlement(
-        verifier,
-        batch_id,
-        order_commitment_root,
-        encrypted_order_set_commitment,
-        transcript_commitment,
-        proof_artifact_commitment,
-        clearing_price,
-        output_bundle_ref,
-        0,
-        0,
-        0,
-        0,
-        0,
-        empty_nullifier_root,
-        empty_renewal_root,
-        0,
-        0,
-        empty_new_root,
-        empty_new_nullifier_root,
-        0,
-        empty_new_root,
-    );
+    verifier
+        .submit_settlement_with_proof_facts(
+            batch_id,
+            order_commitment_root,
+            encrypted_order_set_commitment,
+            reference_price_attestation_commitment,
+            reference_price_signer,
+            reference_price_observed_at_unix_ms,
+            reference_price_valid_until_unix_ms,
+            reference_price_signature_r,
+            reference_price_signature_s,
+            transcript_commitment,
+            proof_artifact_commitment,
+            clearing_price,
+            TEST_PRICE_BASE_SCALE,
+            TEST_TAKER_FEE_BPS,
+            TEST_PROTOCOL_FEE_RECIPIENT,
+            output_bundle_ref,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            empty_nullifier_root,
+            empty_renewal_root,
+            output_note_root,
+            empty_fee_root(),
+            empty_new_root,
+            empty_new_nullifier_root,
+            0,
+            root_only_state_transition(0, empty_fee_root()),
+        );
 }
 
 fn submit_multi_pair_root_settlement(
@@ -2356,6 +2588,28 @@ fn submit_multi_pair_root_settlement(
     new_renewal_root: felt252,
     new_fee_root: felt252,
 ) {
+    let mut reference_price_attestation_commitments = array![];
+    let mut reference_price_signers = array![];
+    let mut reference_price_observed_at_unix_ms_values = array![];
+    let mut reference_price_valid_until_unix_ms_values = array![];
+    let mut reference_price_signature_rs = array![];
+    let mut reference_price_signature_ss = array![];
+    let mut reference_index = 0;
+    while reference_index < batch_ids.len() {
+        let commitment = TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT + reference_index.into();
+        reference_price_attestation_commitments.append(commitment);
+        reference_price_signers.append(TEST_REFERENCE_PRICE_SIGNER);
+        reference_price_observed_at_unix_ms_values
+            .append(TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS.into());
+        reference_price_valid_until_unix_ms_values
+            .append(TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS.into());
+        let (signature_r, signature_s) = test_reference_price_signature(commitment);
+        reference_price_signature_rs.append(signature_r);
+        reference_price_signature_ss.append(signature_s);
+        reference_index += 1;
+    }
+    let empty_external_records = array![];
+    let empty_external_match_root = poseidon_hash2(EXTERNAL_MATCH_SETTLEMENT_DOMAIN, 0);
     verifier
         .submit_multi_pair_settlement_with_proof_facts(
             group_id,
@@ -2364,10 +2618,28 @@ fn submit_multi_pair_root_settlement(
             pair_ids,
             order_commitment_roots,
             encrypted_order_set_commitments,
+            reference_price_attestation_commitments.span(),
+            reference_price_signers.span(),
+            reference_price_observed_at_unix_ms_values.span(),
+            reference_price_valid_until_unix_ms_values.span(),
+            reference_price_signature_rs.span(),
+            reference_price_signature_ss.span(),
             base_asset_ids,
             quote_asset_ids,
             price_base_scales,
             taker_fee_bps_values,
+            empty_external_records.span(),
+            empty_external_records.span(),
+            empty_external_records.span(),
+            empty_external_records.span(),
+            empty_external_records.span(),
+            empty_external_records.span(),
+            empty_external_records.span(),
+            empty_external_records.span(),
+            empty_external_records.span(),
+            empty_external_records.span(),
+            empty_external_records.span(),
+            empty_external_match_root,
             transcript_commitment,
             proof_artifact_commitment,
             protocol_fee_recipient,
@@ -2430,6 +2702,7 @@ fn prepare_empty_root_transition(
     admission_root: felt252,
 ) -> felt252 {
     let transcript_commitment = empty_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         batch_epoch,
@@ -2481,9 +2754,11 @@ fn sample_single_aggregate_inputs(
         CONSUMED_NULLIFIER_ROOT_DOMAIN, empty_nullifiers.span(),
     );
     let empty_renewal_root = empty_renewal_child_root();
-    let new_note_root = root_only_state_transition(0, 0);
+    let output_note_root = empty_output_note_root(output_bundle_ref);
+    let new_note_root = note_accumulator_single_root(output_note_root);
     let new_fee_root = root_only_state_transition(0, empty_fee_root());
     let transcript_commitment = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -2498,7 +2773,7 @@ fn sample_single_aggregate_inputs(
         0,
         empty_nullifier_root,
         empty_renewal_root,
-        0,
+        output_note_root,
         0,
         new_note_root,
         0,
@@ -2522,7 +2797,7 @@ fn sample_single_aggregate_inputs(
         0,
         empty_nullifier_root,
         empty_renewal_root,
-        0,
+        output_note_root,
         0,
         new_note_root,
         0,
@@ -2575,6 +2850,15 @@ fn append_root_settlement_input(
     inputs.append(batch_id);
     inputs.append(order_commitment_root);
     inputs.append(encrypted_order_set_commitment);
+    inputs.append(TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT);
+    inputs.append(TEST_REFERENCE_PRICE_SIGNER);
+    inputs.append(TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS.into());
+    inputs.append(TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS.into());
+    let (reference_price_signature_r, reference_price_signature_s) = test_reference_price_signature(
+        TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+    );
+    inputs.append(reference_price_signature_r);
+    inputs.append(reference_price_signature_s);
     inputs.append(transcript_commitment);
     inputs.append(proof_artifact_commitment);
     inputs.append(clearing_price.into());
@@ -2653,11 +2937,14 @@ fn submit_two_batch_aggregate_with_roots_and_order(
     let clearing_price = 0_u128;
     let output_bundle_ref_1 = 0x991;
     let output_bundle_ref_2 = 0x992;
-    let empty_batch_root = 0;
+    let first_output_note_root = empty_output_note_root(output_bundle_ref_1);
+    let second_output_note_root = empty_output_note_root(output_bundle_ref_2);
     let empty_renewal_root = empty_renewal_child_root();
     let empty_nullifier_root = single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span());
-    let first_new_note_root = root_only_state_transition(0, empty_batch_root);
-    let second_new_note_root = root_only_state_transition(second_prior_note_root, empty_batch_root);
+    let first_new_note_root = note_accumulator_single_root(first_output_note_root);
+    let second_new_note_root = note_accumulator_two_roots(
+        first_output_note_root, second_output_note_root,
+    );
     let second_new_nullifier_root = second_prior_nullifier_root;
     let second_new_renewal_root = second_prior_renewal_root;
     let second_new_fee_root = root_only_state_transition(second_prior_fee_root, empty_fee_root());
@@ -2696,6 +2983,7 @@ fn submit_two_batch_aggregate_with_roots_and_order(
     stop_cheat_caller_address(auction_verifier);
 
     let transcript_1 = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id_1,
         pair_id_1,
         1,
@@ -2710,7 +2998,7 @@ fn submit_two_batch_aggregate_with_roots_and_order(
         0,
         empty_nullifier_root,
         empty_renewal_root,
-        0,
+        first_output_note_root,
         0,
         first_new_note_root,
         first_new_nullifier_root,
@@ -2718,6 +3006,7 @@ fn submit_two_batch_aggregate_with_roots_and_order(
         first_new_fee_root,
     );
     let transcript_2 = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id_2,
         pair_id_2,
         2,
@@ -2732,7 +3021,7 @@ fn submit_two_batch_aggregate_with_roots_and_order(
         0,
         empty_nullifier_root,
         empty_renewal_root,
-        0,
+        second_output_note_root,
         0,
         second_new_note_root,
         second_new_nullifier_root,
@@ -3333,7 +3622,7 @@ fn privacy_deposit_bridge_activates_verifier_note_root_when_configured() {
     let (current_note_root, current_nullifier_root, current_renewal_root, current_fee_root) =
         verifier
         .current_settlement_roots();
-    assert(current_note_root == root_only_state_transition(0, deposit_root()), 'BAD_DEPOSIT_ROOT');
+    assert(current_note_root == note_accumulator_single_root(deposit_root()), 'BAD_DEPOSIT_ROOT');
     assert(current_nullifier_root == 0, 'BAD_NULLIFIER_ROOT');
     assert(current_renewal_root == 0, 'BAD_RENEWAL_ROOT');
     assert(current_fee_root == 0, 'BAD_FEE_ROOT');
@@ -3457,8 +3746,8 @@ fn auction_verifier_rejects_stale_prior_note_root_after_deposit_activation() {
         );
     stop_cheat_caller_address(batch_registry);
 
-    let empty_new_root = root_only_state_transition(0, 0);
-    let transcript_commitment = root_only_public_settlement_commitment(
+    let transcript_commitment = empty_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -3466,19 +3755,6 @@ fn auction_verifier_rejects_stale_prior_note_root_after_deposit_activation() {
         encrypted_order_set_commitment,
         clearing_price,
         output_bundle_ref,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        empty_new_root,
-        empty_new_root,
-        empty_new_root,
-        empty_new_root,
     );
     let proof_artifact_commitment = native_settlement_message_hash(
         auction_verifier, transcript_commitment,
@@ -3528,7 +3804,7 @@ fn privacy_deposit_bridge_registers_privacy_funded_execution_notes() {
         verifier
         .current_settlement_roots();
     assert(
-        current_note_root == root_only_state_transition(0, deposit_root()), 'BAD_PRIV_DEPOSIT_ROOT',
+        current_note_root == note_accumulator_single_root(deposit_root()), 'BAD_PRIV_DEPOSIT_ROOT',
     );
     assert(current_nullifier_root == 0, 'BAD_NULLIFIER_ROOT');
     assert(current_renewal_root == 0, 'BAD_RENEWAL_ROOT');
@@ -3596,8 +3872,7 @@ fn privacy_deposit_bridge_registers_batched_privacy_funded_notes() {
         'BAD_1',
     );
 
-    let first_root = root_only_state_transition(0, deposit_root());
-    let second_root = root_only_state_transition(first_root, second_deposit_root());
+    let second_root = note_accumulator_two_roots(deposit_root(), second_deposit_root());
     let (current_note_root, current_nullifier_root, current_renewal_root, current_fee_root) =
         verifier
         .current_settlement_roots();
@@ -4020,7 +4295,10 @@ fn auction_verifier_updates_sparse_renewal_root_during_settlement() {
         CONSUMED_NULLIFIER_ROOT_DOMAIN, empty_nullifiers.span(),
     );
     let new_renewal_root = 0x777;
+    let output_note_root = empty_output_note_root(output_bundle_ref);
+    let new_note_root = note_accumulator_single_root(output_note_root);
     let transcript_commitment = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -4035,9 +4313,9 @@ fn auction_verifier_updates_sparse_renewal_root_during_settlement() {
         0,
         empty_nullifier_root,
         renewal_child_root,
+        output_note_root,
         0,
-        0,
-        root_only_state_transition(0, 0),
+        new_note_root,
         0,
         new_renewal_root,
         root_only_state_transition(0, 0),
@@ -4089,9 +4367,9 @@ fn auction_verifier_updates_sparse_renewal_root_during_settlement() {
         0,
         empty_nullifier_root,
         renewal_child_root,
+        output_note_root,
         0,
-        0,
-        root_only_state_transition(0, 0),
+        new_note_root,
         0,
         new_renewal_root,
         root_only_state_transition(0, 0),
@@ -4159,7 +4437,10 @@ fn auction_verifier_rejects_stale_renewal_root_after_parent_cancel_marker() {
         CONSUMED_NULLIFIER_ROOT_DOMAIN, empty_nullifiers.span(),
     );
     let new_renewal_root = poseidon_hash2(RENEWAL_SPARSE_LEAF_DOMAIN, child_nullifier);
+    let output_note_root = empty_output_note_root(output_bundle_ref);
+    let new_note_root = note_accumulator_single_root(output_note_root);
     let transcript_commitment = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -4174,9 +4455,9 @@ fn auction_verifier_rejects_stale_renewal_root_after_parent_cancel_marker() {
         0,
         empty_nullifier_root,
         renewal_child_root,
+        output_note_root,
         0,
-        0,
-        root_only_state_transition(0, 0),
+        new_note_root,
         0,
         new_renewal_root,
         root_only_state_transition(0, 0),
@@ -4206,9 +4487,9 @@ fn auction_verifier_rejects_stale_renewal_root_after_parent_cancel_marker() {
         0,
         empty_nullifier_root,
         renewal_child_root,
+        output_note_root,
         0,
-        0,
-        root_only_state_transition(0, 0),
+        new_note_root,
         0,
         new_renewal_root,
         root_only_state_transition(0, 0),
@@ -4442,6 +4723,168 @@ fn auction_verifier_pause_blocks_withdrawal() {
         );
 }
 
+fn submit_reference_price_validation_attempt(
+    reference_price_attestation_commitment: felt252,
+    reference_price_signer: felt252,
+    reference_price_observed_at_unix_ms: u64,
+    reference_price_valid_until_unix_ms: u64,
+    invalid_signature: bool,
+) {
+    let admin = as_address(0x111);
+    let settlement_account = as_address(0x222);
+    let batch_id = 0x776;
+    let pair_id = 0x888;
+    let order_commitment_root = 0x111;
+    let encrypted_order_set_commitment = 0x222;
+    let clearing_price = 0_u128;
+    let output_bundle_ref = 0x999;
+    let batch_registry = deploy_batch_registry(admin, admin);
+    let auction_verifier = deploy_auction_verifier(admin, batch_registry);
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    register_prepared_batch(
+        batch_registry,
+        admin,
+        auction_verifier,
+        batch_id,
+        pair_id,
+        1,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+    );
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_authorized_settlement_account(settlement_account);
+    stop_cheat_caller_address(auction_verifier);
+    let transcript_commitment = prepare_empty_root_transition(
+        auction_verifier,
+        verifier,
+        settlement_account,
+        batch_id,
+        pair_id,
+        1,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        clearing_price,
+        output_bundle_ref,
+        0x334,
+    );
+    let proof_message_hash = verifier.settlement_proof_message_hash(transcript_commitment);
+    let proof_facts = valid_proof_facts(99, proof_message_hash);
+    cheat_block_number(auction_verifier, 100, CheatSpan::TargetCalls(1));
+    cheat_proof_facts(auction_verifier, proof_facts.span(), CheatSpan::TargetCalls(1));
+    start_cheat_caller_address(auction_verifier, settlement_account);
+    let signed_commitment = if invalid_signature {
+        reference_price_attestation_commitment + 1
+    } else if reference_price_attestation_commitment == 0 {
+        1
+    } else {
+        reference_price_attestation_commitment
+    };
+    let (reference_price_signature_r, reference_price_signature_s) = test_reference_price_signature(
+        signed_commitment,
+    );
+    submit_empty_root_settlement_with_reference(
+        verifier,
+        batch_id,
+        order_commitment_root,
+        encrypted_order_set_commitment,
+        reference_price_attestation_commitment,
+        reference_price_signer,
+        reference_price_observed_at_unix_ms,
+        reference_price_valid_until_unix_ms,
+        reference_price_signature_r,
+        reference_price_signature_s,
+        transcript_commitment,
+        native_settlement_message_hash(auction_verifier, transcript_commitment),
+        clearing_price,
+        output_bundle_ref,
+    );
+}
+
+#[test]
+#[should_panic(expected: ('BAD_REF_COMMITMENT',))]
+fn auction_verifier_rejects_zero_reference_price_commitment() {
+    submit_reference_price_validation_attempt(
+        0,
+        TEST_REFERENCE_PRICE_SIGNER,
+        TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS,
+        TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS,
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected: ('BAD_REF_SIGNER',))]
+fn auction_verifier_rejects_wrong_reference_price_signer() {
+    submit_reference_price_validation_attempt(
+        TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+        TEST_REFERENCE_PRICE_SIGNER + 1,
+        TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS,
+        TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS,
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected: ('BAD_REF_OBSERVED',))]
+fn auction_verifier_rejects_zero_reference_price_observation_time() {
+    submit_reference_price_validation_attempt(
+        TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+        TEST_REFERENCE_PRICE_SIGNER,
+        0,
+        TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS,
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected: ('BAD_REF_WINDOW',))]
+fn auction_verifier_rejects_nonincreasing_reference_price_window() {
+    submit_reference_price_validation_attempt(
+        TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+        TEST_REFERENCE_PRICE_SIGNER,
+        TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS,
+        TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS,
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected: ('BAD_REF_WINDOW',))]
+fn auction_verifier_rejects_oversized_reference_price_window() {
+    submit_reference_price_validation_attempt(
+        TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+        TEST_REFERENCE_PRICE_SIGNER,
+        TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS,
+        TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS + 15001,
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected: ('STALE_REF_PRICE',))]
+fn auction_verifier_rejects_reference_price_far_from_batch_close() {
+    submit_reference_price_validation_attempt(
+        TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+        TEST_REFERENCE_PRICE_SIGNER,
+        15003,
+        20003,
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected: ('BAD_REF_SIGNATURE',))]
+fn auction_verifier_rejects_invalid_reference_price_signature() {
+    submit_reference_price_validation_attempt(
+        TEST_REFERENCE_PRICE_ATTESTATION_COMMITMENT,
+        TEST_REFERENCE_PRICE_SIGNER,
+        TEST_REFERENCE_PRICE_OBSERVED_AT_UNIX_MS,
+        TEST_REFERENCE_PRICE_VALID_UNTIL_UNIX_MS,
+        true,
+    );
+}
+
 #[test]
 fn auction_verifier_accepts_native_proof_facts() {
     let admin = as_address(0x111);
@@ -4471,6 +4914,7 @@ fn auction_verifier_accepts_native_proof_facts() {
     stop_cheat_caller_address(auction_verifier);
 
     let transcript_commitment = empty_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -4496,6 +4940,7 @@ fn auction_verifier_accepts_native_proof_facts() {
         CONSUMED_NULLIFIER_ROOT_DOMAIN, empty_nullifiers.span(),
     );
     let empty_renewal_root = empty_renewal_child_root();
+    let output_note_root = empty_output_note_root(output_bundle_ref);
     record_root_transition_proofs(
         auction_verifier,
         verifier,
@@ -4531,7 +4976,7 @@ fn auction_verifier_accepts_native_proof_facts() {
     let (current_note_root, current_nullifier_root, current_renewal_root, current_fee_root) =
         verifier
         .current_settlement_roots();
-    assert(current_note_root == root_only_state_transition(0, 0), 'BAD_CURRENT_NOTE');
+    assert(current_note_root == note_accumulator_single_root(output_note_root), 'BAD_CURRENT_NOTE');
     let _ = empty_nullifier_root;
     assert(current_nullifier_root == 0, 'BAD_CURRENT_NULL');
     assert(current_renewal_root == 0, 'BAD_CURRENT_RENEW');
@@ -4567,6 +5012,7 @@ fn auction_verifier_accepts_split_auction_result_before_settlement() {
     stop_cheat_caller_address(auction_verifier);
 
     let transcript_commitment = empty_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -4656,6 +5102,7 @@ fn auction_verifier_rejects_split_settlement_without_auction_result() {
     stop_cheat_caller_address(auction_verifier);
 
     let transcript_commitment = empty_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -4699,13 +5146,16 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
     let clearing_price = 0_u128;
     let output_bundle_ref_1 = 0x991;
     let output_bundle_ref_2 = 0x992;
-    let empty_batch_root = 0;
+    let first_output_note_root = empty_output_note_root(output_bundle_ref_1);
+    let second_output_note_root = empty_output_note_root(output_bundle_ref_2);
     let empty_renewal_root = empty_renewal_child_root();
-    let first_new_note_root = root_only_state_transition(0, empty_batch_root);
+    let first_new_note_root = note_accumulator_single_root(first_output_note_root);
+    let second_new_note_root = note_accumulator_two_roots(
+        first_output_note_root, second_output_note_root,
+    );
     let first_new_nullifier_root = 0;
     let first_new_renewal_root = 0;
     let first_new_fee_root = root_only_state_transition(0, empty_fee_root());
-    let second_new_note_root = root_only_state_transition(first_new_note_root, empty_batch_root);
     let second_new_renewal_root = first_new_renewal_root;
     let second_new_fee_root = root_only_state_transition(first_new_fee_root, empty_fee_root());
     let empty_nullifiers = array![];
@@ -4747,6 +5197,7 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
     stop_cheat_caller_address(auction_verifier);
 
     let transcript_1 = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id_1,
         pair_id_1,
         1,
@@ -4761,7 +5212,7 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
         0,
         empty_nullifier_root,
         empty_renewal_root,
-        0,
+        first_output_note_root,
         0,
         first_new_note_root,
         first_new_nullifier_root,
@@ -4769,6 +5220,7 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
         first_new_fee_root,
     );
     let transcript_2 = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id_2,
         pair_id_2,
         2,
@@ -4783,7 +5235,7 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
         0,
         empty_nullifier_root,
         empty_renewal_root,
-        0,
+        second_output_note_root,
         0,
         second_new_note_root,
         first_new_nullifier_root,
@@ -4864,7 +5316,7 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
         0,
         empty_nullifier_root,
         empty_renewal_root,
-        0,
+        first_output_note_root,
         0,
         first_new_note_root,
         first_new_nullifier_root,
@@ -4887,7 +5339,7 @@ fn auction_verifier_accepts_native_aggregate_proof_facts() {
         0,
         empty_nullifier_root,
         empty_renewal_root,
-        0,
+        second_output_note_root,
         0,
         second_new_note_root,
         first_new_nullifier_root,
@@ -5132,7 +5584,7 @@ fn auction_verifier_rejects_aggregate_stale_member_note_root() {
 #[test]
 #[should_panic]
 fn auction_verifier_rejects_aggregate_duplicate_nullifier_transition() {
-    let first_new_note_root = root_only_state_transition(0, 0);
+    let first_new_note_root = note_accumulator_single_root(empty_output_note_root(0x991));
     let first_new_fee_root = root_only_state_transition(0, empty_fee_root());
     submit_two_batch_aggregate_with_roots(
         first_new_note_root, 0x1234, 0, 0, 0, first_new_fee_root, first_new_fee_root,
@@ -5142,7 +5594,7 @@ fn auction_verifier_rejects_aggregate_duplicate_nullifier_transition() {
 #[test]
 #[should_panic]
 fn auction_verifier_rejects_aggregate_mismatched_renewal_transition() {
-    let first_new_note_root = root_only_state_transition(0, 0);
+    let first_new_note_root = note_accumulator_single_root(empty_output_note_root(0x991));
     let first_new_fee_root = root_only_state_transition(0, empty_fee_root());
     submit_two_batch_aggregate_with_roots(
         first_new_note_root, 0, 0, 0x5678, 0, first_new_fee_root, first_new_fee_root,
@@ -5152,7 +5604,7 @@ fn auction_verifier_rejects_aggregate_mismatched_renewal_transition() {
 #[test]
 #[should_panic]
 fn auction_verifier_rejects_aggregate_mismatched_fee_root() {
-    let first_new_note_root = root_only_state_transition(0, 0);
+    let first_new_note_root = note_accumulator_single_root(empty_output_note_root(0x991));
     let first_new_fee_root = root_only_state_transition(0, empty_fee_root());
     submit_two_batch_aggregate_with_roots(first_new_note_root, 0, 0, 0, 0, first_new_fee_root, 0);
 }
@@ -5160,7 +5612,7 @@ fn auction_verifier_rejects_aggregate_mismatched_fee_root() {
 #[test]
 #[should_panic]
 fn auction_verifier_rejects_reordered_aggregate_settlement_records() {
-    let first_new_note_root = root_only_state_transition(0, 0);
+    let first_new_note_root = note_accumulator_single_root(empty_output_note_root(0x991));
     let first_new_fee_root = root_only_state_transition(0, empty_fee_root());
     submit_two_batch_aggregate_with_roots_and_order(
         first_new_note_root, 0, 0, 0, 0, first_new_fee_root, first_new_fee_root, true,
@@ -5201,7 +5653,10 @@ fn auction_verifier_accepts_root_only_nullifier_transition() {
     );
     let empty_renewal_root = empty_renewal_child_root();
     let sparse_new_nullifier_root = 0x4567;
+    let output_note_root = empty_output_note_root(output_bundle_ref);
+    let new_note_root = note_accumulator_single_root(output_note_root);
     let transcript_commitment = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -5216,9 +5671,9 @@ fn auction_verifier_accepts_root_only_nullifier_transition() {
         0,
         consumed_nullifier_root,
         empty_renewal_root,
+        output_note_root,
         0,
-        0,
-        root_only_state_transition(0, 0),
+        new_note_root,
         sparse_new_nullifier_root,
         0,
         root_only_state_transition(0, 0),
@@ -5270,9 +5725,9 @@ fn auction_verifier_accepts_root_only_nullifier_transition() {
         0,
         consumed_nullifier_root,
         empty_renewal_root,
+        output_note_root,
         0,
-        0,
-        root_only_state_transition(0, 0),
+        new_note_root,
         sparse_new_nullifier_root,
         0,
         root_only_state_transition(0, 0),
@@ -5314,7 +5769,10 @@ fn auction_verifier_allows_idempotent_unsettled_split_root_proofs() {
     let first_new_nullifier_root = 0x201;
     let first_renewal_child_root = 0x301;
     let first_new_renewal_root = 0x401;
+    let output_note_root = empty_output_note_root(output_bundle_ref);
+    let new_note_root = note_accumulator_single_root(output_note_root);
     let first_transcript_commitment = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -5329,9 +5787,9 @@ fn auction_verifier_allows_idempotent_unsettled_split_root_proofs() {
         0,
         first_consumed_nullifier_root,
         first_renewal_child_root,
+        output_note_root,
         0,
-        0,
-        root_only_state_transition(0, 0),
+        new_note_root,
         first_new_nullifier_root,
         first_new_renewal_root,
         root_only_state_transition(0, 0),
@@ -5415,9 +5873,9 @@ fn auction_verifier_allows_idempotent_unsettled_split_root_proofs() {
         0,
         second_consumed_nullifier_root,
         second_renewal_child_root,
+        output_note_root,
         0,
-        0,
-        root_only_state_transition(0, 0),
+        new_note_root,
         second_new_nullifier_root,
         second_new_renewal_root,
         root_only_state_transition(0, 0),
@@ -5681,9 +6139,9 @@ fn auction_verifier_rejects_stale_fee_bps_at_settlement() {
         0,
         single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
         empty_renewal_child_root(),
+        empty_output_note_root(output_bundle_ref),
         0,
-        0,
-        root_only_state_transition(0, 0),
+        note_accumulator_single_root(empty_output_note_root(output_bundle_ref)),
         0,
         0,
         root_only_state_transition(0, 0),
@@ -5755,9 +6213,9 @@ fn auction_verifier_rejects_stale_fee_recipient_at_settlement() {
         0,
         single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
         empty_renewal_child_root(),
+        empty_output_note_root(output_bundle_ref),
         0,
-        0,
-        root_only_state_transition(0, 0),
+        note_accumulator_single_root(empty_output_note_root(output_bundle_ref)),
         0,
         0,
         root_only_state_transition(0, 0),
@@ -5826,9 +6284,9 @@ fn auction_verifier_rejects_wrong_fee_root_at_settlement() {
         0,
         single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
         empty_renewal_child_root(),
-        0,
+        empty_output_note_root(output_bundle_ref),
         empty_fee_root() + 1,
-        root_only_state_transition(0, 0),
+        note_accumulator_single_root(empty_output_note_root(output_bundle_ref)),
         0,
         0,
         root_only_state_transition(0, empty_fee_root() + 1),
@@ -5897,9 +6355,9 @@ fn auction_verifier_rejects_wrong_clearing_price_at_settlement() {
         0,
         single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
         empty_renewal_child_root(),
+        empty_output_note_root(output_bundle_ref),
         0,
-        0,
-        root_only_state_transition(0, 0),
+        note_accumulator_single_root(empty_output_note_root(output_bundle_ref)),
         0,
         0,
         root_only_state_transition(0, 0),
@@ -5968,9 +6426,9 @@ fn auction_verifier_rejects_wrong_output_bundle_ref_at_settlement() {
         0,
         single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
         empty_renewal_child_root(),
+        empty_output_note_root(output_bundle_ref + 1),
         0,
-        0,
-        root_only_state_transition(0, 0),
+        note_accumulator_single_root(empty_output_note_root(output_bundle_ref + 1)),
         0,
         0,
         root_only_state_transition(0, 0),
@@ -6039,9 +6497,9 @@ fn auction_verifier_rejects_transcript_bound_to_wrong_pair_id() {
         0,
         single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
         empty_renewal_child_root(),
+        empty_output_note_root(output_bundle_ref),
         0,
-        0,
-        root_only_state_transition(0, 0),
+        note_accumulator_single_root(empty_output_note_root(output_bundle_ref)),
         0,
         0,
         root_only_state_transition(0, 0),
@@ -6111,9 +6569,9 @@ fn auction_verifier_rejects_transcript_bound_to_wrong_epoch_id() {
         0,
         single_field_root(CONSUMED_NULLIFIER_ROOT_DOMAIN, array![].span()),
         empty_renewal_child_root(),
+        empty_output_note_root(output_bundle_ref),
         0,
-        0,
-        root_only_state_transition(0, 0),
+        note_accumulator_single_root(empty_output_note_root(output_bundle_ref)),
         0,
         0,
         root_only_state_transition(0, 0),
@@ -6131,7 +6589,7 @@ fn auction_verifier_accepts_permissionless_note_consolidation_proof_facts() {
     let consumed_note_root = 0xabc;
     let consumed_nullifier_root = 0xdef;
     let output_note_root = 0x1234;
-    let new_note_root = root_only_state_transition(prior_note_root, output_note_root);
+    let new_note_root = note_accumulator_single_root(output_note_root);
     let new_nullifier_root = 0x5678;
     let batch_registry = deploy_batch_registry(admin, admin);
     let auction_verifier = deploy_auction_verifier(admin, batch_registry);
@@ -6192,6 +6650,66 @@ fn auction_verifier_accepts_permissionless_note_consolidation_proof_facts() {
 }
 
 #[test]
+fn auction_verifier_pages_note_root_transitions_in_order() {
+    let admin = as_address(0x111);
+    let registrar = as_address(0x222);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+
+    start_cheat_caller_address(auction_verifier, admin);
+    verifier.set_deposit_root_registrar(registrar);
+    stop_cheat_caller_address(auction_verifier);
+
+    start_cheat_caller_address(auction_verifier, registrar);
+    verifier.activate_deposit_root(0x101, 0x201);
+    verifier.activate_deposit_root(0x102, 0x202);
+    verifier.activate_deposit_root(0x103, 0x203);
+    stop_cheat_caller_address(auction_verifier);
+
+    let page = verifier.note_root_transition_page(1, 256);
+    assert(page.len() == 8, 'BAD_PAGE_LENGTH');
+    assert(*page.at(0) == 0, 'BAD_PAGE_KIND_1');
+    assert(*page.at(1) == 0x102, 'BAD_PAGE_KEY_1');
+    assert(*page.at(2) == 0x202, 'BAD_PAGE_ROOT_1');
+    assert(*page.at(3) == note_accumulator_two_roots(0x201, 0x202), 'BAD_PAGE_NEW_1');
+    assert(*page.at(4) == 0, 'BAD_PAGE_KIND_2');
+    assert(*page.at(5) == 0x103, 'BAD_PAGE_KEY_2');
+    assert(*page.at(6) == 0x203, 'BAD_PAGE_ROOT_2');
+    let (_, _, _, third_new_root) = verifier.note_root_transition(2);
+    assert(*page.at(7) == third_new_root, 'BAD_PAGE_NEW_2');
+
+    let empty_page = verifier.note_root_transition_page(3, 1);
+    assert(empty_page.len() == 0, 'BAD_EMPTY_PAGE');
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_zero_note_root_transition_page_limit() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    verifier.note_root_transition_page(0, 0);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_oversized_note_root_transition_page() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    verifier.note_root_transition_page(0, 257);
+}
+
+#[test]
+#[should_panic]
+fn auction_verifier_rejects_note_root_transition_page_past_end() {
+    let admin = as_address(0x111);
+    let auction_verifier = deploy_auction_verifier(admin, as_address(0x444));
+    let verifier = IAuctionVerifierDispatcher { contract_address: auction_verifier };
+    verifier.note_root_transition_page(1, 1);
+}
+
+#[test]
 #[should_panic]
 fn auction_verifier_rejects_note_consolidation_mutated_output_root_proof_binding() {
     submit_note_consolidation_with_mutated_binding(0x77a, 0x77a, 0x999, 0x999, 0x1234, 0x1235);
@@ -6220,7 +6738,7 @@ fn auction_verifier_rejects_duplicate_note_consolidation_id() {
     let consumed_note_root = 0xabc;
     let consumed_nullifier_root = 0xdef;
     let output_note_root = 0x1234;
-    let new_note_root = root_only_state_transition(prior_note_root, output_note_root);
+    let new_note_root = note_accumulator_single_root(output_note_root);
     let new_nullifier_root = 0x5678;
     let batch_registry = deploy_batch_registry(admin, admin);
     let auction_verifier = deploy_auction_verifier(admin, batch_registry);
@@ -6250,7 +6768,7 @@ fn auction_verifier_rejects_duplicate_note_consolidation_id() {
         consumed_note_root,
         consumed_nullifier_root + 1,
         output_note_root + 1,
-        root_only_state_transition(new_note_root, output_note_root + 1),
+        note_accumulator_two_roots(output_note_root, output_note_root + 1),
         new_nullifier_root + 1,
     );
 }
@@ -6263,7 +6781,7 @@ fn auction_verifier_rejects_note_consolidation_stale_roots() {
     let stale_consolidation_id = 0x785;
     let output_bundle_ref = 0x999;
     let first_output_root = 0x1234;
-    let first_new_note_root = root_only_state_transition(0, first_output_root);
+    let first_new_note_root = note_accumulator_single_root(first_output_root);
     let first_new_nullifier_root = 0x5678;
     let batch_registry = deploy_batch_registry(admin, admin);
     let auction_verifier = deploy_auction_verifier(admin, batch_registry);
@@ -6293,7 +6811,7 @@ fn auction_verifier_rejects_note_consolidation_stale_roots() {
         0xabc + 1,
         0xdef + 1,
         0x2234,
-        root_only_state_transition(0, 0x2234),
+        note_accumulator_single_root(0x2234),
         0x6678,
     );
 }
@@ -6337,6 +6855,7 @@ fn auction_verifier_rejects_invalid_new_note_root() {
     let output_note_root = 0xabc;
     let fee_root = 0;
     let transcript_commitment = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -7130,15 +7649,17 @@ fn auction_verifier_settles_multi_pair_group_with_valid_proof_facts() {
     let renewal_child_root = empty_renewal_child_root();
     let output_note_root = 0x7701;
     let fee_root = empty_fee_root();
-    let new_note_root = root_only_state_transition(prior_note_root, output_note_root);
+    let new_note_root = note_accumulator_single_root(output_note_root);
     let new_nullifier_root = 0;
     let new_renewal_root = 0;
     let new_fee_root = root_only_state_transition(prior_fee_root, fee_root);
+    let admission_roots = array![0xa011, 0xa012, 0xa013];
     let batch_binding_root = multi_pair_batch_binding_root(
         batch_ids.span(),
         pair_ids.span(),
         batch_epoch,
         order_roots.span(),
+        admission_roots.span(),
         encrypted_roots.span(),
         base_assets.span(),
         quote_assets.span(),
@@ -7146,12 +7667,14 @@ fn auction_verifier_settles_multi_pair_group_with_valid_proof_facts() {
         taker_fees.span(),
     );
     let transcript_commitment = root_only_public_multi_pair_settlement_commitment(
+        auction_verifier,
         group_id,
         batch_epoch,
         batch_binding_root,
         TEST_PROTOCOL_FEE_RECIPIENT,
         output_bundle_ref,
         multi_pair_commitment,
+        poseidon_hash2(EXTERNAL_MATCH_SETTLEMENT_DOMAIN, 0),
         prior_note_root,
         prior_nullifier_root,
         prior_renewal_root,
@@ -7318,13 +7841,15 @@ fn auction_verifier_rejects_multi_pair_group_with_mutated_member_binding() {
     let renewal_child_root = empty_renewal_child_root();
     let output_note_root = 0x7702;
     let fee_root = empty_fee_root();
-    let new_note_root = root_only_state_transition(0, output_note_root);
+    let new_note_root = note_accumulator_single_root(output_note_root);
     let new_fee_root = root_only_state_transition(0, fee_root);
+    let admission_roots = array![0xa021, 0xa022];
     let batch_binding_root = multi_pair_batch_binding_root(
         batch_ids.span(),
         pair_ids.span(),
         batch_epoch,
         order_roots.span(),
+        admission_roots.span(),
         encrypted_roots.span(),
         base_assets.span(),
         quote_assets.span(),
@@ -7332,12 +7857,14 @@ fn auction_verifier_rejects_multi_pair_group_with_mutated_member_binding() {
         taker_fees.span(),
     );
     let transcript_commitment = root_only_public_multi_pair_settlement_commitment(
+        auction_verifier,
         group_id,
         batch_epoch,
         batch_binding_root,
         TEST_PROTOCOL_FEE_RECIPIENT,
         output_bundle_ref,
         multi_pair_commitment,
+        poseidon_hash2(EXTERNAL_MATCH_SETTLEMENT_DOMAIN, 0),
         0,
         0,
         0,
@@ -8300,6 +8827,7 @@ fn auction_verifier_rejects_settlement_output_withdrawal_before_claim_delay() {
     );
     let empty_renewal_root = empty_renewal_child_root();
     let transcript_commitment = root_only_public_settlement_commitment(
+        auction_verifier,
         batch_id,
         pair_id,
         1,
@@ -8316,7 +8844,7 @@ fn auction_verifier_rejects_settlement_output_withdrawal_before_claim_delay() {
         empty_renewal_root,
         output_note_root,
         0,
-        root_only_state_transition(0, output_note_root),
+        note_accumulator_single_root(output_note_root),
         0,
         0,
         root_only_state_transition(0, 0),
@@ -8348,7 +8876,7 @@ fn auction_verifier_rejects_settlement_output_withdrawal_before_claim_delay() {
         empty_renewal_root,
         output_note_root,
         0,
-        root_only_state_transition(0, output_note_root),
+        note_accumulator_single_root(output_note_root),
         0,
         0,
         root_only_state_transition(0, 0),

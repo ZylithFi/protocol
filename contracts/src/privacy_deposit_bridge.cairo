@@ -13,6 +13,7 @@ pub trait IPrivacyDepositBridge<TContractState> {
     fn accept_admin(ref self: TContractState);
     fn lock_config(ref self: TContractState);
     fn set_auction_verifier(ref self: TContractState, verifier: ContractAddress);
+    fn set_external_match_executor(ref self: TContractState, executor: ContractAddress);
     fn register_supported_asset(
         ref self: TContractState, asset_id: felt252, token_address: ContractAddress,
     );
@@ -34,6 +35,14 @@ pub trait IPrivacyDepositBridge<TContractState> {
         withdraw_authority: felt252,
         exit_commitment: felt252,
     );
+    fn settle_external_match_asset_swap(
+        ref self: TContractState,
+        matcher: ContractAddress,
+        input_asset_id: felt252,
+        output_asset_id: felt252,
+        input_amount: u128,
+        output_amount: u128,
+    );
     fn strk20_exit_claimed_open_note_id(self: @TContractState, exit_commitment: felt252) -> felt252;
     fn escrowed_asset_amount(self: @TContractState, asset_id: felt252) -> u128;
     fn asset_token(self: @TContractState, asset_id: felt252) -> ContractAddress;
@@ -43,6 +52,7 @@ pub trait IPrivacyDepositBridge<TContractState> {
     fn admin_transfer_pending(self: @TContractState) -> bool;
     fn config_is_locked(self: @TContractState) -> bool;
     fn auction_verifier_address(self: @TContractState) -> ContractAddress;
+    fn external_match_executor_address(self: @TContractState) -> ContractAddress;
     fn commitment_registry_address(self: @TContractState) -> ContractAddress;
     fn privacy_pool_address(self: @TContractState) -> ContractAddress;
 }
@@ -74,6 +84,7 @@ pub mod PrivacyDepositBridge {
         admin_transfer_pending: bool,
         config_locked: bool,
         auction_verifier: ContractAddress,
+        external_match_executor: ContractAddress,
         commitment_registry: ContractAddress,
         privacy_pool: ContractAddress,
         asset_tokens: Map<felt252, ContractAddress>,
@@ -133,6 +144,13 @@ pub mod PrivacyDepositBridge {
             assert(!self.config_locked.read(), 'CONFIG_LOCKED');
             assert(!verifier.is_zero(), 'BAD_AUCTION_VERIFIER');
             self.auction_verifier.write(verifier);
+        }
+
+        fn set_external_match_executor(ref self: ContractState, executor: ContractAddress) {
+            assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
+            assert(!executor.is_zero(), 'BAD_MATCH_EXECUTOR');
+            self.external_match_executor.write(executor);
         }
 
         fn register_supported_asset(
@@ -221,6 +239,49 @@ pub mod PrivacyDepositBridge {
             self.escrowed_asset_amounts.write(asset_id, escrowed - amount);
         }
 
+        fn settle_external_match_asset_swap(
+            ref self: ContractState,
+            matcher: ContractAddress,
+            input_asset_id: felt252,
+            output_asset_id: felt252,
+            input_amount: u128,
+            output_amount: u128,
+        ) {
+            assert_external_match_executor(@self);
+            assert(!matcher.is_zero(), 'BAD_MATCHER');
+            assert(input_asset_id != 0, 'BAD_INPUT_ASSET');
+            assert(output_asset_id != 0, 'BAD_OUTPUT_ASSET');
+            assert(input_asset_id != output_asset_id, 'BAD_ASSET_PAIR');
+            assert(input_amount > 0, 'BAD_INPUT_AMOUNT');
+            assert(output_amount > 0, 'BAD_OUTPUT_AMOUNT');
+
+            let input_token_address = self.asset_tokens.read(input_asset_id);
+            let output_token_address = self.asset_tokens.read(output_asset_id);
+            assert(!input_token_address.is_zero(), 'UNSUPPORTED_INPUT');
+            assert(!output_token_address.is_zero(), 'UNSUPPORTED_OUTPUT');
+            let input_escrowed = self.escrowed_asset_amounts.read(input_asset_id);
+            assert(input_escrowed >= input_amount, 'INPUT_ESCROW_LOW');
+
+            let bridge_address = get_contract_address();
+            let input_token = IERC20Dispatcher { contract_address: input_token_address };
+            let output_token = IERC20Dispatcher { contract_address: output_token_address };
+            let input_bridge_before = checked_token_balance(input_token, bridge_address);
+            let output_bridge_before = checked_token_balance(output_token, bridge_address);
+            assert(input_bridge_before >= input_amount, 'INPUT_BALANCE_LOW');
+
+            output_token.transfer_from(matcher, bridge_address, as_u256(output_amount));
+            let output_bridge_after = checked_token_balance(output_token, bridge_address);
+            assert(output_bridge_after == output_bridge_before + output_amount, 'OUTPUT_DELTA');
+
+            input_token.transfer(matcher, as_u256(input_amount));
+            let input_bridge_after = checked_token_balance(input_token, bridge_address);
+            assert(input_bridge_after + input_amount == input_bridge_before, 'INPUT_DELTA');
+
+            self.escrowed_asset_amounts.write(input_asset_id, input_escrowed - input_amount);
+            let output_escrowed = self.escrowed_asset_amounts.read(output_asset_id);
+            self.escrowed_asset_amounts.write(output_asset_id, output_escrowed + output_amount);
+        }
+
         fn strk20_exit_claimed_open_note_id(
             self: @ContractState, exit_commitment: felt252,
         ) -> felt252 {
@@ -257,6 +318,10 @@ pub mod PrivacyDepositBridge {
 
         fn auction_verifier_address(self: @ContractState) -> ContractAddress {
             self.auction_verifier.read()
+        }
+
+        fn external_match_executor_address(self: @ContractState) -> ContractAddress {
+            self.external_match_executor.read()
         }
 
         fn commitment_registry_address(self: @ContractState) -> ContractAddress {
@@ -427,6 +492,12 @@ pub mod PrivacyDepositBridge {
 
     fn assert_auction_verifier(self: @ContractState) {
         assert(get_caller_address() == self.auction_verifier.read(), 'UNAUTHORIZED');
+    }
+
+    fn assert_external_match_executor(self: @ContractState) {
+        let executor = self.external_match_executor.read();
+        assert(!executor.is_zero(), 'MATCH_EXECUTOR_UNSET');
+        assert(get_caller_address() == executor, 'UNAUTHORIZED');
     }
 
     fn strk20_exit_claim_message_hash(

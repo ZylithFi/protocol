@@ -32,9 +32,12 @@ pub trait IAuctionVerifier<TContractState> {
     fn set_proof_validity_blocks(ref self: TContractState, proof_validity_blocks: u64);
     fn set_expected_starknet_os_config_hash(ref self: TContractState, config_hash: felt252);
     fn set_shielded_asset_adapter(ref self: TContractState, adapter: ContractAddress);
+    fn set_external_match_executor(ref self: TContractState, executor: ContractAddress);
+    fn external_match_executor_address(self: @TContractState) -> ContractAddress;
     fn set_deposit_root_registrar(ref self: TContractState, registrar: ContractAddress);
     fn set_output_claim_delay_seconds(ref self: TContractState, delay_seconds: u64);
     fn set_protocol_fee_recipient(ref self: TContractState, recipient: felt252);
+    fn set_reference_price_signer(ref self: TContractState, signer: felt252);
     fn propose_protocol_fee_recipient(ref self: TContractState, recipient: felt252);
     fn execute_protocol_fee_recipient(ref self: TContractState);
     fn set_pair_fee_config(ref self: TContractState, pair_id: felt252, taker_fee_bps: u128);
@@ -70,6 +73,24 @@ pub trait IAuctionVerifier<TContractState> {
     fn record_multi_pair_solution_with_proof_facts(
         ref self: TContractState, batch_id: felt252, multi_pair_commitment: felt252,
     );
+    fn authorize_external_match_requests_with_proof_facts(
+        ref self: TContractState,
+        batch_id: felt252,
+        multi_pair_commitment: felt252,
+        request_root: felt252,
+        reference_price_signer: felt252,
+        request_ids: Span<felt252>,
+        pair_ids: Span<felt252>,
+        base_asset_ids: Span<felt252>,
+        quote_asset_ids: Span<felt252>,
+        sides: Span<felt252>,
+        max_base_amounts: Span<felt252>,
+        midpoint_prices: Span<felt252>,
+        price_base_scales: Span<felt252>,
+        valid_until_values: Span<felt252>,
+    );
+    fn external_match_authorization_root(self: @TContractState, batch_id: felt252) -> felt252;
+    fn close_external_match_request(ref self: TContractState, request_id: felt252) -> u128;
     fn record_nullifier_roots_with_proof_facts(
         ref self: TContractState,
         batch_id: felt252,
@@ -114,6 +135,12 @@ pub trait IAuctionVerifier<TContractState> {
         batch_id: felt252,
         order_commitment_root: felt252,
         encrypted_order_set_commitment: felt252,
+        reference_price_attestation_commitment: felt252,
+        reference_price_signer: felt252,
+        reference_price_observed_at_unix_ms: u64,
+        reference_price_valid_until_unix_ms: u64,
+        reference_price_signature_r: felt252,
+        reference_price_signature_s: felt252,
         transcript_commitment: felt252,
         proof_artifact_commitment: felt252,
         clearing_price: u128,
@@ -144,10 +171,28 @@ pub trait IAuctionVerifier<TContractState> {
         pair_ids: Span<felt252>,
         order_commitment_roots: Span<felt252>,
         encrypted_order_set_commitments: Span<felt252>,
+        reference_price_attestation_commitments: Span<felt252>,
+        reference_price_signers: Span<felt252>,
+        reference_price_observed_at_unix_ms_values: Span<felt252>,
+        reference_price_valid_until_unix_ms_values: Span<felt252>,
+        reference_price_signature_rs: Span<felt252>,
+        reference_price_signature_ss: Span<felt252>,
         base_asset_ids: Span<felt252>,
         quote_asset_ids: Span<felt252>,
         price_base_scales: Span<felt252>,
         taker_fee_bps_values: Span<felt252>,
+        external_request_ids: Span<felt252>,
+        external_batch_ids: Span<felt252>,
+        external_pair_ids: Span<felt252>,
+        external_base_asset_ids: Span<felt252>,
+        external_quote_asset_ids: Span<felt252>,
+        external_sides: Span<felt252>,
+        external_max_base_amounts: Span<felt252>,
+        external_midpoint_prices: Span<felt252>,
+        external_price_base_scales: Span<felt252>,
+        external_valid_until_values: Span<felt252>,
+        external_consumed_base_amounts: Span<felt252>,
+        external_match_root: felt252,
         transcript_commitment: felt252,
         proof_artifact_commitment: felt252,
         protocol_fee_recipient: felt252,
@@ -209,11 +254,15 @@ pub trait IAuctionVerifier<TContractState> {
     fn is_paused(self: @TContractState) -> bool;
     fn proof_program_is_locked(self: @TContractState) -> bool;
     fn protocol_fee_recipient(self: @TContractState) -> felt252;
+    fn reference_price_signer(self: @TContractState) -> felt252;
     fn pending_protocol_fee_recipient(self: @TContractState) -> (felt252, u64, bool);
     fn note_root_transition_count(self: @TContractState) -> u64;
     fn note_root_transition(
         self: @TContractState, transition_id: u64,
     ) -> (felt252, felt252, felt252, felt252);
+    fn note_root_transition_page(
+        self: @TContractState, start_transition_id: u64, limit: u64,
+    ) -> Array<felt252>;
     fn settlement_proof_message_hash(
         self: @TContractState, transcript_commitment: felt252,
     ) -> felt252;
@@ -235,6 +284,7 @@ pub trait IAuctionVerifier<TContractState> {
 pub mod AuctionVerifier {
     use core::array::{Array, ArrayTrait, SpanTrait};
     use core::ecdsa::check_ecdsa_signature;
+    use core::integer::u256;
     use core::num::traits::Zero;
     use core::poseidon::{hades_permutation, poseidon_hash_span};
     use core::traits::TryInto;
@@ -247,6 +297,9 @@ pub mod AuctionVerifier {
         ContractAddress, SyscallResultTrait, get_caller_address, get_contract_address, get_tx_info,
     };
     use zylith_protocol::batch_registry::{IBatchRegistryDispatcher, IBatchRegistryDispatcherTrait};
+    use zylith_protocol::external_match_executor::{
+        IExternalMatchExecutorDispatcher, IExternalMatchExecutorDispatcherTrait,
+    };
     use zylith_protocol::shielded_asset_adapter::{
         IShieldedAssetAdapterDispatcher, IShieldedAssetAdapterDispatcherTrait,
     };
@@ -267,6 +320,7 @@ pub mod AuctionVerifier {
     const ADMISSION_MESSAGE_DOMAIN: felt252 = 'zylith_admit_v1';
     const AUCTION_RESULT_MESSAGE_DOMAIN: felt252 = 'zylith_aucres_v1';
     const MULTI_PAIR_MESSAGE_DOMAIN: felt252 = 'zylith_mpair_v1';
+    const EXTERNAL_MATCH_AUTHORIZATION_MESSAGE_DOMAIN: felt252 = 'zylith_extauth_v1';
     const MULTI_PAIR_SETTLEMENT_MESSAGE_DOMAIN: felt252 = 'zylith_mp_settle_v1';
     const SETTLEMENT_PROOF_MESSAGE_TO: felt252 = 0;
     const PUBLIC_MULTI_PAIR_SETTLEMENT_DOMAIN: felt252 =
@@ -276,12 +330,16 @@ pub mod AuctionVerifier {
         0x01f14f0555b0b80fd6af9553623a021c472d8c930dfcb5b204b35b26f0d2b1b2;
     const MULTI_PAIR_BATCH_ROOT_DOMAIN: felt252 =
         0x039f98f789ba5c8e01cb79a02c22b9d9e3d71e692cc6c17cb60f2ab76a4e9090;
+    const EXTERNAL_MATCH_SETTLEMENT_DOMAIN: felt252 =
+        0x0311a2ee2e3ee96d0021c80b411688504ca49cbb5bee8d3dcc19e1ae87f1c9ea;
     const FEE_BPS_DENOMINATOR: u128 = 10000;
     const MAX_PAIR_FEE_BPS: u128 = 100;
     const PAIR_FEE_TIMELOCK_SECONDS: u64 = 86400;
     const FEE_RECIPIENT_TIMELOCK_SECONDS: u64 = 604800;
     const MAX_OUTPUT_CLAIM_DELAY_SECONDS: u64 = 604800;
     const MAX_AGGREGATE_SETTLEMENTS: usize = 16;
+    const MAX_REFERENCE_PRICE_WINDOW_MS: u64 = 15000;
+    const MAX_REFERENCE_PRICE_CLOSE_SKEW_MS: u64 = 15000;
     const RENEWAL_PARENT_CANCEL_DOMAIN: felt252 =
         0x26f84b60309c08d4030876815edb467f89f78e5a5f62823af4521f1be502ca3;
     const RENEWAL_SPARSE_LEAF_DOMAIN: felt252 =
@@ -295,6 +353,10 @@ pub mod AuctionVerifier {
         0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
     const OUTPUT_NOTE_NODE_DOMAIN: felt252 =
         0x03c6998f476a618431be1c1764a6724f13c0739be395bab4c1217bc0a65b2ee7;
+    const NOTE_ACCUMULATOR_LEAF_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f6163635f6c6561665f7631;
+    const NOTE_ACCUMULATOR_NODE_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f6163635f6e6f64655f7631;
+    const NOTE_ACCUMULATOR_DEPTH: u64 = 32;
+    const NOTE_ACCUMULATOR_CAPACITY: u64 = 0x100000000;
     const OUTPUT_WITHDRAWAL_STRK20_EXIT_DOMAIN: felt252 =
         0x7a796c6974685f7374726b32305f657869745f7631;
     const NOTE_ROOT_TRANSITION_DEPOSIT: felt252 = 0;
@@ -313,7 +375,9 @@ pub mod AuctionVerifier {
     const STATEMENT_AGGREGATE_SETTLEMENT: felt252 = 'AGGREGATE_SETTLEMENT';
     const STATEMENT_WITHDRAWAL: felt252 = 'WITHDRAWAL';
     const STATEMENT_MULTI_PAIR: felt252 = 'MULTI_PAIR';
+    const STATEMENT_EXTERNAL_MATCH_AUTHORIZATION: felt252 = 'EXTERNAL_MATCH_AUTH';
     const STATEMENT_MULTI_PAIR_SETTLEMENT: felt252 = 'MULTI_PAIR_SETTLEMENT';
+    const MAX_NOTE_ROOT_TRANSITION_PAGE_SIZE: u64 = 256;
     #[storage]
     struct Storage {
         admin: ContractAddress,
@@ -332,7 +396,9 @@ pub mod AuctionVerifier {
         output_claim_delay_seconds: u64,
         batch_registry: ContractAddress,
         shielded_asset_adapter: ContractAddress,
+        external_match_executor: ContractAddress,
         protocol_fee_recipient: felt252,
+        reference_price_signer: felt252,
         pending_protocol_fee_recipient: felt252,
         pending_protocol_fee_recipient_eta: u64,
         pending_protocol_fee_recipient_active: bool,
@@ -359,12 +425,14 @@ pub mod AuctionVerifier {
         note_root_transition_keys: Map<u64, felt252>,
         note_root_transition_batch_roots: Map<u64, felt252>,
         note_root_transition_new_roots: Map<u64, felt252>,
+        note_accumulator_frontier: Map<u64, felt252>,
         output_note_roots: Map<felt252, felt252>,
         verified_multi_pair_settlement_transcripts: Map<felt252, felt252>,
         verified_admission_roots: Map<felt252, felt252>,
         verified_auction_transcripts: Map<felt252, felt252>,
         verified_multi_pair_solution_commitments: Map<felt252, felt252>,
         verified_multi_pair_solution_active: Map<felt252, bool>,
+        external_match_authorization_roots: Map<felt252, felt252>,
         verified_nullifier_roots_active: Map<felt252, bool>,
         verified_nullifier_transcripts: Map<felt252, felt252>,
         verified_prior_nullifier_roots: Map<felt252, felt252>,
@@ -395,6 +463,7 @@ pub mod AuctionVerifier {
     ) {
         assert(!admin.is_zero(), 'BAD_ADMIN');
         assert(!batch_registry.is_zero(), 'BAD_BATCH_REGISTRY');
+        assert(initial_note_root == 0, 'NOTE_ROOT_MUST_EMPTY');
         self.admin.write(admin);
         self.batch_registry.write(batch_registry);
         self.current_note_root.write(initial_note_root);
@@ -447,8 +516,10 @@ pub mod AuctionVerifier {
             assert_required_statement_proof_hashes(@self);
             assert(self.proof_program_locked.read(), 'PROOF_PROGRAM_UNLOCKED');
             assert(!self.shielded_asset_adapter.read().is_zero(), 'ADAPTER_UNSET');
+            assert(!self.external_match_executor.read().is_zero(), 'EXTERNAL_MATCH_UNSET');
             assert(!self.deposit_root_registrar.read().is_zero(), 'DEPOSIT_REG_UNSET');
             assert(self.protocol_fee_recipient.read() != 0, 'FEE_RECIPIENT_UNSET');
+            assert(self.reference_price_signer.read() != 0, 'REF_SIGNER_UNSET');
             self.operational_config_locked.write(true);
         }
 
@@ -515,6 +586,17 @@ pub mod AuctionVerifier {
             self.shielded_asset_adapter.write(adapter);
         }
 
+        fn set_external_match_executor(ref self: ContractState, executor: ContractAddress) {
+            assert_admin(@self);
+            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
+            assert(!executor.is_zero(), 'BAD_EXTERNAL_MATCH');
+            self.external_match_executor.write(executor);
+        }
+
+        fn external_match_executor_address(self: @ContractState) -> ContractAddress {
+            self.external_match_executor.read()
+        }
+
         fn set_deposit_root_registrar(ref self: ContractState, registrar: ContractAddress) {
             assert_admin(@self);
             assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
@@ -535,6 +617,13 @@ pub mod AuctionVerifier {
             assert(recipient != 0, 'BAD_FEE_RECIPIENT');
             assert(self.protocol_fee_recipient.read() == 0, 'FEE_RECIP_TIMELOCK');
             self.protocol_fee_recipient.write(recipient);
+        }
+
+        fn set_reference_price_signer(ref self: ContractState, signer: felt252) {
+            assert_admin(@self);
+            assert(!self.operational_config_locked.read(), 'CONFIG_LOCKED');
+            assert(signer != 0, 'BAD_REF_SIGNER');
+            self.reference_price_signer.write(signer);
         }
 
         fn propose_protocol_fee_recipient(ref self: ContractState, recipient: felt252) {
@@ -655,8 +744,7 @@ pub mod AuctionVerifier {
             assert(deposit_root != 0, 'BAD_DEPOSIT_ROOT');
             let already_activated = self.activated_funding_commitments.read(funding_commitment);
             assert(already_activated == false, 'FUNDING_ACTIVE');
-            let prior_note_root = self.current_note_root.read();
-            let new_note_root = state_transition_root(prior_note_root, deposit_root);
+            let new_note_root = note_accumulator_commit_append(ref self, deposit_root);
             self.activated_funding_commitments.write(funding_commitment, true);
             self.current_note_root.write(new_note_root);
             record_note_root_transition(
@@ -777,6 +865,90 @@ pub mod AuctionVerifier {
                     .write(batch_id, multi_pair_commitment);
                 self.verified_multi_pair_solution_active.write(batch_id, true);
             }
+        }
+
+        fn authorize_external_match_requests_with_proof_facts(
+            ref self: ContractState,
+            batch_id: felt252,
+            multi_pair_commitment: felt252,
+            request_root: felt252,
+            reference_price_signer: felt252,
+            request_ids: Span<felt252>,
+            pair_ids: Span<felt252>,
+            base_asset_ids: Span<felt252>,
+            quote_asset_ids: Span<felt252>,
+            sides: Span<felt252>,
+            max_base_amounts: Span<felt252>,
+            midpoint_prices: Span<felt252>,
+            price_base_scales: Span<felt252>,
+            valid_until_values: Span<felt252>,
+        ) {
+            assert_authorized_settlement_account(@self);
+            assert_not_paused(@self);
+            assert(batch_id != 0, 'BAD_BATCH');
+            assert(request_root != 0, 'BAD_REQUEST_ROOT');
+            assert(request_ids.len() != 0 && request_ids.len() <= 16, 'BAD_REQUEST_COUNT');
+            assert(reference_price_signer == self.reference_price_signer.read(), 'BAD_REF_SIGNER');
+            assert(self.external_match_authorization_roots.read(batch_id) == 0, 'EXT_AUTH_EXISTS');
+            if multi_pair_commitment != 0 {
+                assert(
+                    self.verified_multi_pair_solution_active.read(batch_id), 'MULTI_PAIR_REQUIRED',
+                );
+                assert(
+                    self
+                        .verified_multi_pair_solution_commitments
+                        .read(batch_id) == multi_pair_commitment,
+                    'MULTI_PAIR_REQUIRED',
+                );
+            }
+            let statement_message = native_external_match_authorization_message_hash(
+                get_contract_address(),
+                batch_id,
+                multi_pair_commitment,
+                request_root,
+                reference_price_signer,
+            );
+            let expected_messages = array![
+                external_match_authorization_proof_message_hash_from_statement(
+                    self.proof_program.read(), statement_message,
+                ),
+            ];
+            assert_valid_proof_facts_messages(
+                @self, expected_messages.span(), STATEMENT_EXTERNAL_MATCH_AUTHORIZATION,
+            );
+
+            self.external_match_authorization_roots.write(batch_id, request_root);
+            let executor = IExternalMatchExecutorDispatcher {
+                contract_address: self.external_match_executor.read(),
+            };
+            executor
+                .register_authorized_external_match_requests(
+                    batch_id,
+                    request_root,
+                    request_ids,
+                    pair_ids,
+                    base_asset_ids,
+                    quote_asset_ids,
+                    sides,
+                    max_base_amounts,
+                    midpoint_prices,
+                    price_base_scales,
+                    valid_until_values,
+                );
+        }
+
+        fn external_match_authorization_root(self: @ContractState, batch_id: felt252) -> felt252 {
+            self.external_match_authorization_roots.read(batch_id)
+        }
+
+        fn close_external_match_request(ref self: ContractState, request_id: felt252) -> u128 {
+            assert_authorized_settlement_account(@self);
+            assert_not_paused(@self);
+            assert(request_id != 0, 'BAD_REQUEST_ID');
+            let executor = IExternalMatchExecutorDispatcher {
+                contract_address: self.external_match_executor.read(),
+            };
+            executor.close_external_match_request(request_id)
         }
 
         fn record_nullifier_roots_with_proof_facts(
@@ -1038,6 +1210,12 @@ pub mod AuctionVerifier {
             batch_id: felt252,
             order_commitment_root: felt252,
             encrypted_order_set_commitment: felt252,
+            reference_price_attestation_commitment: felt252,
+            reference_price_signer: felt252,
+            reference_price_observed_at_unix_ms: u64,
+            reference_price_valid_until_unix_ms: u64,
+            reference_price_signature_r: felt252,
+            reference_price_signature_s: felt252,
             transcript_commitment: felt252,
             proof_artifact_commitment: felt252,
             clearing_price: u128,
@@ -1151,6 +1329,12 @@ pub mod AuctionVerifier {
                 batch_id,
                 order_commitment_root,
                 encrypted_order_set_commitment,
+                reference_price_attestation_commitment,
+                reference_price_signer,
+                reference_price_observed_at_unix_ms,
+                reference_price_valid_until_unix_ms,
+                reference_price_signature_r,
+                reference_price_signature_s,
                 transcript_commitment,
                 clearing_price,
                 price_base_scale,
@@ -1183,10 +1367,28 @@ pub mod AuctionVerifier {
             pair_ids: Span<felt252>,
             order_commitment_roots: Span<felt252>,
             encrypted_order_set_commitments: Span<felt252>,
+            reference_price_attestation_commitments: Span<felt252>,
+            reference_price_signers: Span<felt252>,
+            reference_price_observed_at_unix_ms_values: Span<felt252>,
+            reference_price_valid_until_unix_ms_values: Span<felt252>,
+            reference_price_signature_rs: Span<felt252>,
+            reference_price_signature_ss: Span<felt252>,
             base_asset_ids: Span<felt252>,
             quote_asset_ids: Span<felt252>,
             price_base_scales: Span<felt252>,
             taker_fee_bps_values: Span<felt252>,
+            external_request_ids: Span<felt252>,
+            external_batch_ids: Span<felt252>,
+            external_pair_ids: Span<felt252>,
+            external_base_asset_ids: Span<felt252>,
+            external_quote_asset_ids: Span<felt252>,
+            external_sides: Span<felt252>,
+            external_max_base_amounts: Span<felt252>,
+            external_midpoint_prices: Span<felt252>,
+            external_price_base_scales: Span<felt252>,
+            external_valid_until_values: Span<felt252>,
+            external_consumed_base_amounts: Span<felt252>,
+            external_match_root: felt252,
             transcript_commitment: felt252,
             proof_artifact_commitment: felt252,
             protocol_fee_recipient: felt252,
@@ -1232,7 +1434,7 @@ pub mod AuctionVerifier {
             assert(prior_renewal_root == self.current_renewal_root.read(), 'RENEWAL_ROOT_STALE');
             assert(prior_fee_root == self.current_fee_root.read(), 'FEE_ROOT_STALE');
             assert(
-                new_note_root == state_transition_root(prior_note_root, output_note_root),
+                new_note_root == note_accumulator_preview_append(@self, output_note_root),
                 'NEW_NOTE_ROOT',
             );
             assert(new_nullifier_root != 0 || prior_nullifier_root == 0, 'NEW_NULLIFIER_ROOT');
@@ -1245,6 +1447,12 @@ pub mod AuctionVerifier {
                 pair_ids,
                 order_commitment_roots,
                 encrypted_order_set_commitments,
+                reference_price_attestation_commitments,
+                reference_price_signers,
+                reference_price_observed_at_unix_ms_values,
+                reference_price_valid_until_unix_ms_values,
+                reference_price_signature_rs,
+                reference_price_signature_ss,
                 base_asset_ids,
                 quote_asset_ids,
                 price_base_scales,
@@ -1252,17 +1460,38 @@ pub mod AuctionVerifier {
                 protocol_fee_recipient,
             );
             let recomputed_batch_binding_root = multi_pair_batch_binding_root(
+                @self,
                 batch_ids,
                 pair_ids,
                 batch_epoch,
                 order_commitment_roots,
                 encrypted_order_set_commitments,
+                reference_price_attestation_commitments,
+                reference_price_signers,
+                reference_price_observed_at_unix_ms_values,
+                reference_price_valid_until_unix_ms_values,
                 base_asset_ids,
                 quote_asset_ids,
                 price_base_scales,
                 taker_fee_bps_values,
             );
             assert(recomputed_batch_binding_root == batch_binding_root, 'MP_BINDING');
+            assert_and_consume_external_match_records(
+                @self,
+                group_id,
+                external_request_ids,
+                external_batch_ids,
+                external_pair_ids,
+                external_base_asset_ids,
+                external_quote_asset_ids,
+                external_sides,
+                external_max_base_amounts,
+                external_midpoint_prices,
+                external_price_base_scales,
+                external_valid_until_values,
+                external_consumed_base_amounts,
+                external_match_root,
+            );
             assert(self.verified_multi_pair_solution_active.read(group_id), 'MP_PROOF_REQUIRED');
             assert(
                 self
@@ -1277,6 +1506,7 @@ pub mod AuctionVerifier {
                 protocol_fee_recipient,
                 output_bundle_ref,
                 multi_pair_commitment,
+                external_match_root,
                 prior_note_root,
                 prior_nullifier_root,
                 prior_renewal_root,
@@ -1344,7 +1574,7 @@ pub mod AuctionVerifier {
                 prior_nullifier_root == self.current_nullifier_root.read(), 'NULLIFIER_ROOT_STALE',
             );
             assert(
-                new_note_root == state_transition_root(prior_note_root, output_note_root),
+                new_note_root == note_accumulator_preview_append(@self, output_note_root),
                 'NEW_NOTE_ROOT',
             );
             assert(new_nullifier_root != 0, 'NEW_NULLIFIER_ROOT');
@@ -1386,7 +1616,9 @@ pub mod AuctionVerifier {
             self.settled_consolidations.write(consolidation_id, true);
             self.settled_at_unix_seconds.write(consolidation_id, current_block_timestamp());
             self.output_note_roots.write(consolidation_id, output_note_root);
-            self.current_note_root.write(new_note_root);
+            let committed_note_root = note_accumulator_commit_append(ref self, output_note_root);
+            assert(committed_note_root == new_note_root, 'NEW_NOTE_ROOT');
+            self.current_note_root.write(committed_note_root);
             self.current_nullifier_root.write(new_nullifier_root);
             record_note_root_transition(
                 ref self,
@@ -1613,6 +1845,10 @@ pub mod AuctionVerifier {
             self.protocol_fee_recipient.read()
         }
 
+        fn reference_price_signer(self: @ContractState) -> felt252 {
+            self.reference_price_signer.read()
+        }
+
         fn pending_protocol_fee_recipient(self: @ContractState) -> (felt252, u64, bool) {
             (
                 self.pending_protocol_fee_recipient.read(),
@@ -1637,6 +1873,35 @@ pub mod AuctionVerifier {
                 self.note_root_transition_batch_roots.read(transition_id),
                 self.note_root_transition_new_roots.read(transition_id),
             )
+        }
+
+        fn note_root_transition_page(
+            self: @ContractState, start_transition_id: u64, limit: u64,
+        ) -> Array<felt252> {
+            assert(limit > 0, 'BAD_PAGE_LIMIT');
+            assert(limit <= MAX_NOTE_ROOT_TRANSITION_PAGE_SIZE, 'PAGE_LIMIT_TOO_LARGE');
+            let transition_count = self.note_root_transition_count.read();
+            assert(start_transition_id <= transition_count, 'BAD_PAGE_START');
+            let remaining = transition_count - start_transition_id;
+            let page_length = if remaining < limit {
+                remaining
+            } else {
+                limit
+            };
+            let mut page = array![];
+            let mut offset = 0;
+            loop {
+                if offset == page_length {
+                    break;
+                }
+                let transition_id = start_transition_id + offset;
+                page.append(self.note_root_transition_kinds.read(transition_id));
+                page.append(self.note_root_transition_keys.read(transition_id));
+                page.append(self.note_root_transition_batch_roots.read(transition_id));
+                page.append(self.note_root_transition_new_roots.read(transition_id));
+                offset += 1;
+            }
+            page
         }
 
         fn settlement_proof_message_hash(
@@ -1770,6 +2035,7 @@ pub mod AuctionVerifier {
         assert_statement_proof_hash_configured(self, STATEMENT_AGGREGATE_SETTLEMENT);
         assert_statement_proof_hash_configured(self, STATEMENT_WITHDRAWAL);
         assert_statement_proof_hash_configured(self, STATEMENT_MULTI_PAIR);
+        assert_statement_proof_hash_configured(self, STATEMENT_EXTERNAL_MATCH_AUTHORIZATION);
         assert_statement_proof_hash_configured(self, STATEMENT_MULTI_PAIR_SETTLEMENT);
     }
 
@@ -1820,6 +2086,46 @@ pub mod AuctionVerifier {
         starknet::get_block_timestamp()
     }
 
+    fn felt_to_u64(value: felt252) -> u64 {
+        value.try_into().expect('VALUE_NOT_U64')
+    }
+
+    fn felt_to_u128(value: felt252) -> u128 {
+        value.try_into().expect('VALUE_NOT_U128')
+    }
+
+    fn assert_reference_price_attestation(
+        self: @ContractState,
+        attestation_commitment: felt252,
+        signer: felt252,
+        observed_at_unix_ms: u64,
+        valid_until_unix_ms: u64,
+        signature_r: felt252,
+        signature_s: felt252,
+        batch_close_time_unix_ms: u64,
+    ) {
+        assert(attestation_commitment != 0, 'BAD_REF_COMMITMENT');
+        assert(signer == self.reference_price_signer.read(), 'BAD_REF_SIGNER');
+        assert(signature_r != 0, 'BAD_REF_SIGNATURE');
+        assert(signature_s != 0, 'BAD_REF_SIGNATURE');
+        assert(observed_at_unix_ms != 0, 'BAD_REF_OBSERVED');
+        assert(valid_until_unix_ms > observed_at_unix_ms, 'BAD_REF_WINDOW');
+        assert(
+            valid_until_unix_ms - observed_at_unix_ms <= MAX_REFERENCE_PRICE_WINDOW_MS,
+            'BAD_REF_WINDOW',
+        );
+        let close_skew = if observed_at_unix_ms >= batch_close_time_unix_ms {
+            observed_at_unix_ms - batch_close_time_unix_ms
+        } else {
+            batch_close_time_unix_ms - observed_at_unix_ms
+        };
+        assert(close_skew <= MAX_REFERENCE_PRICE_CLOSE_SKEW_MS, 'STALE_REF_PRICE');
+        assert(
+            check_ecdsa_signature(attestation_commitment, signer, signature_r, signature_s),
+            'BAD_REF_SIGNATURE',
+        );
+    }
+
     fn read_next(data: Span<felt252>, ref index: usize) -> felt252 {
         assert(index < data.len(), 'INPUT_TOO_SHORT');
         let value = *data.at(index);
@@ -1850,6 +2156,12 @@ pub mod AuctionVerifier {
                 break;
             }
             let batch_id = read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
+            read_next(data, ref index);
             read_next(data, ref index);
             read_next(data, ref index);
             let transcript_commitment = read_next(data, ref index);
@@ -1940,6 +2252,12 @@ pub mod AuctionVerifier {
             let batch_id = read_next(data, ref index);
             let order_commitment_root = read_next(data, ref index);
             let encrypted_order_set_commitment = read_next(data, ref index);
+            let reference_price_attestation_commitment = read_next(data, ref index);
+            let reference_price_signer = read_next(data, ref index);
+            let reference_price_observed_at_unix_ms = felt_to_u64(read_next(data, ref index));
+            let reference_price_valid_until_unix_ms = felt_to_u64(read_next(data, ref index));
+            let reference_price_signature_r = read_next(data, ref index);
+            let reference_price_signature_s = read_next(data, ref index);
             let transcript_commitment = read_next(data, ref index);
             let proof_artifact_commitment = read_next(data, ref index);
             let clearing_price = read_next_u128(data, ref index);
@@ -1971,6 +2289,12 @@ pub mod AuctionVerifier {
                 batch_id,
                 order_commitment_root,
                 encrypted_order_set_commitment,
+                reference_price_attestation_commitment,
+                reference_price_signer,
+                reference_price_observed_at_unix_ms,
+                reference_price_valid_until_unix_ms,
+                reference_price_signature_r,
+                reference_price_signature_s,
                 transcript_commitment,
                 clearing_price,
                 price_base_scale,
@@ -2056,6 +2380,12 @@ pub mod AuctionVerifier {
 
     fn multi_pair_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
         array![MULTI_PAIR_MESSAGE_DOMAIN, statement_message_hash]
+    }
+
+    fn external_match_authorization_proof_payload(
+        statement_message_hash: felt252,
+    ) -> Array<felt252> {
+        array![EXTERNAL_MATCH_AUTHORIZATION_MESSAGE_DOMAIN, statement_message_hash]
     }
 
     fn multi_pair_settlement_proof_payload(statement_message_hash: felt252) -> Array<felt252> {
@@ -2161,6 +2491,15 @@ pub mod AuctionVerifier {
         poseidon_hash_span(l1_message_data.span())
     }
 
+    fn external_match_authorization_proof_message_hash_from_statement(
+        proof_program_address: ContractAddress, statement_message_hash: felt252,
+    ) -> felt252 {
+        let mut l1_message_data = array![proof_program_address.into(), SETTLEMENT_PROOF_MESSAGE_TO];
+        let payload = external_match_authorization_proof_payload(statement_message_hash);
+        payload.serialize(ref l1_message_data);
+        poseidon_hash_span(l1_message_data.span())
+    }
+
     fn multi_pair_settlement_proof_message_hash_from_statement(
         proof_program_address: ContractAddress, statement_message_hash: felt252,
     ) -> felt252 {
@@ -2224,6 +2563,23 @@ pub mod AuctionVerifier {
         let mut state = poseidon_hash2(MULTI_PAIR_MESSAGE_DOMAIN, auction_verifier_address.into());
         state = poseidon_hash2(state, batch_id);
         state = poseidon_hash2(state, multi_pair_commitment);
+        state
+    }
+
+    fn native_external_match_authorization_message_hash(
+        auction_verifier_address: ContractAddress,
+        batch_id: felt252,
+        multi_pair_commitment: felt252,
+        request_root: felt252,
+        reference_price_signer: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(
+            EXTERNAL_MATCH_AUTHORIZATION_MESSAGE_DOMAIN, auction_verifier_address.into(),
+        );
+        state = poseidon_hash2(state, batch_id);
+        state = poseidon_hash2(state, multi_pair_commitment);
+        state = poseidon_hash2(state, request_root);
+        state = poseidon_hash2(state, reference_price_signer);
         state
     }
 
@@ -2322,6 +2678,12 @@ pub mod AuctionVerifier {
         pair_ids: Span<felt252>,
         order_commitment_roots: Span<felt252>,
         encrypted_order_set_commitments: Span<felt252>,
+        reference_price_attestation_commitments: Span<felt252>,
+        reference_price_signers: Span<felt252>,
+        reference_price_observed_at_unix_ms_values: Span<felt252>,
+        reference_price_valid_until_unix_ms_values: Span<felt252>,
+        reference_price_signature_rs: Span<felt252>,
+        reference_price_signature_ss: Span<felt252>,
         base_asset_ids: Span<felt252>,
         quote_asset_ids: Span<felt252>,
         price_base_scales: Span<felt252>,
@@ -2333,11 +2695,17 @@ pub mod AuctionVerifier {
             pair_ids,
             order_commitment_roots,
             encrypted_order_set_commitments,
+            reference_price_attestation_commitments,
+            reference_price_signers,
+            reference_price_observed_at_unix_ms_values,
+            reference_price_valid_until_unix_ms_values,
             base_asset_ids,
             quote_asset_ids,
             price_base_scales,
             taker_fee_bps_values,
         );
+        assert(batch_ids.len() == reference_price_signature_rs.len(), 'MP_BIND_LEN');
+        assert(batch_ids.len() == reference_price_signature_ss.len(), 'MP_BIND_LEN');
         assert(batch_ids.len() != 0, 'MP_EMPTY_BATCHES');
         assert(batch_ids.len() <= MAX_AGGREGATE_SETTLEMENTS, 'MP_TOO_MANY_BATCHES');
         assert_unique_nonzero(batch_ids, 'MP_BATCH_ID_DUP');
@@ -2366,6 +2734,16 @@ pub mod AuctionVerifier {
                 batch.encrypted_order_set_commitment == *encrypted_order_set_commitments.at(index),
                 'MP_ENC_ROOT_BIND',
             );
+            assert_reference_price_attestation(
+                self,
+                *reference_price_attestation_commitments.at(index),
+                *reference_price_signers.at(index),
+                felt_to_u64(*reference_price_observed_at_unix_ms_values.at(index)),
+                felt_to_u64(*reference_price_valid_until_unix_ms_values.at(index)),
+                *reference_price_signature_rs.at(index),
+                *reference_price_signature_ss.at(index),
+                batch.close_time_unix_ms,
+            );
             assert(self.verified_admission_roots.read(batch_id) != 0, 'MP_ADMISSION_REQUIRED');
             assert(*base_asset_ids.at(index) != 0, 'MP_BASE_ASSET');
             assert(*quote_asset_ids.at(index) != 0, 'MP_QUOTE_ASSET');
@@ -2387,6 +2765,10 @@ pub mod AuctionVerifier {
         pair_ids: Span<felt252>,
         order_commitment_roots: Span<felt252>,
         encrypted_order_set_commitments: Span<felt252>,
+        reference_price_attestation_commitments: Span<felt252>,
+        reference_price_signers: Span<felt252>,
+        reference_price_observed_at_unix_ms_values: Span<felt252>,
+        reference_price_valid_until_unix_ms_values: Span<felt252>,
         base_asset_ids: Span<felt252>,
         quote_asset_ids: Span<felt252>,
         price_base_scales: Span<felt252>,
@@ -2395,6 +2777,10 @@ pub mod AuctionVerifier {
         assert(batch_ids.len() == pair_ids.len(), 'MP_BIND_LEN');
         assert(batch_ids.len() == order_commitment_roots.len(), 'MP_BIND_LEN');
         assert(batch_ids.len() == encrypted_order_set_commitments.len(), 'MP_BIND_LEN');
+        assert(batch_ids.len() == reference_price_attestation_commitments.len(), 'MP_BIND_LEN');
+        assert(batch_ids.len() == reference_price_signers.len(), 'MP_BIND_LEN');
+        assert(batch_ids.len() == reference_price_observed_at_unix_ms_values.len(), 'MP_BIND_LEN');
+        assert(batch_ids.len() == reference_price_valid_until_unix_ms_values.len(), 'MP_BIND_LEN');
         assert(batch_ids.len() == base_asset_ids.len(), 'MP_BIND_LEN');
         assert(batch_ids.len() == quote_asset_ids.len(), 'MP_BIND_LEN');
         assert(batch_ids.len() == price_base_scales.len(), 'MP_BIND_LEN');
@@ -2422,11 +2808,16 @@ pub mod AuctionVerifier {
     }
 
     fn multi_pair_batch_binding_root(
+        self: @ContractState,
         batch_ids: Span<felt252>,
         pair_ids: Span<felt252>,
         batch_epoch: u64,
         order_commitment_roots: Span<felt252>,
         encrypted_order_set_commitments: Span<felt252>,
+        reference_price_attestation_commitments: Span<felt252>,
+        reference_price_signers: Span<felt252>,
+        reference_price_observed_at_unix_ms_values: Span<felt252>,
+        reference_price_valid_until_unix_ms_values: Span<felt252>,
         base_asset_ids: Span<felt252>,
         quote_asset_ids: Span<felt252>,
         price_base_scales: Span<felt252>,
@@ -2437,6 +2828,10 @@ pub mod AuctionVerifier {
             pair_ids,
             order_commitment_roots,
             encrypted_order_set_commitments,
+            reference_price_attestation_commitments,
+            reference_price_signers,
+            reference_price_observed_at_unix_ms_values,
+            reference_price_valid_until_unix_ms_values,
             base_asset_ids,
             quote_asset_ids,
             price_base_scales,
@@ -2452,7 +2847,12 @@ pub mod AuctionVerifier {
             state = poseidon_hash2(state, *pair_ids.at(index));
             state = poseidon_hash2(state, batch_epoch.into());
             state = poseidon_hash2(state, *order_commitment_roots.at(index));
+            state = poseidon_hash2(state, self.verified_admission_roots.read(*batch_ids.at(index)));
             state = poseidon_hash2(state, *encrypted_order_set_commitments.at(index));
+            state = poseidon_hash2(state, *reference_price_attestation_commitments.at(index));
+            state = poseidon_hash2(state, *reference_price_signers.at(index));
+            state = poseidon_hash2(state, *reference_price_observed_at_unix_ms_values.at(index));
+            state = poseidon_hash2(state, *reference_price_valid_until_unix_ms_values.at(index));
             state = poseidon_hash2(state, *base_asset_ids.at(index));
             state = poseidon_hash2(state, *quote_asset_ids.at(index));
             state = poseidon_hash2(state, *price_base_scales.at(index));
@@ -2469,6 +2869,7 @@ pub mod AuctionVerifier {
         protocol_fee_recipient: felt252,
         output_bundle_ref: felt252,
         multi_pair_commitment: felt252,
+        external_match_root: felt252,
         prior_note_root: felt252,
         prior_nullifier_root: felt252,
         prior_renewal_root: felt252,
@@ -2485,10 +2886,12 @@ pub mod AuctionVerifier {
     ) -> felt252 {
         let mut state = poseidon_hash2(PUBLIC_MULTI_PAIR_SETTLEMENT_DOMAIN, group_id);
         state = poseidon_hash2(state, batch_epoch.into());
+        state = poseidon_hash2(state, get_contract_address().into());
         state = poseidon_hash2(state, batch_binding_root);
         state = poseidon_hash2(state, protocol_fee_recipient);
         state = poseidon_hash2(state, output_bundle_ref);
         state = poseidon_hash2(state, multi_pair_commitment);
+        state = poseidon_hash2(state, external_match_root);
         state = poseidon_hash2(state, prior_note_root);
         state = poseidon_hash2(state, prior_nullifier_root);
         state = poseidon_hash2(state, prior_renewal_root);
@@ -2503,6 +2906,101 @@ pub mod AuctionVerifier {
         state = poseidon_hash2(state, new_renewal_root);
         state = poseidon_hash2(state, new_fee_root);
         state
+    }
+
+    fn assert_and_consume_external_match_records(
+        self: @ContractState,
+        group_id: felt252,
+        request_ids: Span<felt252>,
+        batch_ids: Span<felt252>,
+        pair_ids: Span<felt252>,
+        base_asset_ids: Span<felt252>,
+        quote_asset_ids: Span<felt252>,
+        sides: Span<felt252>,
+        max_base_amounts: Span<felt252>,
+        midpoint_prices: Span<felt252>,
+        price_base_scales: Span<felt252>,
+        valid_until_values: Span<felt252>,
+        consumed_base_amounts: Span<felt252>,
+        expected_root: felt252,
+    ) {
+        assert(request_ids.len() == batch_ids.len(), 'MP_EXTERNAL_LEN');
+        assert(request_ids.len() == pair_ids.len(), 'MP_EXTERNAL_LEN');
+        assert(request_ids.len() == base_asset_ids.len(), 'MP_EXTERNAL_LEN');
+        assert(request_ids.len() == quote_asset_ids.len(), 'MP_EXTERNAL_LEN');
+        assert(request_ids.len() == sides.len(), 'MP_EXTERNAL_LEN');
+        assert(request_ids.len() == max_base_amounts.len(), 'MP_EXTERNAL_LEN');
+        assert(request_ids.len() == midpoint_prices.len(), 'MP_EXTERNAL_LEN');
+        assert(request_ids.len() == price_base_scales.len(), 'MP_EXTERNAL_LEN');
+        assert(request_ids.len() == valid_until_values.len(), 'MP_EXTERNAL_LEN');
+        assert(request_ids.len() == consumed_base_amounts.len(), 'MP_EXTERNAL_LEN');
+        assert_unique_nonzero(request_ids, 'MP_EXTERNAL_ID');
+        let executor = IExternalMatchExecutorDispatcher {
+            contract_address: self.external_match_executor.read(),
+        };
+        let mut state = poseidon_hash2(EXTERNAL_MATCH_SETTLEMENT_DOMAIN, request_ids.len().into());
+        let mut index = 0;
+        let mut previous_request_id = 0;
+        while index < request_ids.len() {
+            let request_id = *request_ids.at(index);
+            let batch_id = *batch_ids.at(index);
+            let pair_id = *pair_ids.at(index);
+            let base_asset_id = *base_asset_ids.at(index);
+            let quote_asset_id = *quote_asset_ids.at(index);
+            let side = *sides.at(index);
+            let max_base_amount: u128 = (*max_base_amounts.at(index))
+                .try_into()
+                .expect('MP_EXTERNAL_MAX');
+            let midpoint_price: u128 = (*midpoint_prices.at(index))
+                .try_into()
+                .expect('MP_EXTERNAL_MID');
+            let price_base_scale: u128 = (*price_base_scales.at(index))
+                .try_into()
+                .expect('MP_EXTERNAL_SCALE');
+            let valid_until: u64 = (*valid_until_values.at(index))
+                .try_into()
+                .expect('MP_EXTERNAL_EXPIRY');
+            let consumed_base_amount: u128 = (*consumed_base_amounts.at(index))
+                .try_into()
+                .expect('MP_EXTERNAL_FILL');
+            let previous_u256: u256 = previous_request_id.into();
+            let request_u256: u256 = request_id.into();
+            assert(index == 0 || previous_u256 < request_u256, 'MP_EXTERNAL_ORDER');
+            assert(batch_id == group_id, 'MP_EXTERNAL_BATCH');
+            let request = executor
+                .consume_closed_external_match_request(request_id, consumed_base_amount);
+            assert(request.batch_id == batch_id, 'MP_EXTERNAL_BATCH');
+            assert(request.pair_id == pair_id, 'MP_EXTERNAL_PAIR');
+            assert(request.side == side, 'MP_EXTERNAL_SIDE');
+            let (input_asset_id, output_asset_id) = if side == 0 {
+                (quote_asset_id, base_asset_id)
+            } else {
+                assert(side == 1, 'MP_EXTERNAL_SIDE');
+                (base_asset_id, quote_asset_id)
+            };
+            assert(request.input_asset_id == input_asset_id, 'MP_EXTERNAL_INPUT');
+            assert(request.output_asset_id == output_asset_id, 'MP_EXTERNAL_OUTPUT');
+            assert(request.max_base_amount == max_base_amount, 'MP_EXTERNAL_MAX');
+            assert(request.reference_midpoint_price == midpoint_price, 'MP_EXTERNAL_MID');
+            assert(request.price_base_scale == price_base_scale, 'MP_EXTERNAL_SCALE');
+            assert(request.valid_until_unix_ms == valid_until, 'MP_EXTERNAL_EXPIRY');
+            assert(request.closed, 'MP_EXTERNAL_OPEN');
+            assert(request.settlement_consumed, 'MP_EXTERNAL_UNSETTLED');
+            state = poseidon_hash2(state, request_id);
+            state = poseidon_hash2(state, batch_id);
+            state = poseidon_hash2(state, pair_id);
+            state = poseidon_hash2(state, base_asset_id);
+            state = poseidon_hash2(state, quote_asset_id);
+            state = poseidon_hash2(state, side);
+            state = poseidon_hash2(state, max_base_amount.into());
+            state = poseidon_hash2(state, midpoint_price.into());
+            state = poseidon_hash2(state, price_base_scale.into());
+            state = poseidon_hash2(state, valid_until.into());
+            state = poseidon_hash2(state, consumed_base_amount.into());
+            previous_request_id = request_id;
+            index += 1;
+        }
+        assert(state == expected_root, 'MP_EXTERNAL_ROOT');
     }
 
     fn settle_verified_multi_pair_group(
@@ -2540,7 +3038,9 @@ pub mod AuctionVerifier {
         self.settled_at_unix_seconds.write(group_id, settled_at);
         self.output_note_roots.write(group_id, output_note_root);
         self.verified_multi_pair_settlement_transcripts.write(group_id, transcript_commitment);
-        self.current_note_root.write(new_note_root);
+        let committed_note_root = note_accumulator_commit_append(ref self, output_note_root);
+        assert(committed_note_root == new_note_root, 'NEW_NOTE_ROOT');
+        self.current_note_root.write(committed_note_root);
         self.current_nullifier_root.write(new_nullifier_root);
         self.current_renewal_root.write(new_renewal_root);
         self.current_fee_root.write(new_fee_root);
@@ -2559,6 +3059,12 @@ pub mod AuctionVerifier {
         batch_id: felt252,
         order_commitment_root: felt252,
         encrypted_order_set_commitment: felt252,
+        reference_price_attestation_commitment: felt252,
+        reference_price_signer: felt252,
+        reference_price_observed_at_unix_ms: u64,
+        reference_price_valid_until_unix_ms: u64,
+        reference_price_signature_r: felt252,
+        reference_price_signature_s: felt252,
         transcript_commitment: felt252,
         clearing_price: u128,
         price_base_scale: u128,
@@ -2590,7 +3096,7 @@ pub mod AuctionVerifier {
         assert(taker_fee_bps <= MAX_PAIR_FEE_BPS, 'BAD_TAKER_FEE');
         assert(protocol_fee_recipient != 0, 'BAD_FEE_RECIPIENT');
         assert(
-            new_note_root == state_transition_root(prior_note_root, output_note_root),
+            new_note_root == note_accumulator_preview_append(@self, output_note_root),
             'NEW_NOTE_ROOT',
         );
         assert(new_nullifier_root != 0 || prior_nullifier_root == 0, 'NEW_NULLIFIER_ROOT');
@@ -2607,14 +3113,29 @@ pub mod AuctionVerifier {
             batch.encrypted_order_set_commitment == encrypted_order_set_commitment,
             'ENC_SET_BINDING',
         );
+        assert_reference_price_attestation(
+            @self,
+            reference_price_attestation_commitment,
+            reference_price_signer,
+            reference_price_observed_at_unix_ms,
+            reference_price_valid_until_unix_ms,
+            reference_price_signature_r,
+            reference_price_signature_s,
+            batch.close_time_unix_ms,
+        );
         assert_pair_fee_config(@self, batch.pair_id, taker_fee_bps, protocol_fee_recipient);
 
         let recomputed_commitment = public_settlement_commitment(
             batch_id,
             batch.pair_id,
             batch.epoch_id,
+            get_contract_address().into(),
             order_commitment_root,
             encrypted_order_set_commitment,
+            reference_price_attestation_commitment,
+            reference_price_signer,
+            reference_price_observed_at_unix_ms,
+            reference_price_valid_until_unix_ms,
             clearing_price,
             price_base_scale,
             taker_fee_bps,
@@ -2650,7 +3171,9 @@ pub mod AuctionVerifier {
         self.settled_batches.write(batch_id, true);
         self.settled_at_unix_seconds.write(batch_id, current_block_timestamp());
         self.output_note_roots.write(batch_id, output_note_root);
-        self.current_note_root.write(new_note_root);
+        let committed_note_root = note_accumulator_commit_append(ref self, output_note_root);
+        assert(committed_note_root == new_note_root, 'NEW_NOTE_ROOT');
+        self.current_note_root.write(committed_note_root);
         self.current_nullifier_root.write(new_nullifier_root);
         self.current_renewal_root.write(new_renewal_root);
         self.current_fee_root.write(new_fee_root);
@@ -2664,8 +3187,13 @@ pub mod AuctionVerifier {
         batch_id: felt252,
         pair_id: felt252,
         batch_epoch: u64,
+        auction_verifier_address: felt252,
         order_commitment_root: felt252,
         encrypted_order_set_commitment: felt252,
+        reference_price_attestation_commitment: felt252,
+        reference_price_signer: felt252,
+        reference_price_observed_at_unix_ms: u64,
+        reference_price_valid_until_unix_ms: u64,
         clearing_price: u128,
         price_base_scale: u128,
         taker_fee_bps: u128,
@@ -2691,8 +3219,13 @@ pub mod AuctionVerifier {
         );
         state = poseidon_hash2(state, pair_id);
         state = poseidon_hash2(state, batch_epoch.into());
+        state = poseidon_hash2(state, auction_verifier_address);
         state = poseidon_hash2(state, order_commitment_root);
         state = poseidon_hash2(state, encrypted_order_set_commitment);
+        state = poseidon_hash2(state, reference_price_attestation_commitment);
+        state = poseidon_hash2(state, reference_price_signer);
+        state = poseidon_hash2(state, reference_price_observed_at_unix_ms.into());
+        state = poseidon_hash2(state, reference_price_valid_until_unix_ms.into());
         state = poseidon_hash2(state, clearing_price.into());
         state = poseidon_hash2(state, price_base_scale.into());
         state = poseidon_hash2(state, taker_fee_bps.into());
@@ -2764,6 +3297,115 @@ pub mod AuctionVerifier {
 
     fn state_transition_root(prior_root: felt252, batch_root: felt252) -> felt252 {
         poseidon_hash2(poseidon_hash2(ROOT_ONLY_STATE_TRANSITION_DOMAIN, prior_root), batch_root)
+    }
+
+    fn note_accumulator_leaf(batch_root: felt252) -> felt252 {
+        assert(batch_root != 0, 'BAD_NOTE_ACC_LEAF');
+        poseidon_hash2(NOTE_ACCUMULATOR_LEAF_DOMAIN, batch_root)
+    }
+
+    fn note_accumulator_node(left: felt252, right: felt252, level: u64) -> felt252 {
+        if left == 0 && right == 0 {
+            0
+        } else {
+            let state = poseidon_hash2(NOTE_ACCUMULATOR_NODE_DOMAIN, level.into());
+            let state = poseidon_hash2(state, left);
+            poseidon_hash2(state, right)
+        }
+    }
+
+    fn note_accumulator_root_from_frontier(self: @ContractState, leaf_count: u64) -> felt252 {
+        let mut root = 0;
+        let mut size = leaf_count;
+        if leaf_count == NOTE_ACCUMULATOR_CAPACITY {
+            let full_root = self.note_accumulator_frontier.read(NOTE_ACCUMULATOR_DEPTH);
+            assert(full_root != 0, 'NOTE_ACC_FRONTIER');
+            return full_root;
+        }
+        let mut level = 0;
+        loop {
+            if level == NOTE_ACCUMULATOR_DEPTH {
+                break;
+            }
+            if size % 2 == 1 {
+                let peak = self.note_accumulator_frontier.read(level);
+                assert(peak != 0, 'NOTE_ACC_FRONTIER');
+                root = note_accumulator_node(peak, root, level);
+            } else {
+                root = note_accumulator_node(root, 0, level);
+            }
+            size = size / 2;
+            level += 1;
+        }
+        assert(size == 0, 'NOTE_ACC_CAPACITY');
+        root
+    }
+
+    fn note_accumulator_preview_append(self: @ContractState, batch_root: felt252) -> felt252 {
+        let leaf_count = self.note_root_transition_count.read();
+        assert(leaf_count < NOTE_ACCUMULATOR_CAPACITY, 'NOTE_ACC_CAPACITY');
+        let mut carry = note_accumulator_leaf(batch_root);
+        let mut remaining = leaf_count;
+        let mut insertion_level = 0;
+        loop {
+            if remaining % 2 == 0 {
+                break;
+            }
+            let left = self.note_accumulator_frontier.read(insertion_level);
+            assert(left != 0, 'NOTE_ACC_FRONTIER');
+            carry = note_accumulator_node(left, carry, insertion_level);
+            remaining = remaining / 2;
+            insertion_level += 1;
+        }
+        assert(insertion_level <= NOTE_ACCUMULATOR_DEPTH, 'NOTE_ACC_CAPACITY');
+        if insertion_level == NOTE_ACCUMULATOR_DEPTH {
+            return carry;
+        }
+
+        let mut root = 0;
+        let mut size = leaf_count + 1;
+        let mut level = 0;
+        loop {
+            if level == NOTE_ACCUMULATOR_DEPTH {
+                break;
+            }
+            if size % 2 == 1 {
+                let peak = if level == insertion_level {
+                    carry
+                } else {
+                    self.note_accumulator_frontier.read(level)
+                };
+                assert(peak != 0, 'NOTE_ACC_FRONTIER');
+                root = note_accumulator_node(peak, root, level);
+            } else {
+                root = note_accumulator_node(root, 0, level);
+            }
+            size = size / 2;
+            level += 1;
+        }
+        assert(size == 0, 'NOTE_ACC_CAPACITY');
+        root
+    }
+
+    fn note_accumulator_commit_append(ref self: ContractState, batch_root: felt252) -> felt252 {
+        let leaf_count = self.note_root_transition_count.read();
+        assert(leaf_count < NOTE_ACCUMULATOR_CAPACITY, 'NOTE_ACC_CAPACITY');
+        let mut carry = note_accumulator_leaf(batch_root);
+        let mut remaining = leaf_count;
+        let mut level = 0;
+        loop {
+            if remaining % 2 == 0 {
+                break;
+            }
+            let left = self.note_accumulator_frontier.read(level);
+            assert(left != 0, 'NOTE_ACC_FRONTIER');
+            carry = note_accumulator_node(left, carry, level);
+            remaining = remaining / 2;
+            level += 1;
+        }
+        assert(level <= NOTE_ACCUMULATOR_DEPTH, 'NOTE_ACC_CAPACITY');
+        self.note_accumulator_frontier.write(level, carry);
+        note_accumulator_root_from_frontier(@self, leaf_count + 1)
     }
 
     fn assert_pair_fee_config(

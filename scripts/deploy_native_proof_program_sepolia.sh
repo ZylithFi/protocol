@@ -211,6 +211,7 @@ update_env_address() {
   local multi_pair_settlement_completion_statement_program_address="${16}"
   local multi_pair_settlement_fee_recovery_statement_program_address="${17}"
   local multi_pair_settlement_statement_program_address="${18}"
+  local external_match_authorization_statement_program_address="${19}"
   python3 - "${ROOT_DIR}" \
     "${proof_program_address}" \
     "${settlement_statement_program_address}" \
@@ -229,7 +230,8 @@ update_env_address() {
     "${multi_pair_settlement_order_state_statement_program_address}" \
     "${multi_pair_settlement_completion_statement_program_address}" \
     "${multi_pair_settlement_fee_recovery_statement_program_address}" \
-    "${multi_pair_settlement_statement_program_address}" <<'PY'
+    "${multi_pair_settlement_statement_program_address}" \
+    "${external_match_authorization_statement_program_address}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -253,6 +255,7 @@ multi_pair_settlement_order_state_statement_program_address = sys.argv[16]
 multi_pair_settlement_completion_statement_program_address = sys.argv[17]
 multi_pair_settlement_fee_recovery_statement_program_address = sys.argv[18]
 multi_pair_settlement_statement_program_address = sys.argv[19]
+external_match_authorization_statement_program_address = sys.argv[20]
 env_path = root / ".deploy/sepolia.prover.env"
 lines = []
 updates = {
@@ -274,6 +277,7 @@ updates = {
     "ZYLITH_NATIVE_MULTI_PAIR_SETTLEMENT_COMPLETION_STATEMENT_PROGRAM_ADDRESS": multi_pair_settlement_completion_statement_program_address,
     "ZYLITH_NATIVE_MULTI_PAIR_SETTLEMENT_FEE_RECOVERY_STATEMENT_PROGRAM_ADDRESS": multi_pair_settlement_fee_recovery_statement_program_address,
     "ZYLITH_NATIVE_MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS": multi_pair_settlement_statement_program_address,
+    "ZYLITH_NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS": external_match_authorization_statement_program_address,
 }
 seen = set()
 if env_path.exists():
@@ -313,6 +317,7 @@ for path in [root / ".deploy/sepolia-live.json", root / "client/public/deploymen
     proof["multi_pair_settlement_completion_statement_program_address"] = multi_pair_settlement_completion_statement_program_address
     proof["multi_pair_settlement_fee_recovery_statement_program_address"] = multi_pair_settlement_fee_recovery_statement_program_address
     proof["multi_pair_settlement_statement_program_address"] = multi_pair_settlement_statement_program_address
+    proof["external_match_authorization_statement_program_address"] = external_match_authorization_statement_program_address
     path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 }
@@ -388,6 +393,11 @@ deploy_or_reuse_contract \
   MULTI_PAIR_STATEMENT_PROGRAM_ADDRESS \
   MultiPairStatementProgram
 deploy_or_reuse_contract \
+  ZYLITH_NATIVE_EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS \
+  EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_CLASS_HASH \
+  EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS \
+  ExternalMatchAuthorizationStatementProgram
+deploy_or_reuse_contract \
   ZYLITH_NATIVE_MULTI_PAIR_SETTLEMENT_PUBLIC_STATEMENT_PROGRAM_ADDRESS \
   MULTI_PAIR_SETTLEMENT_PUBLIC_STATEMENT_CLASS_HASH \
   MULTI_PAIR_SETTLEMENT_PUBLIC_STATEMENT_PROGRAM_ADDRESS \
@@ -428,6 +438,7 @@ PROOF_PROGRAM_ADDRESS="$(
     "${ADMISSION_STATEMENT_PROGRAM_ADDRESS}" \
     "${AUCTION_RESULT_STATEMENT_PROGRAM_ADDRESS}" \
     "${MULTI_PAIR_STATEMENT_PROGRAM_ADDRESS}" \
+    "${EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS}" \
     "${MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS}"
 )"
 update_env_address \
@@ -448,7 +459,8 @@ update_env_address \
   "${MULTI_PAIR_SETTLEMENT_ORDER_STATE_STATEMENT_PROGRAM_ADDRESS}" \
   "${MULTI_PAIR_SETTLEMENT_COMPLETION_STATEMENT_PROGRAM_ADDRESS}" \
   "${MULTI_PAIR_SETTLEMENT_FEE_RECOVERY_STATEMENT_PROGRAM_ADDRESS}" \
-  "${MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS}"
+  "${MULTI_PAIR_SETTLEMENT_STATEMENT_PROGRAM_ADDRESS}" \
+  "${EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS}"
 
 cat <<EOF
 Native proof program deployed.
@@ -476,6 +488,8 @@ AuctionResultStatementClassHash: ${AUCTION_RESULT_STATEMENT_CLASS_HASH}
 AuctionResultStatementProgram: ${AUCTION_RESULT_STATEMENT_PROGRAM_ADDRESS}
 MultiPairStatementClassHash: ${MULTI_PAIR_STATEMENT_CLASS_HASH}
 MultiPairStatementProgram: ${MULTI_PAIR_STATEMENT_PROGRAM_ADDRESS}
+ExternalMatchAuthorizationStatementClassHash: ${EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_CLASS_HASH}
+ExternalMatchAuthorizationStatementProgram: ${EXTERNAL_MATCH_AUTHORIZATION_STATEMENT_PROGRAM_ADDRESS}
 MultiPairSettlementPublicStatementClassHash: ${MULTI_PAIR_SETTLEMENT_PUBLIC_STATEMENT_CLASS_HASH}
 MultiPairSettlementPublicStatementProgram: ${MULTI_PAIR_SETTLEMENT_PUBLIC_STATEMENT_PROGRAM_ADDRESS}
 MultiPairSettlementOrderStateStatementClassHash: ${MULTI_PAIR_SETTLEMENT_ORDER_STATE_STATEMENT_CLASS_HASH}
