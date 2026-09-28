@@ -1,0 +1,11 @@
+/target
+/.scarb
+/.snfoundry_cache
+/contracts/target
+/contracts/.snfoundry_cache
+/proof_program/target
+/proof_program/.snfoundry_cache
+/stwo_statement/target
+/stwo_statement/.snfoundry_cache
+/.DS_Store
+.env*

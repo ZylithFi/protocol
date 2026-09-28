@@ -1,0 +1,525 @@
+use starknet::ContractAddress;
+
+#[derive(Copy, Drop, Serde)]
+pub struct OpenNoteDeposit {
+    pub note_id: felt252,
+    pub token: ContractAddress,
+    pub amount: u128,
+}
+
+#[starknet::interface]
+pub trait IPrivacyDepositBridge<TContractState> {
+    fn propose_admin(ref self: TContractState, new_admin: ContractAddress);
+    fn accept_admin(ref self: TContractState);
+    fn lock_config(ref self: TContractState);
+    fn set_exchange(ref self: TContractState, exchange: ContractAddress);
+    fn register_supported_asset(
+        ref self: TContractState, asset_id: felt252, token_address: ContractAddress,
+    );
+    fn privacy_invoke(
+        ref self: TContractState,
+        funding_commitments: Span<felt252>,
+        deposit_roots: Span<felt252>,
+        encrypted_note_activations: Span<felt252>,
+        note_commitments: Span<felt252>,
+        asset_ids: Span<felt252>,
+        amounts: Span<u128>,
+        withdraw_authorities: Span<felt252>,
+    ) -> Span<OpenNoteDeposit>;
+    fn stage_verified_note_strk20_exit(
+        ref self: TContractState,
+        asset_id: felt252,
+        amount: u128,
+        note_commitment: felt252,
+        withdraw_authority: felt252,
+        exit_commitment: felt252,
+    );
+    fn settle_external_match_asset_swap(
+        ref self: TContractState,
+        matcher: ContractAddress,
+        input_asset_id: felt252,
+        output_asset_id: felt252,
+        input_amount: u128,
+        output_amount: u128,
+    );
+    fn strk20_exit_claimed_open_note_id(self: @TContractState, exit_commitment: felt252) -> felt252;
+    fn escrowed_asset_amount(self: @TContractState, asset_id: felt252) -> u128;
+    fn pending_exit_asset_amount(self: @TContractState, asset_id: felt252) -> u128;
+    fn asset_token(self: @TContractState, asset_id: felt252) -> ContractAddress;
+    fn is_asset_supported(self: @TContractState, asset_id: felt252) -> bool;
+    fn admin_address(self: @TContractState) -> ContractAddress;
+    fn pending_admin_address(self: @TContractState) -> ContractAddress;
+    fn admin_transfer_pending(self: @TContractState) -> bool;
+    fn config_is_locked(self: @TContractState) -> bool;
+    fn exchange_address(self: @TContractState) -> ContractAddress;
+    fn commitment_registry_address(self: @TContractState) -> ContractAddress;
+    fn privacy_pool_address(self: @TContractState) -> ContractAddress;
+}
+
+#[starknet::contract]
+pub mod PrivacyDepositBridge {
+    use core::ecdsa::check_ecdsa_signature;
+    use core::integer::u256;
+    use core::num::traits::Zero;
+    use core::poseidon::hades_permutation;
+    use starknet::storage::{
+        Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
+        StoragePointerWriteAccess,
+    };
+    use starknet::{ContractAddress, get_caller_address, get_contract_address, get_tx_info};
+    use zylith_protocol::commitment_registry::{
+        ICommitmentRegistryDispatcher, ICommitmentRegistryDispatcherTrait,
+    };
+    use zylith_protocol::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
+
+    const STRK20_EXIT_CLAIM_DOMAIN: felt252 = 0x7a796c6974685f7374726b32305f636c61696d5f7631;
+    const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
+        0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
+
+    #[storage]
+    struct Storage {
+        admin: ContractAddress,
+        pending_admin: ContractAddress,
+        admin_transfer_pending: bool,
+        config_locked: bool,
+        /// the exchange stages verified exits and settles external fills against the escrow.
+        exchange: ContractAddress,
+        commitment_registry: ContractAddress,
+        privacy_pool: ContractAddress,
+        asset_tokens: Map<felt252, ContractAddress>,
+        supported_asset_count: u64,
+        strk20_exit_asset_ids: Map<felt252, felt252>,
+        strk20_exit_amounts: Map<felt252, u128>,
+        strk20_exit_note_commitments: Map<felt252, felt252>,
+        strk20_exit_commitments_by_note: Map<felt252, felt252>,
+        strk20_exit_withdraw_authorities: Map<felt252, felt252>,
+        strk20_exit_claimed_open_note_ids: Map<felt252, felt252>,
+        /// shielded liabilities that remain available to exchange transitions.
+        escrowed_asset_amounts: Map<felt252, u128>,
+        /// finalized exits whose tokens remain in custody until the privacy pool claims them.
+        pending_exit_asset_amounts: Map<felt252, u128>,
+    }
+
+    #[constructor]
+    fn constructor(
+        ref self: ContractState,
+        admin: ContractAddress,
+        commitment_registry: ContractAddress,
+        privacy_pool: ContractAddress,
+    ) {
+        assert(!admin.is_zero(), 'BAD_ADMIN');
+        assert(!commitment_registry.is_zero(), 'BAD_REGISTRY');
+        assert(!privacy_pool.is_zero(), 'BAD_PRIVACY_POOL');
+        self.admin.write(admin);
+        self.commitment_registry.write(commitment_registry);
+        self.privacy_pool.write(privacy_pool);
+    }
+
+    #[abi(embed_v0)]
+    impl PrivacyDepositBridgeImpl of super::IPrivacyDepositBridge<ContractState> {
+        fn propose_admin(ref self: ContractState, new_admin: ContractAddress) {
+            assert_admin(@self);
+            assert(!new_admin.is_zero(), 'BAD_ADMIN');
+            assert(new_admin != self.admin.read(), 'BAD_ADMIN');
+            self.pending_admin.write(new_admin);
+            self.admin_transfer_pending.write(true);
+        }
+
+        fn accept_admin(ref self: ContractState) {
+            let caller = get_caller_address();
+            assert(self.admin_transfer_pending.read(), 'NO_ADMIN_TRANSFER');
+            assert(caller == self.pending_admin.read(), 'UNAUTHORIZED');
+            self.admin.write(caller);
+            self.admin_transfer_pending.write(false);
+        }
+
+        fn lock_config(ref self: ContractState) {
+            assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
+            assert(!self.exchange.read().is_zero(), 'EXCHANGE_UNSET');
+            assert(self.supported_asset_count.read() > 0, 'NO_ASSETS');
+            self.config_locked.write(true);
+        }
+
+        fn set_exchange(ref self: ContractState, exchange: ContractAddress) {
+            assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
+            assert(!exchange.is_zero(), 'BAD_EXCHANGE');
+            self.exchange.write(exchange);
+        }
+
+        fn register_supported_asset(
+            ref self: ContractState, asset_id: felt252, token_address: ContractAddress,
+        ) {
+            assert_admin(@self);
+            assert(!self.config_locked.read(), 'CONFIG_LOCKED');
+            assert(asset_id != 0, 'BAD_ASSET');
+            assert(!token_address.is_zero(), 'BAD_TOKEN');
+
+            let existing = self.asset_tokens.read(asset_id);
+            if existing.is_zero() {
+                self.asset_tokens.write(asset_id, token_address);
+                self.supported_asset_count.write(self.supported_asset_count.read() + 1);
+            } else {
+                assert(existing == token_address, 'ASSET_IMMUTABLE');
+            }
+        }
+
+        fn privacy_invoke(
+            ref self: ContractState,
+            funding_commitments: Span<felt252>,
+            deposit_roots: Span<felt252>,
+            encrypted_note_activations: Span<felt252>,
+            note_commitments: Span<felt252>,
+            asset_ids: Span<felt252>,
+            amounts: Span<u128>,
+            withdraw_authorities: Span<felt252>,
+        ) -> Span<super::OpenNoteDeposit> {
+            let mut open_note_deposits: Array<super::OpenNoteDeposit> = array![];
+            if funding_commitments.len() == 0 {
+                assert(note_commitments.len() == 0, 'BAD_EXIT_CLAIM');
+                assert(asset_ids.len() == 0, 'BAD_EXIT_CLAIM');
+                assert(amounts.len() == 0, 'BAD_EXIT_CLAIM');
+                assert(withdraw_authorities.len() == 0, 'BAD_EXIT_CLAIM');
+                open_note_deposits
+                    .append(
+                        claim_strk20_exit_internal(
+                            ref self, deposit_roots, encrypted_note_activations,
+                        ),
+                    );
+            } else {
+                register_funding_activation_internal(
+                    ref self,
+                    funding_commitments,
+                    deposit_roots,
+                    encrypted_note_activations,
+                    note_commitments,
+                    asset_ids,
+                    amounts,
+                    withdraw_authorities,
+                );
+            }
+            open_note_deposits.span()
+        }
+
+        fn stage_verified_note_strk20_exit(
+            ref self: ContractState,
+            asset_id: felt252,
+            amount: u128,
+            note_commitment: felt252,
+            withdraw_authority: felt252,
+            exit_commitment: felt252,
+        ) {
+            assert_exchange(@self);
+            assert(asset_id != 0, 'BAD_ASSET');
+            assert(amount > 0, 'BAD_AMOUNT');
+            assert(note_commitment != 0, 'BAD_COMMITMENT');
+            assert(withdraw_authority != 0, 'BAD_AUTHORITY');
+            assert(exit_commitment != 0, 'BAD_EXIT');
+            assert(self.strk20_exit_amounts.read(exit_commitment) == 0, 'EXIT_EXISTS');
+            assert(self.strk20_exit_note_commitments.read(exit_commitment) == 0, 'EXIT_EXISTS');
+            assert(
+                self.strk20_exit_commitments_by_note.read(note_commitment) == 0, 'NOTE_WITHDRAWN',
+            );
+            let token_address = self.asset_tokens.read(asset_id);
+            assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
+            let escrowed = self.escrowed_asset_amounts.read(asset_id);
+            assert(escrowed >= amount, 'ESCROW_LOW');
+
+            self.strk20_exit_asset_ids.write(exit_commitment, asset_id);
+            self.strk20_exit_amounts.write(exit_commitment, amount);
+            self.strk20_exit_note_commitments.write(exit_commitment, note_commitment);
+            self.strk20_exit_commitments_by_note.write(note_commitment, exit_commitment);
+            self.strk20_exit_withdraw_authorities.write(exit_commitment, withdraw_authority);
+            self.escrowed_asset_amounts.write(asset_id, escrowed - amount);
+            let pending = self.pending_exit_asset_amounts.read(asset_id);
+            self.pending_exit_asset_amounts.write(asset_id, pending + amount);
+        }
+
+        fn settle_external_match_asset_swap(
+            ref self: ContractState,
+            matcher: ContractAddress,
+            input_asset_id: felt252,
+            output_asset_id: felt252,
+            input_amount: u128,
+            output_amount: u128,
+        ) {
+            assert_exchange(@self);
+            assert(!matcher.is_zero(), 'BAD_MATCHER');
+            assert(input_asset_id != 0, 'BAD_INPUT_ASSET');
+            assert(output_asset_id != 0, 'BAD_OUTPUT_ASSET');
+            assert(input_asset_id != output_asset_id, 'BAD_ASSET_PAIR');
+            assert(input_amount > 0, 'BAD_INPUT_AMOUNT');
+            assert(output_amount > 0, 'BAD_OUTPUT_AMOUNT');
+
+            let input_token_address = self.asset_tokens.read(input_asset_id);
+            let output_token_address = self.asset_tokens.read(output_asset_id);
+            assert(!input_token_address.is_zero(), 'UNSUPPORTED_INPUT');
+            assert(!output_token_address.is_zero(), 'UNSUPPORTED_OUTPUT');
+            let input_escrowed = self.escrowed_asset_amounts.read(input_asset_id);
+            assert(input_escrowed >= input_amount, 'INPUT_ESCROW_LOW');
+
+            let bridge_address = get_contract_address();
+            let input_token = IERC20Dispatcher { contract_address: input_token_address };
+            let output_token = IERC20Dispatcher { contract_address: output_token_address };
+            let input_bridge_before = checked_token_balance(input_token, bridge_address);
+            let output_bridge_before = checked_token_balance(output_token, bridge_address);
+            assert(input_bridge_before >= input_amount, 'INPUT_BALANCE_LOW');
+
+            output_token.transfer_from(matcher, bridge_address, as_u256(output_amount));
+            let output_bridge_after = checked_token_balance(output_token, bridge_address);
+            assert(output_bridge_after == output_bridge_before + output_amount, 'OUTPUT_DELTA');
+
+            input_token.transfer(matcher, as_u256(input_amount));
+            let input_bridge_after = checked_token_balance(input_token, bridge_address);
+            assert(input_bridge_after + input_amount == input_bridge_before, 'INPUT_DELTA');
+
+            self.escrowed_asset_amounts.write(input_asset_id, input_escrowed - input_amount);
+            let output_escrowed = self.escrowed_asset_amounts.read(output_asset_id);
+            self.escrowed_asset_amounts.write(output_asset_id, output_escrowed + output_amount);
+        }
+
+        fn strk20_exit_claimed_open_note_id(
+            self: @ContractState, exit_commitment: felt252,
+        ) -> felt252 {
+            self.strk20_exit_claimed_open_note_ids.read(exit_commitment)
+        }
+
+        fn escrowed_asset_amount(self: @ContractState, asset_id: felt252) -> u128 {
+            self.escrowed_asset_amounts.read(asset_id)
+        }
+
+        fn pending_exit_asset_amount(self: @ContractState, asset_id: felt252) -> u128 {
+            self.pending_exit_asset_amounts.read(asset_id)
+        }
+
+        fn asset_token(self: @ContractState, asset_id: felt252) -> ContractAddress {
+            self.asset_tokens.read(asset_id)
+        }
+
+        fn is_asset_supported(self: @ContractState, asset_id: felt252) -> bool {
+            !self.asset_tokens.read(asset_id).is_zero()
+        }
+
+        fn admin_address(self: @ContractState) -> ContractAddress {
+            self.admin.read()
+        }
+
+        fn pending_admin_address(self: @ContractState) -> ContractAddress {
+            self.pending_admin.read()
+        }
+
+        fn admin_transfer_pending(self: @ContractState) -> bool {
+            self.admin_transfer_pending.read()
+        }
+
+        fn config_is_locked(self: @ContractState) -> bool {
+            self.config_locked.read()
+        }
+
+        fn exchange_address(self: @ContractState) -> ContractAddress {
+            self.exchange.read()
+        }
+
+        fn commitment_registry_address(self: @ContractState) -> ContractAddress {
+            self.commitment_registry.read()
+        }
+
+        fn privacy_pool_address(self: @ContractState) -> ContractAddress {
+            self.privacy_pool.read()
+        }
+    }
+
+    fn register_funding_activation_internal(
+        ref self: ContractState,
+        funding_commitments: Span<felt252>,
+        deposit_roots: Span<felt252>,
+        encrypted_note_activations: Span<felt252>,
+        note_commitments: Span<felt252>,
+        asset_ids: Span<felt252>,
+        amounts: Span<u128>,
+        withdraw_authorities: Span<felt252>,
+    ) {
+        assert(get_caller_address() == self.privacy_pool.read(), 'BAD_PRIVACY_CALLER');
+        let len = funding_commitments.len();
+        assert(len > 0, 'EMPTY_ACTIVATION');
+        assert(len <= 16, 'TOO_MANY_ACTIVATIONS');
+        assert(deposit_roots.len() == len, 'BAD_ACTIVATION_LEN');
+        assert(encrypted_note_activations.len() == len, 'BAD_ACTIVATION_LEN');
+        assert(note_commitments.len() == len, 'BAD_ACTIVATION_LEN');
+        assert(asset_ids.len() == len, 'BAD_ACTIVATION_LEN');
+        assert(amounts.len() == len, 'BAD_ACTIVATION_LEN');
+        assert(withdraw_authorities.len() == len, 'BAD_ACTIVATION_LEN');
+        let commitment_registry = ICommitmentRegistryDispatcher {
+            contract_address: self.commitment_registry.read(),
+        };
+        let mut index = 0;
+        loop {
+            if index == len {
+                break;
+            }
+            let funding_commitment = *funding_commitments.at(index);
+            let deposit_root = *deposit_roots.at(index);
+            let encrypted_note_activation = *encrypted_note_activations.at(index);
+            let note_commitment = *note_commitments.at(index);
+            let asset_id = *asset_ids.at(index);
+            let amount = *amounts.at(index);
+            let withdraw_authority = *withdraw_authorities.at(index);
+            assert(funding_commitment != 0, 'BAD_FUNDING');
+            assert(deposit_root != 0, 'BAD_DEPOSIT_ROOT');
+            assert(encrypted_note_activation != 0, 'BAD_ACTIVATION');
+            assert(note_commitment != 0, 'BAD_COMMITMENT');
+            assert(asset_id != 0, 'BAD_ASSET');
+            assert(amount > 0, 'BAD_AMOUNT');
+            assert(withdraw_authority != 0, 'BAD_AUTHORITY');
+            assert(
+                deposit_root == output_note_leaf(
+                    note_commitment, asset_id, amount, withdraw_authority,
+                ),
+                'DEPOSIT_ROOT_MISMATCH',
+            );
+            let token_address = self.asset_tokens.read(asset_id);
+            assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
+            let mut duplicate_index = index + 1;
+            loop {
+                if duplicate_index == len {
+                    break;
+                }
+                assert(
+                    funding_commitment != *funding_commitments.at(duplicate_index),
+                    'DUPLICATE_FUNDING',
+                );
+                assert(deposit_root != *deposit_roots.at(duplicate_index), 'DUPLICATE_ROOT');
+                assert(note_commitment != *note_commitments.at(duplicate_index), 'DUPLICATE_NOTE');
+                duplicate_index += 1;
+            }
+            let escrowed = self.escrowed_asset_amounts.read(asset_id);
+            let pending_exits = self.pending_exit_asset_amounts.read(asset_id);
+            let token = IERC20Dispatcher { contract_address: token_address };
+            let bridge_balance = checked_token_balance(token, get_contract_address());
+            assert(bridge_balance >= escrowed + pending_exits + amount, 'TOKEN_CUSTODY_LOW');
+            self.escrowed_asset_amounts.write(asset_id, escrowed + amount);
+            commitment_registry
+                .register_funding_activation(
+                    funding_commitment, deposit_root, encrypted_note_activation,
+                );
+            index += 1;
+        };
+    }
+
+    fn claim_strk20_exit_internal(
+        ref self: ContractState,
+        claim_fields: Span<felt252>,
+        encrypted_note_activations: Span<felt252>,
+    ) -> super::OpenNoteDeposit {
+        assert(get_caller_address() == self.privacy_pool.read(), 'BAD_PRIVACY_CALLER');
+        assert(encrypted_note_activations.len() == 0, 'BAD_EXIT_CLAIM');
+        assert(claim_fields.len() == 4, 'BAD_EXIT_CLAIM');
+        let exit_commitment = *claim_fields.at(0);
+        let open_note_id = *claim_fields.at(1);
+        let signature_r = *claim_fields.at(2);
+        let signature_s = *claim_fields.at(3);
+        assert(exit_commitment != 0, 'BAD_EXIT');
+        assert(open_note_id != 0, 'BAD_OPEN_NOTE');
+        assert(signature_r != 0, 'BAD_EXIT_SIG');
+        assert(signature_s != 0, 'BAD_EXIT_SIG');
+        assert(self.strk20_exit_claimed_open_note_ids.read(exit_commitment) == 0, 'EXIT_CLAIMED');
+
+        let amount = self.strk20_exit_amounts.read(exit_commitment);
+        assert(amount > 0, 'UNKNOWN_EXIT');
+        let asset_id = self.strk20_exit_asset_ids.read(exit_commitment);
+        let withdraw_authority = self.strk20_exit_withdraw_authorities.read(exit_commitment);
+        let token_address = self.asset_tokens.read(asset_id);
+        assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
+        let privacy_pool = self.privacy_pool.read();
+        assert(!privacy_pool.is_zero(), 'BAD_PRIVACY_POOL');
+        let exchange = self.exchange.read();
+        assert(!exchange.is_zero(), 'BAD_EXCHANGE');
+        assert(
+            check_ecdsa_signature(
+                strk20_exit_claim_message_hash(
+                    privacy_pool,
+                    exchange,
+                    asset_id,
+                    token_address,
+                    amount,
+                    exit_commitment,
+                    open_note_id,
+                ),
+                withdraw_authority,
+                signature_r,
+                signature_s,
+            ),
+            'BAD_EXIT_SIG',
+        );
+
+        let pending = self.pending_exit_asset_amounts.read(asset_id);
+        assert(pending >= amount, 'EXIT_LIABILITY_LOW');
+
+        self.strk20_exit_amounts.write(exit_commitment, 0);
+        self.strk20_exit_claimed_open_note_ids.write(exit_commitment, open_note_id);
+        self.pending_exit_asset_amounts.write(asset_id, pending - amount);
+
+        let token = IERC20Dispatcher { contract_address: token_address };
+        let bridge_balance = checked_token_balance(token, get_contract_address());
+        assert(bridge_balance >= amount, 'TOKEN_BALANCE_LOW');
+        // the strk20 pool consumes the returned open note deposit from privacy_invoke
+        // and pulls this approved amount in the same transaction.
+        token.approve(privacy_pool, as_u256(amount));
+        super::OpenNoteDeposit { note_id: open_note_id, token: token_address, amount }
+    }
+
+    fn as_u256(amount: u128) -> u256 {
+        u256 { low: amount, high: 0 }
+    }
+
+    fn checked_token_balance(token: IERC20Dispatcher, owner: ContractAddress) -> u128 {
+        let balance = token.balance_of(owner);
+        assert(balance.high == 0, 'TOKEN_BALANCE_HIGH');
+        balance.low
+    }
+
+    fn output_note_leaf(
+        note_commitment: felt252, asset_id: felt252, amount: u128, withdraw_authority: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(OUTPUT_NOTE_LEAF_DOMAIN, note_commitment);
+        state = poseidon_hash2(state, asset_id);
+        state = poseidon_hash2(state, amount.into());
+        poseidon_hash2(state, withdraw_authority)
+    }
+
+    fn assert_admin(self: @ContractState) {
+        assert(get_caller_address() == self.admin.read(), 'UNAUTHORIZED');
+    }
+
+    fn assert_exchange(self: @ContractState) {
+        let exchange = self.exchange.read();
+        assert(!exchange.is_zero() && get_caller_address() == exchange, 'UNAUTHORIZED');
+    }
+
+    fn strk20_exit_claim_message_hash(
+        privacy_pool: ContractAddress,
+        exchange: ContractAddress,
+        asset_id: felt252,
+        token_address: ContractAddress,
+        amount: u128,
+        exit_commitment: felt252,
+        open_note_id: felt252,
+    ) -> felt252 {
+        let tx_info = get_tx_info().unbox();
+        let mut state = poseidon_hash2(STRK20_EXIT_CLAIM_DOMAIN, tx_info.chain_id);
+        state = poseidon_hash2(state, get_contract_address().into());
+        state = poseidon_hash2(state, privacy_pool.into());
+        state = poseidon_hash2(state, exchange.into());
+        state = poseidon_hash2(state, asset_id);
+        state = poseidon_hash2(state, token_address.into());
+        state = poseidon_hash2(state, amount.into());
+        state = poseidon_hash2(state, exit_commitment);
+        poseidon_hash2(state, open_note_id)
+    }
+
+    fn poseidon_hash2(x: felt252, y: felt252) -> felt252 {
+        let (result, _, _) = hades_permutation(x, y, 2);
+        result
+    }
+}

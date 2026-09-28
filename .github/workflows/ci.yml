@@ -1,0 +1,40 @@
+name: protocol ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: contracts and proof checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@ebb3d1676050bfd0971c36c1e215b5751473994d # 1.96.0
+      - name: setup scarb
+        uses: software-mansion/setup-scarb@2a96b748888e3329ee44ac9ac073d930e692b3cd # v1
+        with:
+          scarb-version: "2.18.0"
+      - name: setup starknet foundry
+        uses: foundry-rs/setup-snfoundry@16e23ddd0e2845f38727c92f4b913a7b728cda9e # v6
+        with:
+          starknet-foundry-version: "0.61.0"
+      - name: rust checks
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+      - name: cairo checks
+        run: |
+          (cd contracts && scarb fmt --check && scarb build && snforge test)
+          (cd stwo_statement && scarb fmt --check && scarb build)
+          ./scripts/exchange_vectors.sh
+          (cd proof_program && scarb fmt --check && scarb build && snforge test)
+          node ops/check-contract-event-privacy.mjs

@@ -1,0 +1,65 @@
+name: ekubo compatibility
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ekubo-integration.yml"
+      - "contracts/Scarb.lock"
+      - "contracts/Scarb.toml"
+      - "contracts/src/ekubo_abi.cairo"
+      - "contracts/src/ekubo_external_match_router.cairo"
+      - "contracts/src/erc20.cairo"
+      - "contracts/src/exchange.cairo"
+      - "contracts/tests/ekubo_fork.cairo"
+      - "contracts/tests/fixtures/exchange_fork*.txt"
+  pull_request:
+    paths:
+      - ".github/workflows/ekubo-integration.yml"
+      - "contracts/Scarb.lock"
+      - "contracts/Scarb.toml"
+      - "contracts/src/ekubo_abi.cairo"
+      - "contracts/src/ekubo_external_match_router.cairo"
+      - "contracts/src/erc20.cairo"
+      - "contracts/src/exchange.cairo"
+      - "contracts/tests/ekubo_fork.cairo"
+      - "contracts/tests/fixtures/exchange_fork*.txt"
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    name: real ekubo interface compatibility (read only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: setup scarb
+        uses: software-mansion/setup-scarb@2a96b748888e3329ee44ac9ac073d930e692b3cd # v1
+        with:
+          scarb-version: "2.18.0"
+      - name: setup starknet foundry
+        uses: foundry-rs/setup-snfoundry@16e23ddd0e2845f38727c92f4b913a7b728cda9e # v6
+        with:
+          starknet-foundry-version: "0.61.0"
+      - name: install verified universal sierra compiler
+        run: |
+          curl -sSL -o usc.tar.gz https://github.com/software-mansion/universal-sierra-compiler/releases/download/v2.10.1/universal-sierra-compiler-v2.10.1-x86_64-unknown-linux-gnu.tar.gz
+          echo "8f6d9faf2ce644faa99e2acee7e855e3fbeb7919b99ec13d29f57c08089f2fb9  usc.tar.gz" | sha256sum --check --strict
+          tar xzf usc.tar.gz
+          echo "$PWD/universal-sierra-compiler-v2.10.1-x86_64-unknown-linux-gnu/bin" >> "$GITHUB_PATH"
+      - name: run compatibility test
+        working-directory: contracts
+        run: |
+          for attempt in 1 2 3; do
+            if snforge test --include-ignored --max-threads 1 ekubo_fork; then
+              exit 0
+            fi
+            if [[ "$attempt" -eq 3 ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done

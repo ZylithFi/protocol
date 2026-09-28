@@ -1,0 +1,26 @@
+[package]
+name = "zylith_exchange_statement"
+version = "0.1.0"
+edition = "2024_07"
+
+[lib]
+sierra = true
+
+[[target.executable]]
+name = "transition"
+function = "zylith_exchange_statement::exchange::transition_executable::main"
+sierra = true
+
+[[target.executable]]
+name = "exchange_withdrawal"
+function = "zylith_exchange_statement::exchange::withdrawal_executable::main"
+
+[cairo]
+enable-gas = false
+unstable-add-statements-functions-debug-info = true
+
+[profile.dev.cairo]
+enable-gas = false
+
+[dependencies]
+cairo_execute = "=2.18.0"
