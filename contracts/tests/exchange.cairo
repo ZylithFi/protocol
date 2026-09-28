@@ -306,6 +306,22 @@ fn a_locked_exchange_cannot_silently_add_a_market() {
 }
 
 #[test]
+fn a_locked_exchange_rotates_its_online_reference_signer_only_after_pause_and_timelock() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let exchange = setup.exchange;
+    let replacement = 0x987654;
+    assert(exchange.reference_signer() != replacement, 'old signer');
+    cheat_caller_address(exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(2));
+    exchange.propose_reference_signer(replacement);
+    exchange.pause();
+    cheat_block_timestamp(exchange.contract_address, 86400, CheatSpan::TargetCalls(1));
+    cheat_caller_address(exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1));
+    exchange.execute_reference_signer();
+    assert(exchange.reference_signer() == replacement, 'new signer');
+}
+
+#[test]
 fn a_cross_settles_and_its_output_withdraws_after_the_delay() {
     let mut fixture = FixtureTrait::load("exchange_cross");
     let setup = setup(ref fixture);

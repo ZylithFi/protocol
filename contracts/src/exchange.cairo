@@ -138,6 +138,8 @@ pub trait IExchange<TContractState> {
         external_router: ContractAddress,
     );
     fn set_reference_signer(ref self: TContractState, signer: felt252);
+    fn propose_reference_signer(ref self: TContractState, signer: felt252);
+    fn execute_reference_signer(ref self: TContractState);
     fn set_objective_numeraire(ref self: TContractState, asset_id: felt252);
     fn set_timing(
         ref self: TContractState,
@@ -202,6 +204,7 @@ pub trait IExchange<TContractState> {
     fn capacity(self: @TContractState, seq: u32, pair_id: felt252, sell: bool) -> Capacity;
     fn pair_config(self: @TContractState, pair_id: felt252) -> PairConfig;
     fn protocol_fee_recipient(self: @TContractState) -> felt252;
+    fn reference_signer(self: @TContractState) -> felt252;
     fn transition_message_hash(self: @TContractState, transition_commitment: felt252) -> felt252;
     fn withdrawal_message_hash(self: @TContractState, withdrawal_commitment: felt252) -> felt252;
     fn admin_address(self: @TContractState) -> ContractAddress;
@@ -272,6 +275,7 @@ pub mod Exchange {
     const MAX_FEE_BPS: u128 = 100;
     const FEE_TIMELOCK_SECONDS: u64 = 86400;
     const RECIPIENT_TIMELOCK_SECONDS: u64 = 604800;
+    const REFERENCE_SIGNER_TIMELOCK_SECONDS: u64 = 86400;
     const MAX_REFERENCE_WINDOW_MS: u64 = 15000;
     const MAX_REFERENCE_FUTURE_SKEW_MS: u64 = 5000;
     const MIN_REFERENCE_SOURCES: u64 = 3;
@@ -303,6 +307,8 @@ pub mod Exchange {
         deposit_root_registrar: ContractAddress,
         external_router: ContractAddress,
         reference_signer: felt252,
+        pending_reference_signer: felt252,
+        pending_reference_signer_eta: u64,
         objective_numeraire: felt252,
         max_close_delay_ms: u64,
         withdrawal_delay_seconds: u64,
@@ -476,6 +482,25 @@ pub mod Exchange {
             assert_unlocked_admin(@self);
             assert(signer != 0, 'BAD_SIGNER');
             self.reference_signer.write(signer);
+        }
+
+        fn propose_reference_signer(ref self: ContractState, signer: felt252) {
+            assert_admin(@self);
+            assert(signer != 0 && signer != self.reference_signer.read(), 'BAD_SIGNER');
+            self.pending_reference_signer.write(signer);
+            self
+                .pending_reference_signer_eta
+                .write(get_block_timestamp() + REFERENCE_SIGNER_TIMELOCK_SECONDS);
+        }
+
+        fn execute_reference_signer(ref self: ContractState) {
+            assert_admin(@self);
+            assert(self.paused.read(), 'NOT_PAUSED');
+            let eta = self.pending_reference_signer_eta.read();
+            assert(eta != 0 && get_block_timestamp() >= eta, 'SIGNER_TIMELOCK');
+            self.reference_signer.write(self.pending_reference_signer.read());
+            self.pending_reference_signer.write(0);
+            self.pending_reference_signer_eta.write(0);
         }
 
         fn set_objective_numeraire(ref self: ContractState, asset_id: felt252) {
@@ -863,6 +888,10 @@ pub mod Exchange {
 
         fn protocol_fee_recipient(self: @ContractState) -> felt252 {
             self.protocol_fee_recipient.read()
+        }
+
+        fn reference_signer(self: @ContractState) -> felt252 {
+            self.reference_signer.read()
         }
 
         fn transition_message_hash(

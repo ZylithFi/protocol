@@ -9,7 +9,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTRACTS_DIR="${ROOT_DIR}/contracts"
 PROOF_PROGRAM_DIR="${ROOT_DIR}/proof_program"
 STATE_FILE="${ZYLITH_DEPLOY_STATE_FILE:-${ROOT_DIR}/.deploy/sepolia-live.json}"
-MANIFEST_TEMPLATE="${ROOT_DIR}/client/public/deployment.example.json"
+MANIFEST_TEMPLATE="${ZYLITH_MANIFEST_TEMPLATE:-${ROOT_DIR}/client/public/deployment.example.json}"
 CLIENT_MANIFEST="${ROOT_DIR}/client/public/deployment.json"
 
 RPC_URL="${ZYLITH_STARKNET_RPC_URL:?ZYLITH_STARKNET_RPC_URL is required}"
@@ -160,8 +160,14 @@ WITHDRAWAL_DELAY_SECONDS="${ZYLITH_WITHDRAWAL_DELAY_SECONDS:-120}"
 PAIR_FEE_BPS="${ZYLITH_PAIR_FEE_BPS:-4}"
 # symbol=token address for every asset the bridge custodies.
 TOKENS="${ZYLITH_TOKENS:-STRK=0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d ETH=0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7 USDC=0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343}"
-# the launch markets.
-PAIRS="${ZYLITH_PAIRS:-STRK/USDC ETH/USDC}"
+# enabled markets come from the selected manifest unless an explicit subset is requested.
+PAIRS="${ZYLITH_PAIRS:-$(python3 - "${MANIFEST_TEMPLATE}" <<'PY'
+import json, sys
+manifest = json.load(open(sys.argv[1]))
+print(" ".join(name for name, pair in manifest["product"]["pairs"].items() if pair.get("enabled")))
+PY
+)}"
+[[ -n "${PAIRS}" ]] || die "the manifest has no enabled pairs"
 # pairs whose unmatched remainder the operator routes through ekubo; empty keeps routing off.
 EXTERNAL_PAIRS="${ZYLITH_EXTERNAL_PAIRS:-}"
 # the window a capacity stays open for an external fill: nonzero exactly when a pair routes.
@@ -258,7 +264,7 @@ manifest["product"]["pairs"] = {name: {**manifest["product"]["pairs"][name], "ta
 for asset in manifest["funding"]["assets"].values():
     asset["enabled_pairs"] = [pair for pair in pairs if asset["asset_id"] in pair.split("/")]
 manifest["proof"].update({"proof_program_address": "${proof_program}", "proof_account_address": "${PROOF_ACCOUNT}", "settlement_account_address": "${SETTLEMENT_ACCOUNT}"})
-manifest["roles"] = {"protocol_fee_recipient": "${FEE_RECIPIENT}", "pause_guardian_address": "${PAUSE_GUARDIAN}"}
+manifest["roles"] = {"protocol_fee_recipient": "${FEE_RECIPIENT}", "pause_guardian_address": "${PAUSE_GUARDIAN}", "reference_price_signer": "${REFERENCE_SIGNER}"}
 manifest["runtime"].update({"max_close_delay_ms": int("${MAX_CLOSE_DELAY_MS}"), "withdrawal_delay_seconds": int("${WITHDRAWAL_DELAY_SECONDS}"), "external_window_seconds": int("${EXTERNAL_WINDOW_SECONDS}")})
 for path in (state_path, client_path):
     json.dump(manifest, open(path, "w"), indent=2)
