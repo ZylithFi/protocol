@@ -15,7 +15,7 @@ use zylith_protocol::commitment_registry::{
 use zylith_protocol::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
 use zylith_protocol::exchange::{
     CapacityEntry, IExchangeDispatcher, IExchangeDispatcherTrait, MarketAttestation, OutcomeRecord,
-    OutputRecord, ProofFacts, TransitionHeader,
+    OutputRecord, ProofFacts, ResidualRecovery, TransitionHeader,
 };
 use zylith_protocol::privacy_deposit_bridge::{
     IPrivacyDepositBridgeDispatcher, IPrivacyDepositBridgeDispatcherTrait,
@@ -73,6 +73,7 @@ struct TransitionCall {
     outcomes: Span<OutcomeRecord>,
     capacities: Span<CapacityEntry>,
     nullifiers: Span<felt252>,
+    retired_nullifiers: Span<felt252>,
     outputs: Span<OutputRecord>,
 }
 
@@ -115,6 +116,20 @@ fn read_withdrawal(ref fixture: Fixture) -> WithdrawalCall {
     }
 }
 
+fn read_residual_recovery(ref fixture: Fixture) -> (felt252, felt252, ResidualRecovery) {
+    let commitment = fixture.next();
+    let message = fixture.next();
+    let length: u32 = fixture.next().try_into().unwrap();
+    let mut calldata = array![];
+    for _ in 0..length {
+        calldata.append(fixture.next());
+    }
+    let mut span = calldata.span();
+    let recovery: ResidualRecovery = Serde::deserialize(ref span).unwrap();
+    assert(span.is_empty(), 'recovery calldata trailing');
+    (commitment, message, recovery)
+}
+
 fn proof_facts(message: felt252) -> Span<felt252> {
     let facts = ProofFacts {
         proof_version: PROOF_VERSION,
@@ -134,11 +149,15 @@ fn proof_facts(message: felt252) -> Span<felt252> {
 /// deploys the exchange at the fixture's chain context with the real bridge and registry, and
 /// replays the fixture's deposits through the privacy pool.
 fn setup(ref fixture: Fixture) -> Setup {
-    setup_with_window(ref fixture, 0)
+    setup_with_window(ref fixture, 1)
 }
 
 /// deploys and wires the exchange with an external window of `window` seconds.
 fn setup_with_window(ref fixture: Fixture, window: u64) -> Setup {
+    setup_with_timing(ref fixture, 1, window)
+}
+
+fn setup_with_timing(ref fixture: Fixture, epoch_ms: u64, window: u64) -> Setup {
     let chain_context = fixture.next();
     let signer = fixture.next();
     let proof_program = fixture.next();
@@ -172,16 +191,22 @@ fn setup_with_window(ref fixture: Fixture, window: u64) -> Setup {
     bridge.set_exchange(exchange_address);
     bridge.register_supported_asset(BASE, base_token);
     bridge.register_supported_asset(QUOTE, quote_token);
-    cheat_caller_address(exchange_address, address(ADMIN), CheatSpan::TargetCalls(10));
+    cheat_caller_address(exchange_address, address(ADMIN), CheatSpan::TargetCalls(12));
     exchange.set_settlement_account(address(SETTLEMENT));
     exchange.set_proof_program(address(proof_program), VIRTUAL_PROGRAM_HASH);
     exchange.set_proof_validation(PROOF_VERSION, OS_CONFIG_HASH, 450);
     exchange.set_custody(bridge_address, registry_address, address(ROUTER));
     exchange.set_reference_signer(signer);
     exchange.set_objective_numeraire(QUOTE);
+    exchange.set_market_registry_hash(1, 2);
     exchange.register_pair(PAIR, BASE, QUOTE, 30);
+    exchange.set_pair_external_support(PAIR, if window == 0 {
+        0
+    } else {
+        1
+    });
     exchange.set_protocol_fee_recipient(FEE_RECIPIENT);
-    exchange.set_timing(60000, 120, window);
+    exchange.set_timing(epoch_ms, 60000, 120, window);
     exchange.lock_config();
 
     let deposit_count: u32 = fixture.next().try_into().unwrap();
@@ -213,6 +238,181 @@ fn setup_with_window(ref fixture: Fixture, window: u64) -> Setup {
     Setup { exchange, bridge, pool, base_token, quote_token }
 }
 
+#[test]
+#[should_panic(expected: 'UNALIGNED_CLOSE')]
+fn a_transition_close_must_be_on_the_configured_epoch_boundary() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup_with_timing(ref fixture, 6, 0);
+    let _ = read_withdrawal(ref fixture);
+    let (_, message, call) = read_transition(ref fixture);
+    submit(@setup, message, @call, 11);
+}
+
+#[test]
+#[should_panic(expected: 'FUTURE_CLOSE')]
+fn a_transition_cannot_settle_before_its_declared_close() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let _ = read_withdrawal(ref fixture);
+    let (_, message, call) = read_transition(ref fixture);
+    submit(@setup, message, @call, 10);
+}
+
+#[test]
+fn withdrawals_remain_available_while_trading_is_paused() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let withdrawal = read_withdrawal(ref fixture);
+    cheat_caller_address(
+        setup.exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1),
+    );
+    setup.exchange.pause();
+    request(@setup, withdrawal, 11);
+    cheat_block_timestamp(setup.exchange.contract_address, 131, CheatSpan::TargetCalls(1));
+    setup.exchange.finalize_withdrawal(withdrawal.nullifier);
+    assert(setup.exchange.nullifier_state(withdrawal.nullifier) == 3, 'exit completed');
+}
+
+#[test]
+#[should_panic(expected: 'NO_PENDING_RECOVERY')]
+fn a_regular_withdrawal_cannot_be_consumed_by_the_residual_finalizer() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let withdrawal = read_withdrawal(ref fixture);
+    request(@setup, withdrawal, 11);
+    cheat_block_timestamp(setup.exchange.contract_address, 131, CheatSpan::TargetCalls(1));
+    setup.exchange.finalize_residual_recovery(withdrawal.nullifier);
+}
+
+#[test]
+#[should_panic(expected: 'NO_PENDING_WITHDRAWAL')]
+fn a_residual_recovery_cannot_be_consumed_by_the_regular_finalizer() {
+    let mut fixture = FixtureTrait::load("exchange_residual_recovery");
+    let setup = setup(ref fixture);
+    let (_, transition_message, transition) = read_transition(ref fixture);
+    submit(@setup, transition_message, @transition, 11);
+    let (_, recovery_message, recovery) = read_residual_recovery(ref fixture);
+    cheat_proof_facts(
+        setup.exchange.contract_address, proof_facts(recovery_message), CheatSpan::TargetCalls(1),
+    );
+    cheat_block_number(setup.exchange.contract_address, 100, CheatSpan::TargetCalls(1));
+    cheat_block_timestamp(setup.exchange.contract_address, 12, CheatSpan::TargetCalls(1));
+    setup.exchange.request_residual_recovery(recovery);
+    cheat_block_timestamp(setup.exchange.contract_address, 132, CheatSpan::TargetCalls(1));
+    setup.exchange.finalize_withdrawal(recovery.nullifier);
+}
+
+#[test]
+fn a_resting_order_recovers_permissionlessly_and_only_once() {
+    let mut fixture = FixtureTrait::load("exchange_residual_recovery");
+    let setup = setup(ref fixture);
+    let (_, transition_message, transition) = read_transition(ref fixture);
+    submit(@setup, transition_message, @transition, 11);
+    let (commitment, recovery_message, recovery) = read_residual_recovery(ref fixture);
+    assert(
+        setup.exchange.residual_recovery_message_hash(commitment) == recovery_message,
+        'recovery message',
+    );
+    cheat_proof_facts(
+        setup.exchange.contract_address, proof_facts(recovery_message), CheatSpan::TargetCalls(1),
+    );
+    cheat_block_number(setup.exchange.contract_address, 100, CheatSpan::TargetCalls(1));
+    cheat_block_timestamp(setup.exchange.contract_address, 12, CheatSpan::TargetCalls(1));
+    setup.exchange.request_residual_recovery(recovery);
+    assert(setup.exchange.nullifier_state(recovery.nullifier) == 2, 'recovery pending');
+    let escrow_before = setup.bridge.escrowed_asset_amount(recovery.input_asset_id);
+    let _ = read_transition(ref fixture);
+    let (_, retirement_message, retirement) = read_transition(ref fixture);
+    submit(@setup, retirement_message, @retirement, 133);
+    assert(setup.exchange.book_root() == retirement.header.new_book_root, 'recovery retired');
+    assert(setup.exchange.nullifier_state(recovery.nullifier) == 2, 'recovery still pending');
+    cheat_block_timestamp(setup.exchange.contract_address, 133, CheatSpan::TargetCalls(1));
+    setup.exchange.finalize_residual_recovery(recovery.nullifier);
+    assert(setup.exchange.nullifier_state(recovery.nullifier) == 3, 'recovery exited');
+    assert(
+        setup.bridge.escrowed_asset_amount(recovery.input_asset_id) == escrow_before
+            - recovery.input_amount,
+        'recovery escrow released',
+    );
+    assert(
+        setup.bridge.pending_exit_asset_amount(recovery.input_asset_id) == recovery.input_amount,
+        'recovery remains a liability',
+    );
+}
+
+#[test]
+#[should_panic(expected: 'NULLIFIER_USED')]
+fn duplicate_residual_recovery_submission_is_rejected() {
+    let mut fixture = FixtureTrait::load("exchange_residual_recovery");
+    let setup = setup(ref fixture);
+    let (_, transition_message, transition) = read_transition(ref fixture);
+    submit(@setup, transition_message, @transition, 11);
+    let (_, recovery_message, recovery) = read_residual_recovery(ref fixture);
+    cheat_proof_facts(
+        setup.exchange.contract_address, proof_facts(recovery_message), CheatSpan::TargetCalls(1),
+    );
+    cheat_block_number(setup.exchange.contract_address, 100, CheatSpan::TargetCalls(1));
+    cheat_block_timestamp(setup.exchange.contract_address, 12, CheatSpan::TargetCalls(1));
+    setup.exchange.request_residual_recovery(recovery);
+    setup.exchange.request_residual_recovery(recovery);
+}
+
+#[test]
+#[should_panic(expected: 'BAD_PROOF_MSG')]
+fn a_changed_residual_recovery_fee_is_not_the_proven_recovery() {
+    let mut fixture = FixtureTrait::load("exchange_residual_recovery");
+    let setup = setup(ref fixture);
+    let (_, transition_message, transition) = read_transition(ref fixture);
+    submit(@setup, transition_message, @transition, 11);
+    let (_, recovery_message, recovery) = read_residual_recovery(ref fixture);
+    let recovery = ResidualRecovery { fee_amount: recovery.fee_amount + 1, ..recovery };
+    cheat_proof_facts(
+        setup.exchange.contract_address, proof_facts(recovery_message), CheatSpan::TargetCalls(1),
+    );
+    cheat_block_number(setup.exchange.contract_address, 100, CheatSpan::TargetCalls(1));
+    cheat_block_timestamp(setup.exchange.contract_address, 12, CheatSpan::TargetCalls(1));
+    setup.exchange.request_residual_recovery(recovery);
+}
+
+#[test]
+#[should_panic(expected: 'NO_PENDING_EXIT')]
+fn a_transition_winning_the_race_voids_a_pending_residual_recovery() {
+    let mut fixture = FixtureTrait::load("exchange_residual_recovery");
+    let setup = setup(ref fixture);
+    let (_, transition_message, transition) = read_transition(ref fixture);
+    submit(@setup, transition_message, @transition, 11);
+    let (_, recovery_message, recovery) = read_residual_recovery(ref fixture);
+    cheat_proof_facts(
+        setup.exchange.contract_address, proof_facts(recovery_message), CheatSpan::TargetCalls(1),
+    );
+    cheat_block_number(setup.exchange.contract_address, 100, CheatSpan::TargetCalls(1));
+    cheat_block_timestamp(setup.exchange.contract_address, 12, CheatSpan::TargetCalls(1));
+    setup.exchange.request_residual_recovery(recovery);
+    let (_, cancellation_message, cancellation) = read_transition(ref fixture);
+    submit(@setup, cancellation_message, @cancellation, 13);
+    assert(setup.exchange.nullifier_state(recovery.nullifier) == 1, 'recovery preempted');
+    cheat_block_timestamp(setup.exchange.contract_address, 133, CheatSpan::TargetCalls(1));
+    setup.exchange.finalize_residual_recovery(recovery.nullifier);
+}
+
+#[test]
+#[should_panic(expected: 'EXIT_AFTER_CUTOFF')]
+fn an_epoch_closing_after_a_residual_recovery_request_cannot_preempt_it() {
+    let mut fixture = FixtureTrait::load("exchange_residual_recovery");
+    let setup = setup(ref fixture);
+    let (_, transition_message, transition) = read_transition(ref fixture);
+    submit(@setup, transition_message, @transition, 11);
+    let (_, recovery_message, recovery) = read_residual_recovery(ref fixture);
+    cheat_proof_facts(
+        setup.exchange.contract_address, proof_facts(recovery_message), CheatSpan::TargetCalls(1),
+    );
+    cheat_block_number(setup.exchange.contract_address, 100, CheatSpan::TargetCalls(1));
+    cheat_block_timestamp(setup.exchange.contract_address, 11, CheatSpan::TargetCalls(1));
+    setup.exchange.request_residual_recovery(recovery);
+    let (_, cancellation_message, cancellation) = read_transition(ref fixture);
+    submit(@setup, cancellation_message, @cancellation, 13);
+}
+
 fn submit(setup: @Setup, message: felt252, call: @TransitionCall, timestamp: u64) {
     let exchange = *setup.exchange;
     cheat_block_number(exchange.contract_address, 100, CheatSpan::TargetCalls(1));
@@ -226,6 +426,7 @@ fn submit(setup: @Setup, message: felt252, call: @TransitionCall, timestamp: u64
             *call.outcomes,
             *call.capacities,
             *call.nullifiers,
+            *call.retired_nullifiers,
             *call.outputs,
         );
 }
@@ -306,6 +507,29 @@ fn a_locked_exchange_cannot_silently_add_a_market() {
 }
 
 #[test]
+#[should_panic(expected: 'CONFIG_LOCKED')]
+fn a_locked_exchange_cannot_change_the_registry_identity() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    cheat_caller_address(
+        setup.exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1),
+    );
+    setup.exchange.set_market_registry_hash(3, 4);
+}
+
+#[test]
+fn configured_markets_and_assets_are_enumerable_without_hidden_extras() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    assert(setup.exchange.pair_count() == 1, 'pair count');
+    assert(setup.exchange.pair_id_at(0) == PAIR, 'pair id');
+    assert(setup.exchange.objective_numeraire() == QUOTE, 'numeraire');
+    assert(setup.bridge.supported_asset_count() == 2, 'asset count');
+    assert(setup.bridge.supported_asset_id_at(0) == BASE, 'base asset');
+    assert(setup.bridge.supported_asset_id_at(1) == QUOTE, 'quote asset');
+}
+
+#[test]
 fn a_locked_exchange_rotates_its_online_reference_signer_only_after_pause_and_timelock() {
     let mut fixture = FixtureTrait::load("exchange_cross");
     let setup = setup(ref fixture);
@@ -342,6 +566,11 @@ fn a_cross_settles_and_its_output_withdraws_after_the_delay() {
     submit(@setup, message, @call, 11);
     assert(exchange.transition_seq() == 1, 'seq');
     assert(exchange.book_root() == call.header.new_book_root, 'book root');
+    assert(exchange.note_batch_count() == 3, 'note batches');
+    assert(exchange.note_batch_root(2) == call.header.output_root, 'transition output root');
+    let roots = exchange.note_batch_roots(0, 2);
+    assert(roots.len() == 3, 'note root range');
+    assert(*roots.at(2) == call.header.output_root, 'range output root');
     assert(exchange.nullifier_state(raced.nullifier) == 1, 'transition won');
     for nullifier in call.nullifiers {
         assert(exchange.nullifier_state(*nullifier) == 1, 'nullifier spent');
@@ -380,6 +609,17 @@ fn a_voided_exit_cannot_finalize() {
 }
 
 #[test]
+#[should_panic(expected: 'EXIT_AFTER_CUTOFF')]
+fn an_epoch_closing_after_a_note_withdrawal_request_cannot_admit_it() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let raced = read_withdrawal(ref fixture);
+    let (_, message, call) = read_transition(ref fixture);
+    request(@setup, raced, 5);
+    submit(@setup, message, @call, 11);
+}
+
+#[test]
 #[should_panic(expected: 'EXIT_NOT_MATURE')]
 fn an_exit_waits_for_the_delay() {
     let mut fixture = FixtureTrait::load("exchange_cross");
@@ -413,7 +653,15 @@ fn a_changed_output_is_not_the_proven_transition() {
         outputs.append(*output);
     }
     let first = *outputs.at(0);
-    let mut changed = array![OutputRecord { leaf: first.leaf + 1, enc: first.enc }];
+    let mut changed = array![
+        OutputRecord {
+            leaf: first.leaf + 1,
+            enc: first.enc,
+            enc_remaining: first.enc_remaining,
+            enc_reserved: first.enc_reserved,
+            enc_reserved_offset: first.enc_reserved_offset,
+        },
+    ];
     for index in 1..outputs.len() {
         changed.append(*outputs.at(index));
     }
@@ -458,9 +706,18 @@ fn an_external_capacity_opens_and_its_outcome_applies_next() {
             && capacity.total == 10,
         'capacity open',
     );
-    submit(@setup, apply_message, @apply, 12);
+    submit(@setup, apply_message, @apply, 13);
     assert(exchange.capacity(1, PAIR, true).status == 3, 'outcome applied');
     assert(exchange.transition_seq() == 2, 'seq');
+}
+
+#[test]
+#[should_panic(expected: 'EXTERNAL_DISABLED')]
+fn an_external_capacity_needs_a_window_and_settlement_support() {
+    let mut fixture = FixtureTrait::load("exchange_external");
+    let setup = setup_with_timing(ref fixture, 1, 0);
+    let (_, reserve_message, reserve) = read_transition(ref fixture);
+    submit(@setup, reserve_message, @reserve, 11);
 }
 
 #[test]
@@ -486,7 +743,7 @@ fn a_freeze_is_a_versioned_cutoff_and_releases_the_remainder_to_the_next_transit
 
     // the fixture applies the firm nine-base fill. it may do so before the 60-second window,
     // while the one-base remainder has returned to the private book for this same auction.
-    submit(@setup, apply_message, @apply, 12);
+    submit(@setup, apply_message, @apply, 13);
     assert(exchange.capacity(1, PAIR, true).status == 3, 'outcome applied');
 }
 
@@ -561,7 +818,7 @@ fn a_filled_capacity_changes_the_outcome_the_next_transition_must_apply() {
     assert(setup.bridge.escrowed_asset_amount(QUOTE) == 606, 'quote escrowed');
 
     // the zero outcome built before the fill no longer matches the chain.
-    submit(@setup, apply_message, @apply, 12);
+    submit(@setup, apply_message, @apply, 13);
 }
 
 /// the router's side of one fill of the sell capacity at m1 = 101: it pays the quote and the
@@ -615,7 +872,7 @@ fn a_capacity_fills_in_parts_and_its_orders_share_the_average_price() {
     assert(setup.bridge.escrowed_asset_amount(BASE) == 1, 'unfilled base kept');
 
     // after the window the next transition applies the totals at their average price.
-    submit(@setup, apply_message, @apply, 12);
+    submit(@setup, apply_message, @apply, 13);
     assert(exchange.capacity(1, PAIR, true).status == 3, 'outcome applied');
     assert(exchange.transition_seq() == 2, 'seq');
 }
@@ -662,6 +919,37 @@ fn a_used_up_capacity_settles_at_the_next_transition_without_waiting_for_its_win
     // a second later, well inside the 60 second window.
     submit(@setup, apply_message, @apply, 12);
     assert(exchange.capacity(1, PAIR, true).status == 3, 'outcome applied');
+}
+
+#[test]
+fn external_recovery_stages_both_the_user_output_and_the_protocol_fee() {
+    let mut fixture = FixtureTrait::load("exchange_external_full");
+    let setup = setup_with_window(ref fixture, 60);
+    let (_, reserve_message, reserve) = read_transition(ref fixture);
+    let _ = read_transition(ref fixture);
+    let m1 = read_attestation(ref fixture);
+    let (_, recovery_message, recovery) = read_residual_recovery(ref fixture);
+    let (_, retire_message, retire) = read_transition(ref fixture);
+    submit(@setup, reserve_message, @reserve, 11);
+    fill(@setup, 10, m1);
+
+    cheat_proof_facts(
+        setup.exchange.contract_address, proof_facts(recovery_message), CheatSpan::TargetCalls(1),
+    );
+    cheat_block_number(setup.exchange.contract_address, 100, CheatSpan::TargetCalls(1));
+    cheat_block_timestamp(setup.exchange.contract_address, 12, CheatSpan::TargetCalls(1));
+    setup.exchange.request_residual_recovery(recovery);
+    let pending = setup.exchange.pending_residual_exit(recovery.nullifier);
+    assert(recovery.output_amount == 1006 && recovery.fee_amount == 4, 'recovery split');
+    assert(pending.fee_amount == recovery.fee_amount, 'fee liability recorded');
+
+    submit(@setup, retire_message, @retire, 133);
+    assert(setup.exchange.capacity(1, PAIR, true).status == 3, 'outcome retired');
+    assert(setup.exchange.nullifier_state(recovery.nullifier) == 2, 'recovery still pending');
+    cheat_block_timestamp(setup.exchange.contract_address, 133, CheatSpan::TargetCalls(1));
+    setup.exchange.finalize_residual_recovery(recovery.nullifier);
+    assert(setup.bridge.escrowed_asset_amount(QUOTE) == 0, 'quote fully allocated');
+    assert(setup.bridge.pending_exit_asset_amount(QUOTE) == 1010, 'no duplicate allocation');
 }
 
 #[test]

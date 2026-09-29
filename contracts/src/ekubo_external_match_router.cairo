@@ -188,13 +188,20 @@ pub mod EkuboExternalMatchRouter {
             assert(base_after == execution.base_balance_before, 'BASE_BALANCE_DELTA');
             assert(quote_after >= execution.quote_balance_before, 'QUOTE_BALANCE_LOSS');
             let profit = quote_after - execution.quote_balance_before;
-            assert(profit >= execution.minimum_profit_quote, 'PROFIT_TOO_LOW');
-            if profit != 0 {
+            let exchange = IExchangeDispatcher { contract_address: execution.exchange };
+            let support = exchange.pair_config(execution.pair_id).external_settlement_support_quote;
+            assert(support != 0, 'SUPPORT_UNSET');
+            let required: u256 = support.into() + execution.minimum_profit_quote.into();
+            assert(profit.into() >= required, 'PROFIT_TOO_LOW');
+            IERC20Dispatcher { contract_address: quote_token }
+                .transfer(exchange.settlement_account(), support.into());
+            let searcher_profit = profit - support;
+            if searcher_profit != 0 {
                 IERC20Dispatcher { contract_address: quote_token }
-                    .transfer(execution.initiator, profit.into());
+                    .transfer(execution.initiator, searcher_profit.into());
             }
             let mut output = array![];
-            Serde::serialize(@profit, ref output);
+            Serde::serialize(@searcher_profit, ref output);
             output.span()
         }
     }

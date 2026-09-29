@@ -9,6 +9,7 @@ use zylith_proof_program::{IExchangeProofProgramDispatcher, IExchangeProofProgra
 
 const TRANSITION_MESSAGE_DOMAIN: felt252 = 'zylith_transition_msg_v1';
 const WITHDRAWAL_MESSAGE_DOMAIN: felt252 = 'zylith_withdraw_msg_v1';
+const RESIDUAL_RECOVERY_MESSAGE_DOMAIN: felt252 = 'zylith_res_recover_msg_v1';
 
 fn poseidon2(x: felt252, y: felt252) -> felt252 {
     let (result, _, _) = hades_permutation(x, y, 2);
@@ -67,6 +68,19 @@ fn a_withdrawal_emits_its_bound_message() {
     );
 }
 
+#[test]
+fn a_residual_recovery_emits_its_bound_message() {
+    let program = deploy();
+    let (exchange, commitment, witness) = fixture("residual_recovery");
+    let message = program.compile_residual_recovery_proof(exchange, witness);
+    assert(
+        message == expected_message(
+            program.contract_address, RESIDUAL_RECOVERY_MESSAGE_DOMAIN, exchange, commitment,
+        ),
+        'recovery message',
+    );
+}
+
 fn with_felt_changed(witness: Span<felt252>, target: u32) -> Span<felt252> {
     let mut changed = array![];
     let mut index: u32 = 0;
@@ -82,17 +96,17 @@ fn with_felt_changed(witness: Span<felt252>, target: u32) -> Span<felt252> {
 }
 
 #[test]
-fn a_changed_padding_is_a_different_transition() {
+#[should_panic]
+fn attacker_chosen_padding_is_rejected() {
     let program = deploy();
-    let (exchange, commitment, witness) = fixture("transition_cross");
-    let message = program
-        .compile_transition_proof(exchange, with_felt_changed(witness, witness.len() - 1));
-    assert(
-        message != expected_message(
-            program.contract_address, TRANSITION_MESSAGE_DOMAIN, exchange, commitment,
-        ),
-        'padding is committed',
-    );
+    let (exchange, _, witness) = fixture("transition_cross");
+    // padding is no longer accepted as witness input; an appended attacker value is trailing data.
+    let mut changed = array![];
+    for value in witness {
+        changed.append(*value);
+    }
+    changed.append(0x1234);
+    program.compile_transition_proof(exchange, changed.span());
 }
 
 #[test]

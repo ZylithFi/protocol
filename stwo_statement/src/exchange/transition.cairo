@@ -17,11 +17,11 @@ use super::certificate::{
     precision_allowance,
 };
 use super::common::{
-    PairSponge, PairSpongeTrait, SpongeTrait, TWO_POW_120, TWO_POW_128, TWO_POW_160, TWO_POW_48,
-    TWO_POW_64, assert_nonnegative, felt_div_rem, felt_lt, next, next_bool, next_u128, next_u32,
-    next_u64, note_commitment, note_nullifier, output_note_leaf, output_tree_root, padded_len,
-    poseidon2, read_membership_root, shift_ceil_64, sponge3, sponge4, sponge5, sponge6, sponge7,
-    u128_of,
+    PairSpongeTrait, RESIDUAL_NOTE_LEAF_DOMAIN, Sponge, SpongeTrait, TWO_POW_120, TWO_POW_128,
+    TWO_POW_160, TWO_POW_48, TWO_POW_64, assert_nonnegative, felt_div_rem, felt_lt, next, next_bool,
+    next_u128, next_u32, next_u64, note_commitment, note_nullifier, output_note_leaf,
+    output_tree_root, padded_len, poseidon2, read_membership_root, residual_note_commitment,
+    shift_ceil_64, sponge3, sponge4, sponge5, sponge6, sponge7, u128_of,
 };
 
 pub const STATEMENT_TYPE_TRANSITION: felt252 = 14;
@@ -35,12 +35,22 @@ const M0_DOMAIN: felt252 = 'zylith_m0_v1';
 const OUTCOMES_DOMAIN: felt252 = 'zylith_outcomes_v1';
 const CAPACITY_DOMAIN: felt252 = 'zylith_capacity_v1';
 const NULLIFIERS_DOMAIN: felt252 = 'zylith_nullifiers_v1';
+const RETIRED_NULLIFIERS_DOMAIN: felt252 = 'zylith_retired_v1';
 const OUTPUTS_DOMAIN: felt252 = 'zylith_outputs_v1';
 const OUTPUT_BLINDING_DOMAIN: felt252 = 'zylith_out_blind_v1';
+const OUTPUT_AUX_BLINDING_DOMAIN: felt252 = 'zylith_out_aux_v1';
 const TRANSITION_DOMAIN: felt252 = 'zylith_transition_v1';
+const PADDING_DOMAIN: felt252 = 'zylith_pad_v1';
+const OUTPUT_LEAF_PADDING_DOMAIN: felt252 = 'output_leaf';
+const OUTPUT_ENC_PADDING_DOMAIN: felt252 = 'output_enc';
+const OUTPUT_REMAINING_PADDING_DOMAIN: felt252 = 'output_remaining';
+const OUTPUT_RESERVED_PADDING_DOMAIN: felt252 = 'output_reserved';
+const OUTPUT_OFFSET_PADDING_DOMAIN: felt252 = 'output_offset';
+const NULLIFIER_PADDING_DOMAIN: felt252 = 'nullifier';
 const OUTPUT_KIND_PROCEEDS: felt252 = 1;
 const OUTPUT_KIND_REFUND: felt252 = 2;
 const OUTPUT_KIND_FEE: felt252 = 3;
+const OUTPUT_KIND_RESIDUAL: felt252 = 4;
 const MAX_ASSETS: u32 = 8;
 const MAX_MARKETS: u32 = 8;
 const MAX_FUNDING_NOTES: u32 = 4;
@@ -50,10 +60,11 @@ const MIN_OUTPUT_BUCKET: u32 = 16;
 const MIN_NULLIFIER_BUCKET: u32 = 8;
 const MAX_BOOK_ORDERS: u32 = 1024;
 const MAX_ORDER_AMOUNT: u128 = 0x3fffffffffffffffffffffffffff;
-const TOLERANCE_UNITS: felt252 = 10;
+const TOLERANCE_UNITS: felt252 = 3;
 const REMOVAL_NONE: u32 = 0;
 const REMOVAL_CANCEL: u32 = 1;
 const REMOVAL_EXPIRE: u32 = 2;
+const REMOVAL_RECOVERED: u32 = 3;
 const DISPOSITION_NONE: u32 = 0;
 
 #[derive(Copy, Drop)]
@@ -106,15 +117,17 @@ struct SlotTotals {
 /// what the order loops carry: kept small, since every loop iteration passes it along.
 #[derive(Destruct)]
 struct State {
-    prior_book: PairSponge,
-    new_book: PairSponge,
-    outputs: PairSponge,
+    prior_book: Sponge,
+    new_book: Sponge,
+    outputs: Sponge,
     nullifiers: felt252,
+    retired_nullifiers: felt252,
     leaves: Array<felt252>,
     prior_count: u32,
     new_count: u32,
     output_count: u32,
     nullifier_count: u32,
+    retired_nullifier_count: u32,
     outcome_left: Felt252Dict<felt252>,
     outcome_user_quote: Felt252Dict<felt252>,
 }
@@ -125,6 +138,7 @@ struct Settled {
     remaining: felt252,
     funding: felt252,
     reserved: felt252,
+    reserved_offset: felt252,
     reserved_seq: felt252,
     proceeds: felt252,
     refund: felt252,
@@ -140,10 +154,19 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
     let fee_recipient = next(ref data);
     // private: blinds the fee notes' published amounts.
     let fee_key = next(ref data);
+    // private: derives every harmless padding value inside the proof.
+    let padding_seed = next(ref data);
     let note_root = next(ref data);
     let claimed_prior_book_root = next(ref data);
     let seq_u32 = u128_of(seq, 'EX_SEQ');
-    assert(chain_context != 0 && fee_recipient != 0 && fee_key != 0 && seq_u32 != 0, 'EX_HEADER');
+    assert(
+        chain_context != 0
+            && fee_recipient != 0
+            && fee_key != 0
+            && padding_seed != 0
+            && seq_u32 != 0,
+        'EX_HEADER',
+    );
     assert(seq_u32 < 0x100000000, 'EX_SEQ');
     let close_time: u64 = close_time_felt.try_into().expect('EX_CLOSE');
     assert(close_time != 0 && close_time < TWO_POW_48, 'EX_CLOSE');
@@ -222,18 +245,23 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
     let mut outcome_sponge = SpongeTrait::new();
     outcome_sponge.absorb(OUTCOMES_DOMAIN);
     let mut state = State {
-        prior_book: PairSpongeTrait::start(BOOK_DOMAIN, chain_context),
-        new_book: PairSpongeTrait::start(BOOK_DOMAIN, chain_context),
-        outputs: PairSpongeTrait::start(OUTPUTS_DOMAIN, chain_context),
+        prior_book: SpongeTrait::new(),
+        new_book: SpongeTrait::new(),
+        outputs: SpongeTrait::new(),
         nullifiers: poseidon2(NULLIFIERS_DOMAIN, chain_context),
+        retired_nullifiers: poseidon2(RETIRED_NULLIFIERS_DOMAIN, chain_context),
         leaves: array![],
         prior_count: 0,
         new_count: 0,
         output_count: 0,
         nullifier_count: 0,
+        retired_nullifier_count: 0,
         outcome_left: Default::default(),
         outcome_user_quote: Default::default(),
     };
+    state.prior_book.absorb_pair(BOOK_DOMAIN, chain_context);
+    state.new_book.absorb_pair(BOOK_DOMAIN, chain_context);
+    state.outputs.absorb_pair(OUTPUTS_DOMAIN, chain_context);
     for index in 0..outcome_count {
         let outcome_seq = next(ref data);
         let outcome_seq_u = u128_of(outcome_seq, 'EX_OUTCOME_SEQ');
@@ -360,16 +388,20 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
     let slots = slots.span();
     assert(state.new_count <= MAX_BOOK_ORDERS, 'EX_BOOK_FULL');
 
-    // a tolerance allowance may not turn a wholly skipped direct cross into rounding dust.
+    // a partially cleared market may retain only the three explicit integer rounding envelopes
+    // per participant. a zero-fill allocation may never use that allowance.
     let mut index: u32 = 0;
     while index != market_count {
         let buys = *slots.at(index * 2);
         let sells = *slots.at(index * 2 + 1);
+        let buy_residual = buys.capacity - buys.filled_base;
+        let sell_residual = sells.capacity - sells.filled_base;
+        let direct_dust = (buys.participants + sells.participants) * TOLERANCE_UNITS;
         assert(
-            !felt_lt(buys.filled_base, buys.capacity)
-                || !felt_lt(sells.filled_base, sells.capacity)
-                || buys.filled_base != 0
-                || sells.filled_base != 0,
+            buy_residual == 0
+                || sell_residual == 0
+                || (!felt_lt(direct_dust, buy_residual) || !felt_lt(direct_dust, sell_residual))
+                && (buys.filled_base != 0 || sells.filled_base != 0),
             'EX_DIRECT_RESIDUAL',
         );
         index += 1;
@@ -462,34 +494,54 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
             );
             let leaf = output_note_leaf(commitment, asset_id, fee, fee_recipient);
             state.leaves.append(leaf);
-            state.outputs.absorb_pair(leaf, fee + blinding);
+            absorb_output_record(
+                ref state.outputs,
+                leaf,
+                fee + blinding,
+                sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 1),
+                sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 2),
+                sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 3),
+            );
             state.output_count += 1;
         }
         asset_index += 1;
     }
 
-    // padding: the output list and the nullifier list hide their real sizes.
+    // padding is derived in-proof from a private seed. the operator cannot substitute a
+    // spendable leaf or a user's nullifier while the published list sizes stay hidden.
     let output_total = padded_len(state.output_count, MIN_OUTPUT_BUCKET);
-    for _ in state.output_count..output_total {
-        let leaf = next(ref data);
-        let enc = next(ref data);
+    for index in state.output_count..output_total {
+        let leaf = padding_value(padding_seed, OUTPUT_LEAF_PADDING_DOMAIN, index);
+        let enc = padding_value(padding_seed, OUTPUT_ENC_PADDING_DOMAIN, index);
+        let enc_remaining = padding_value(padding_seed, OUTPUT_REMAINING_PADDING_DOMAIN, index);
+        let enc_reserved = padding_value(padding_seed, OUTPUT_RESERVED_PADDING_DOMAIN, index);
+        let enc_offset = padding_value(padding_seed, OUTPUT_OFFSET_PADDING_DOMAIN, index);
         state.leaves.append(leaf);
-        state.outputs.absorb_pair(leaf, enc);
+        absorb_output_record(ref state.outputs, leaf, enc, enc_remaining, enc_reserved, enc_offset);
     }
-    let outputs_commitment = state.outputs.finish_odd(output_total.into());
+    state.outputs.absorb(output_total.into());
+    let outputs_commitment = state.outputs.finish();
     let nullifier_total = padded_len(state.nullifier_count, MIN_NULLIFIER_BUCKET);
     let mut nullifiers = state.nullifiers;
-    for _ in state.nullifier_count..nullifier_total {
-        nullifiers = poseidon2(nullifiers, next(ref data));
+    for index in state.nullifier_count..nullifier_total {
+        nullifiers =
+            poseidon2(nullifiers, padding_value(padding_seed, NULLIFIER_PADDING_DOMAIN, index));
     }
     let nullifiers_commitment = poseidon2(nullifiers, nullifier_total.into());
+    let retired_nullifiers_commitment = poseidon2(
+        state.retired_nullifiers, state.retired_nullifier_count.into(),
+    );
     assert(data.len() == 0, 'EX_TRAILING');
 
     assert(
-        state.prior_book.finish_odd(state.prior_count.into()) == claimed_prior_book_root,
+        {
+            state.prior_book.absorb(state.prior_count.into());
+            state.prior_book.finish()
+        } == claimed_prior_book_root,
         'EX_PRIOR_BOOK',
     );
-    let new_book_root = state.new_book.finish_odd(state.new_count.into());
+    state.new_book.absorb(state.new_count.into());
+    let new_book_root = state.new_book.finish();
     let capacity_commitment = capacities.finish_odd(capacity_count.into());
     let output_root = output_tree_root(state.leaves.span());
 
@@ -499,9 +551,15 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
     commitment.absorb_pair(claimed_prior_book_root, new_book_root);
     commitment.absorb_pair(note_root, markets_commitment);
     commitment.absorb_pair(outcomes_commitment, capacity_commitment);
-    commitment.absorb_pair(nullifiers_commitment, outputs_commitment);
+    commitment.absorb_pair(nullifiers_commitment, retired_nullifiers_commitment);
+    commitment.absorb(outputs_commitment);
     commitment.absorb_pair(output_root, fee_recipient);
     commitment.finish()
+}
+
+#[inline(always)]
+fn padding_value(seed: felt252, domain: felt252, index: u32) -> felt252 {
+    sponge4(PADDING_DOMAIN, seed, domain, index.into())
 }
 
 fn find_market(markets: Span<Market>, pair_id: felt252) -> Option<u32> {
@@ -598,21 +656,26 @@ fn leaf_p3(reserved: felt252, reserved_seq: felt252, expiry: felt252) -> felt252
 
 #[inline(always)]
 fn absorb_leaf(
-    ref sponge: PairSponge,
+    ref sponge: Sponge,
     pair_id: felt252,
     p1: felt252,
     p2: felt252,
     p3: felt252,
     owner_digest: felt252,
     order_id: felt252,
+    reserved_offset: felt252,
+    residual_commitment: felt252,
+    residual_generation: felt252,
 ) {
     sponge.absorb_pair(pair_id, p1);
     sponge.absorb_pair(p2, p3);
     sponge.absorb_pair(owner_digest, order_id);
+    sponge.absorb_pair(reserved_offset, residual_commitment);
+    sponge.absorb(residual_generation);
 }
 
 /// reads a book leaf; the range checks give each packed field exactly one opening.
-/// an existing order's fixed 18-felt record: its book leaf and this transition's witness. the
+/// an existing order's fixed 21-felt record: its book leaf and this transition's witness. the
 /// range checks give each packed leaf field exactly one opening.
 #[derive(Copy, Drop)]
 struct Record {
@@ -621,10 +684,13 @@ struct Record {
     limit: u128,
     funding: felt252,
     reserved: felt252,
+    reserved_offset: felt252,
     reserved_seq: felt252,
     expiry: felt252,
     owner_digest: felt252,
     order_id: felt252,
+    residual_commitment: felt252,
+    residual_generation: felt252,
     outcome_plus_one: u32,
     removal: u32,
     cancel_r: felt252,
@@ -638,17 +704,20 @@ struct Record {
 
 #[inline(always)]
 fn read_record(ref data: Span<felt252>) -> Record {
-    let boxed = data.multi_pop_front::<18>().expect('EX_SHORT');
+    let boxed = data.multi_pop_front::<21>().expect('EX_SHORT');
     let [
         external,
         remaining,
         limit,
         funding,
         reserved,
+        reserved_offset,
         reserved_seq,
         expiry,
         owner_digest,
         order_id,
+        residual_commitment,
+        residual_generation,
         outcome_plus_one,
         removal,
         cancel_r,
@@ -666,18 +735,27 @@ fn read_record(ref data: Span<felt252>) -> Record {
     assert(u128_of(remaining, 'EX_U128') <= MAX_ORDER_AMOUNT, 'EX_ORDER_AMOUNT');
     assert(u128_of(funding, 'EX_U128') <= MAX_ORDER_AMOUNT, 'EX_ORDER_FUNDING');
     u128_of(reserved, 'EX_U128');
+    u128_of(reserved_offset, 'EX_U128');
     let reserved_seq_u: u32 = reserved_seq.try_into().expect('EX_U32');
-    let _ = reserved_seq_u;
+    let residual_generation_u: u32 = residual_generation.try_into().expect('EX_U32');
+    assert(residual_commitment != 0 && residual_generation_u != 0, 'EX_RESIDUAL');
+    assert((reserved == 0) == (reserved_seq_u == 0), 'EX_RESERVATION');
+    if reserved == 0 {
+        assert(reserved_offset == 0, 'EX_RESERVATION');
+    }
     Record {
         external: external == 1,
         remaining,
         limit: u128_of(limit, 'EX_U128'),
         funding,
         reserved,
+        reserved_offset,
         reserved_seq,
         expiry,
         owner_digest,
         order_id,
+        residual_commitment,
+        residual_generation,
         outcome_plus_one: outcome_plus_one.try_into().expect('EX_U32'),
         removal: removal.try_into().expect('EX_U32'),
         cancel_r,
@@ -696,8 +774,30 @@ fn pass_through(ref data: Span<felt252>, ref state: State, pair_id: felt252, sel
     let p1 = leaf_p1(record.remaining, sell, record.external);
     let p2 = record.limit.into() + record.funding * TWO_POW_128;
     let p3 = leaf_p3(record.reserved, record.reserved_seq, record.expiry);
-    absorb_leaf(ref state.prior_book, pair_id, p1, p2, p3, record.owner_digest, record.order_id);
-    absorb_leaf(ref state.new_book, pair_id, p1, p2, p3, record.owner_digest, record.order_id);
+    absorb_leaf(
+        ref state.prior_book,
+        pair_id,
+        p1,
+        p2,
+        p3,
+        record.owner_digest,
+        record.order_id,
+        record.reserved_offset,
+        record.residual_commitment,
+        record.residual_generation,
+    );
+    absorb_leaf(
+        ref state.new_book,
+        pair_id,
+        p1,
+        p2,
+        p3,
+        record.owner_digest,
+        record.order_id,
+        record.reserved_offset,
+        record.residual_commitment,
+        record.residual_generation,
+    );
     state.prior_count += 1;
     state.new_count += 1;
     // nothing may happen to it.
@@ -738,6 +838,9 @@ fn existing_order(
         leaf_p3(record.reserved, record.reserved_seq, expiry),
         owner_digest,
         order_id,
+        record.reserved_offset,
+        record.residual_commitment,
+        record.residual_generation,
     );
     state.prior_count += 1;
 
@@ -745,6 +848,7 @@ fn existing_order(
     let mut remaining = record.remaining;
     let mut funding = record.funding;
     let mut reserved = record.reserved;
+    let mut reserved_offset = record.reserved_offset;
     let mut reserved_seq = record.reserved_seq;
     let mut external_out: felt252 = 0;
     let outcome_plus_one = record.outcome_plus_one;
@@ -789,6 +893,7 @@ fn existing_order(
                 .insert(index.into(), state.outcome_user_quote.get(index.into()) + quote);
         }
         reserved = 0;
+        reserved_offset = 0;
         reserved_seq = 0;
     } else if reserved != 0 {
         // a reservation whose outcome this transition lists must be settled by it.
@@ -810,6 +915,8 @@ fn existing_order(
         assert(reserved == 0, 'EX_CANCEL_RESERVED');
     } else if removal == REMOVAL_EXPIRE {
         assert(reserved == 0 && ctx.close_time >= expiry_u, 'EX_NOT_EXPIRED');
+    } else if removal == REMOVAL_RECOVERED {
+        assert(reserved == 0, 'EX_RECOVERY_RESERVED');
     } else {
         assert(removal == REMOVAL_NONE, 'EX_REMOVAL');
         if reserved == 0 {
@@ -828,19 +935,34 @@ fn existing_order(
         limit,
         funding,
         reserved,
+        reserved_offset,
         reserved_seq,
         removal != REMOVAL_NONE,
         participates,
-        external_out,
+        if removal == REMOVAL_RECOVERED {
+            0
+        } else {
+            external_out
+        },
         record.fill,
         record.quote,
         record.capacity,
         record.external_amount,
     );
 
+    let state_changed = settled.remaining != record.remaining
+        || settled.funding != record.funding
+        || settled.reserved != record.reserved
+        || settled.reserved_offset != record.reserved_offset
+        || settled.reserved_seq != record.reserved_seq;
     let owner_present = record.owner_present;
-    let needs_owner = settled.proceeds != 0 || settled.refund != 0 || removal == REMOVAL_CANCEL;
+    let needs_owner = settled.proceeds != 0
+        || settled.refund != 0
+        || removal != REMOVAL_NONE
+        || state_changed;
     assert(owner_present == needs_owner, 'EX_OWNER_PRESENCE');
+    let mut new_residual_commitment = record.residual_commitment;
+    let mut new_residual_generation = record.residual_generation;
     if owner_present {
         let (owner_public_key, spend_authority, withdraw_authority, cancel_authority, nonce) =
             read_owner(
@@ -857,6 +979,38 @@ fn existing_order(
             ) == owner_digest,
             'EX_OWNER',
         );
+        if state_changed || removal != REMOVAL_NONE {
+            let old_blinding = sponge4(
+                OUTPUT_BLINDING_DOMAIN, nonce, record.residual_generation, OUTPUT_KIND_RESIDUAL,
+            );
+            let old_commitment = residual_note_commitment(
+                ctx.chain_context,
+                slot.input_id,
+                slot.pair_id,
+                slot.sell,
+                external,
+                record.remaining,
+                limit,
+                record.funding,
+                record.reserved,
+                record.reserved_offset,
+                record.reserved_seq,
+                expiry,
+                order_id,
+                record.residual_generation,
+                owner_digest,
+                old_blinding,
+            );
+            assert(old_commitment == record.residual_commitment, 'EX_RESIDUAL');
+            let old_nullifier = note_nullifier(old_commitment, old_blinding);
+            if removal == REMOVAL_RECOVERED {
+                state.retired_nullifiers = poseidon2(state.retired_nullifiers, old_nullifier);
+                state.retired_nullifier_count += 1;
+            } else {
+                state.nullifiers = poseidon2(state.nullifiers, old_nullifier);
+                state.nullifier_count += 1;
+            }
+        }
         if removal == REMOVAL_CANCEL {
             assert(
                 check_ecdsa_signature(
@@ -868,17 +1022,35 @@ fn existing_order(
                 'EX_CANCEL_SIGNATURE',
             );
         }
-        emit_order_outputs(
-            ref state,
-            ctx,
-            slot,
-            settled,
-            order_id,
-            owner_public_key,
-            spend_authority,
-            withdraw_authority,
-            nonce,
-        );
+        if removal != REMOVAL_RECOVERED {
+            emit_order_outputs(
+                ref state,
+                ctx,
+                slot,
+                settled,
+                order_id,
+                owner_public_key,
+                spend_authority,
+                withdraw_authority,
+                nonce,
+            );
+        }
+        if !settled.removed && state_changed {
+            new_residual_commitment =
+                emit_residual_output(
+                    ref state,
+                    ctx,
+                    slot,
+                    settled,
+                    limit,
+                    expiry,
+                    external,
+                    order_id,
+                    owner_digest,
+                    nonce,
+                );
+            new_residual_generation = ctx.seq;
+        }
     }
     if !settled.removed {
         absorb_leaf(
@@ -889,6 +1061,9 @@ fn existing_order(
             leaf_p3(settled.reserved, settled.reserved_seq, expiry),
             owner_digest,
             order_id,
+            settled.reserved_offset,
+            new_residual_commitment,
+            new_residual_generation,
         );
         state.new_count += 1;
     }
@@ -1016,6 +1191,7 @@ fn new_order(
         funding.into(),
         0,
         0,
+        0,
         false,
         true,
         0,
@@ -1036,6 +1212,18 @@ fn new_order(
         nonce,
     );
     if !settled.removed {
+        let residual_commitment = emit_residual_output(
+            ref state,
+            ctx,
+            slot,
+            settled,
+            limit,
+            expiry.into(),
+            external,
+            order_id,
+            owner_digest,
+            nonce,
+        );
         absorb_leaf(
             ref state.new_book,
             slot.pair_id,
@@ -1044,6 +1232,9 @@ fn new_order(
             leaf_p3(settled.reserved, settled.reserved_seq, expiry.into()),
             owner_digest,
             order_id,
+            settled.reserved_offset,
+            residual_commitment,
+            ctx.seq,
         );
         state.new_count += 1;
     }
@@ -1066,6 +1257,7 @@ fn settle(
     limit: u128,
     funding: felt252,
     reserved: felt252,
+    reserved_offset: felt252,
     reserved_seq: felt252,
     removing: bool,
     participates: bool,
@@ -1079,6 +1271,7 @@ fn settle(
     let mut remaining = remaining;
     let mut funding = funding;
     let mut reserved = reserved;
+    let mut reserved_offset = reserved_offset;
     let mut reserved_seq = reserved_seq;
     let mut internal_out: felt252 = 0;
     if !participates {
@@ -1169,6 +1362,7 @@ fn settle(
             if limit == slot.bound {
                 totals.bound_hit = true;
             }
+            reserved_offset = totals.reserved;
             totals.reserved += external_amount;
             reserved = external_amount;
             reserved_seq = ctx.seq;
@@ -1196,13 +1390,15 @@ fn settle(
     let fee = ceil_fee(internal_out, market.fee_bps) + ceil_fee(external_out, market.fee_bps);
     totals.fee += fee;
     let proceeds = internal_out + external_out - fee;
-    let removed = reserved == 0 && (removing || remaining == 0);
+    let removed = reserved == 0 && (removing || remaining == 0 || funding == 0);
     let refund = if removed {
         funding
     } else {
         0
     };
-    Settled { remaining, funding, reserved, reserved_seq, proceeds, refund, removed }
+    Settled {
+        remaining, funding, reserved, reserved_offset, reserved_seq, proceeds, refund, removed,
+    }
 }
 
 #[inline(always)]
@@ -1288,6 +1484,79 @@ fn emit_order_output(
     // the published amount is padded by the output's secret blinding.
     let enc = amount + blinding;
     state.leaves.append(leaf);
-    state.outputs.absorb_pair(leaf, enc);
+    absorb_output_record(
+        ref state.outputs,
+        leaf,
+        enc,
+        sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 1),
+        sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 2),
+        sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 3),
+    );
     state.output_count += 1;
+}
+
+#[inline(always)]
+fn absorb_output_record(
+    ref outputs: Sponge,
+    leaf: felt252,
+    enc: felt252,
+    enc_remaining: felt252,
+    enc_reserved: felt252,
+    enc_reserved_offset: felt252,
+) {
+    outputs.absorb_pair(leaf, enc);
+    outputs.absorb_pair(enc_remaining, enc_reserved);
+    outputs.absorb(enc_reserved_offset);
+}
+
+#[inline(always)]
+fn emit_residual_output(
+    ref state: State,
+    ctx: Context,
+    slot: Slot,
+    settled: Settled,
+    limit: u128,
+    expiry: felt252,
+    external: bool,
+    order_id: felt252,
+    owner_digest: felt252,
+    nonce: felt252,
+) -> felt252 {
+    let blinding = sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_RESIDUAL);
+    let commitment = residual_note_commitment(
+        ctx.chain_context,
+        slot.input_id,
+        slot.pair_id,
+        slot.sell,
+        external,
+        settled.remaining,
+        limit,
+        settled.funding,
+        settled.reserved,
+        settled.reserved_offset,
+        settled.reserved_seq,
+        expiry,
+        order_id,
+        ctx.seq,
+        owner_digest,
+        blinding,
+    );
+    let leaf = poseidon2(RESIDUAL_NOTE_LEAF_DOMAIN, commitment);
+    let enc_remaining = settled.remaining
+        + sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_RESIDUAL + 1);
+    let enc_reserved = settled.reserved
+        + sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_RESIDUAL + 2);
+    let enc_offset = settled.reserved_offset
+        + sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_RESIDUAL + 3);
+    state.leaves.append(leaf);
+    absorb_output_record(
+        ref state.outputs,
+        leaf,
+        settled.funding + blinding,
+        enc_remaining,
+        enc_reserved,
+        enc_offset,
+    );
+    state.output_count += 1;
+    commitment
 }

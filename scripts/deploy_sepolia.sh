@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploys the exchange, its custody contracts and the proof program, wires them together and
 # writes the deployment manifest. `deploy_sepolia.sh pin <proof_version> <virtual_program_hash>
-# <os_config_hash>` later pins the proof program from the facts `zylith-prover bench` prints, and
+# <os_config_hash>` later pins the proof program from the facts `zylith-operator bench` prints, and
 # `deploy_sepolia.sh lock` freezes the configuration and finalizes the manifest.
 set -euo pipefail
 
@@ -9,7 +9,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTRACTS_DIR="${ROOT_DIR}/contracts"
 PROOF_PROGRAM_DIR="${ROOT_DIR}/proof_program"
 STATE_FILE="${ZYLITH_DEPLOY_STATE_FILE:-${ROOT_DIR}/.deploy/sepolia-live.json}"
-MANIFEST_TEMPLATE="${ZYLITH_MANIFEST_TEMPLATE:-${ROOT_DIR}/client/public/deployment.example.json}"
+DEPLOYMENT_TEMPLATE="${ZYLITH_DEPLOYMENT_TEMPLATE:-${ROOT_DIR}/client/public/deployment.example.json}"
+MARKET_REGISTRY="${ZYLITH_MARKET_REGISTRY:-${ROOT_DIR}/config/market-registry.json}"
 CLIENT_MANIFEST="${ROOT_DIR}/client/public/deployment.json"
 
 RPC_URL="${ZYLITH_STARKNET_RPC_URL:?ZYLITH_STARKNET_RPC_URL is required}"
@@ -17,6 +18,7 @@ ACCOUNTS_FILE="${ZYLITH_DEPLOY_ACCOUNTS_FILE:-${ROOT_DIR}/.deploy/sepolia.accoun
 ACCOUNT_NAME="${ZYLITH_DEPLOY_ACCOUNT_NAME:-zylith-sepolia-deployer}"
 RETRY_ATTEMPTS="${ZYLITH_SNCAST_RETRY_ATTEMPTS:-5}"
 RETRY_DELAY_SECONDS="${ZYLITH_SNCAST_RETRY_DELAY_SECONDS:-10}"
+PROVER_BUILD_ID="${ZYLITH_PROVER_BUILD_ID:-}"
 
 die() { echo "$1" >&2; exit 1; }
 [[ -f "${ACCOUNTS_FILE}" ]] || die "accounts file not found: ${ACCOUNTS_FILE}"
@@ -77,8 +79,12 @@ invoke() {
   fi
 }
 
-state_field() {
+contract_address() {
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["contracts"][sys.argv[2]])' "${STATE_FILE}" "$1"
+}
+
+proof_field() {
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["proof"][sys.argv[2]])' "${STATE_FILE}" "$1"
 }
 
 # the felt ids the exchange uses for manifest asset and pair names.
@@ -87,21 +93,31 @@ execution_key_fingerprint() {
   if [[ -n "${ZYLITH_EXECUTION_KEY_FINGERPRINT:-}" ]]; then
     printf '%s\n' "${ZYLITH_EXECUTION_KEY_FINGERPRINT}"
   elif [[ -n "${ZYLITH_EXECUTION_KEYS_PATH:-}" ]]; then
-    cargo run --quiet --manifest-path "${ROOT_DIR}/Cargo.toml" -p zylith-prover --bin zylith-prover -- fingerprint "${ZYLITH_EXECUTION_KEYS_PATH}"
+    cargo run --quiet --manifest-path "${ROOT_DIR}/Cargo.toml" -p zylith-operator --bin zylith-operator -- fingerprint "${ZYLITH_EXECUTION_KEYS_PATH}"
   else
     die "set ZYLITH_EXECUTION_KEY_FINGERPRINT or ZYLITH_EXECUTION_KEYS_PATH to pin the execution keys"
   fi
 }
 
 ids() {
-  cargo run --quiet --manifest-path "${ROOT_DIR}/Cargo.toml" -p zylith-prover --bin zylith-prover -- ids "$@"
+  cargo run --quiet --manifest-path "${ROOT_DIR}/Cargo.toml" -p zylith-operator --bin zylith-operator -- ids "$@"
+}
+
+require_clean_release() {
+  [[ -z "$(git -C "${ROOT_DIR}" status --porcelain=v1 --untracked-files=all)" ]] ||
+    die "pinning or finalizing requires a clean release worktree"
+  local release_commit
+  release_commit="$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(data.get("manifest", data)["deployment"]["release_commit"])' "${STATE_FILE}")"
+  [[ "${release_commit}" == "$(git -C "${ROOT_DIR}" rev-parse HEAD)" ]] ||
+    die "deployment release commit does not match HEAD"
 }
 
 case "${1:-deploy}" in
   pin)
     [[ "$#" -eq 4 ]] || { echo "usage: $0 pin <proof_version> <virtual_program_hash> <os_config_hash>" >&2; exit 1; }
-    exchange="$(state_field exchange)"
-    invoke "${exchange}" set_proof_program "$(state_field proof_program)" "$3"
+    require_clean_release
+    exchange="$(contract_address exchange)"
+    invoke "${exchange}" set_proof_program "$(proof_field proof_program_address)" "$3"
     invoke "${exchange}" set_proof_validation "$2" "$4" "${ZYLITH_PROOF_VALIDITY_BLOCKS:-450}"
     python3 - "${STATE_FILE}" "${CLIENT_MANIFEST}" "$2" "$3" "$4" <<'PY'
 import json, sys
@@ -116,6 +132,7 @@ PY
     exit 0
     ;;
   lock)
+    require_clean_release
     # a manifest is final only once the proof program is pinned and the contracts are locked.
     python3 - "${STATE_FILE}" <<'PY' || die "pin the proof program before locking"
 import json, sys
@@ -124,7 +141,7 @@ proof = data.get("manifest", data)["proof"]
 sys.exit(0 if int(proof.get("virtual_program_hash") or "0x0", 16) != 0 else 1)
 PY
     for name in exchange commitment_registry privacy_deposit_bridge; do
-      invoke "$(state_field "${name}")" lock_config
+      invoke "$(contract_address "${name}")" lock_config
     done
     python3 - "${STATE_FILE}" "${CLIENT_MANIFEST}" <<'PY'
 import json, sys
@@ -146,44 +163,81 @@ PY
     ;;
 esac
 
+[[ -n "${PROVER_BUILD_ID}" ]] || die "ZYLITH_PROVER_BUILD_ID is required"
 ADMIN="${ZYLITH_DEPLOY_ADMIN_ADDRESS:?ZYLITH_DEPLOY_ADMIN_ADDRESS is required}"
 SETTLEMENT_ACCOUNT="${ZYLITH_SETTLEMENT_ACCOUNT_ADDRESS:?ZYLITH_SETTLEMENT_ACCOUNT_ADDRESS is required}"
 PROOF_ACCOUNT="${ZYLITH_PROOF_ACCOUNT_ADDRESS:?ZYLITH_PROOF_ACCOUNT_ADDRESS is required}"
 PRIVACY_POOL="${ZYLITH_STARKNET_PRIVACY_POOL_ADDRESS:?ZYLITH_STARKNET_PRIVACY_POOL_ADDRESS is required}"
+PRIVACY_DISCOVERY_URL="${ZYLITH_STARKNET_PRIVACY_DISCOVERY_URL:?ZYLITH_STARKNET_PRIVACY_DISCOVERY_URL is required}"
+PRIVACY_PROVING_URL="${ZYLITH_STARKNET_PRIVACY_PROVING_URL:?ZYLITH_STARKNET_PRIVACY_PROVING_URL is required}"
+PRIVACY_PAYMASTER_ADDRESS="${ZYLITH_STARKNET_PRIVACY_PAYMASTER_ADDRESS:?ZYLITH_STARKNET_PRIVACY_PAYMASTER_ADDRESS is required}"
+PRIVACY_PAYMASTER_URL="${ZYLITH_STARKNET_PRIVACY_PAYMASTER_URL:?ZYLITH_STARKNET_PRIVACY_PAYMASTER_URL is required}"
+PRIVACY_PROOF_SIGNER_CLASS_HASH="${ZYLITH_PRIVACY_PROOF_SIGNER_CLASS_HASH:?ZYLITH_PRIVACY_PROOF_SIGNER_CLASS_HASH is required}"
 REFERENCE_SIGNER="${ZYLITH_REFERENCE_PRICE_SIGNER_PUBLIC_KEY:?ZYLITH_REFERENCE_PRICE_SIGNER_PUBLIC_KEY is required}"
 FEE_RECIPIENT="${ZYLITH_PROTOCOL_FEE_RECIPIENT:?ZYLITH_PROTOCOL_FEE_RECIPIENT is required}"
 PAUSE_GUARDIAN="${ZYLITH_PAUSE_GUARDIAN_ADDRESS:-${ADMIN}}"
 EKUBO_CORE="${ZYLITH_EKUBO_CORE_ADDRESS:-0x0444a09d96389aa7148f1aada508e30b71299ffe650d9c97fdaae38cb9a23384}"
 EKUBO_ROUTER="${ZYLITH_EKUBO_ROUTER_ADDRESS:-0x0045f933adf0607292468ad1c1dedaa74d5ad166392590e72676a34d01d7b763}"
-MAX_CLOSE_DELAY_MS="${ZYLITH_MAX_CLOSE_DELAY_MS:-60000}"
-WITHDRAWAL_DELAY_SECONDS="${ZYLITH_WITHDRAWAL_DELAY_SECONDS:-120}"
-PAIR_FEE_BPS="${ZYLITH_PAIR_FEE_BPS:-4}"
-# symbol=token address for every asset the bridge custodies.
-TOKENS="${ZYLITH_TOKENS:-STRK=0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d ETH=0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7 USDC=0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343}"
-# enabled markets come from the selected manifest unless an explicit subset is requested.
-PAIRS="${ZYLITH_PAIRS:-$(python3 - "${MANIFEST_TEMPLATE}" <<'PY'
+EPOCH_MS="${ZYLITH_EPOCH_MS:-$(python3 - "${DEPLOYMENT_TEMPLATE}" <<'PY'
 import json, sys
 manifest = json.load(open(sys.argv[1]))
-print(" ".join(name for name, pair in manifest["product"]["pairs"].items() if pair.get("enabled")))
+print(manifest["runtime"]["epoch_ms"])
 PY
 )}"
-[[ -n "${PAIRS}" ]] || die "the manifest has no enabled pairs"
-# pairs whose unmatched remainder the operator routes through ekubo; empty keeps routing off.
-EXTERNAL_PAIRS="${ZYLITH_EXTERNAL_PAIRS:-}"
-# the window a capacity stays open for an external fill: nonzero exactly when a pair routes.
+MAX_CLOSE_DELAY_MS="${ZYLITH_MAX_CLOSE_DELAY_MS:-60000}"
+WITHDRAWAL_DELAY_SECONDS="${ZYLITH_WITHDRAWAL_DELAY_SECONDS:-120}"
+[[ -f "${MARKET_REGISTRY}" ]] || die "market registry not found: ${MARKET_REGISTRY}"
+cargo run -q --manifest-path "${ROOT_DIR}/Cargo.toml" -p zylith-core \
+  --example market_registry -- "${MARKET_REGISTRY}" --check >/dev/null
+registry_value() {
+  python3 - "${MARKET_REGISTRY}" "$1" <<'PY'
+import json, sys
+registry, field = json.load(open(sys.argv[1])), sys.argv[2]
+assets = [asset for asset in registry["assets"] if asset["enabled"]]
+markets = [market for market in registry["markets"] if market["enabled"]]
+values = {
+    "tokens": " ".join(f'{asset["asset_id"]}={asset["token_address"]}' for asset in assets),
+    "pairs": " ".join(market["market_id"] for market in markets),
+    "external_pairs": " ".join(market["market_id"] for market in markets if market["capabilities"]["external_matching"]),
+    "objective_numeraire": registry["objective_numeraire_asset_id"],
+    "registry_hash_high": int(registry["registry_hash"][:32], 16),
+    "registry_hash_low": int(registry["registry_hash"][32:], 16),
+}
+print(values[field])
+PY
+}
+TOKENS="$(registry_value tokens)"
+PAIRS="$(registry_value pairs)"
+EXTERNAL_PAIRS="$(registry_value external_pairs)"
+OBJECTIVE_NUMERAIRE="$(registry_value objective_numeraire)"
+REGISTRY_HASH_HIGH="$(registry_value registry_hash_high)"
+REGISTRY_HASH_LOW="$(registry_value registry_hash_low)"
+[[ -n "${TOKENS}" && -n "${PAIRS}" ]] || die "the market registry has no enabled assets or markets"
 if [[ -n "${EXTERNAL_PAIRS}" ]]; then
   EXTERNAL_WINDOW_SECONDS="${ZYLITH_EXTERNAL_WINDOW_SECONDS:-30}"
-  [[ "${EXTERNAL_WINDOW_SECONDS}" -gt 0 ]] || die "external pairs need a nonzero ZYLITH_EXTERNAL_WINDOW_SECONDS"
-  for pair in ${EXTERNAL_PAIRS}; do
-    [[ " ${PAIRS} " == *" ${pair} "* ]] || die "external pair ${pair} is not in ZYLITH_PAIRS"
-  done
+  [[ "${EXTERNAL_WINDOW_SECONDS}" -gt 0 ]] || die "external markets need a nonzero external window"
 else
   EXTERNAL_WINDOW_SECONDS="${ZYLITH_EXTERNAL_WINDOW_SECONDS:-0}"
+  [[ "${EXTERNAL_WINDOW_SECONDS}" -eq 0 ]] || die "external window must be zero when no registry market enables external matching"
 fi
 
+market_field() {
+  python3 - "${MARKET_REGISTRY}" "$1" "$2" <<'PY'
+import json, sys
+registry, market_id, field = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
+market = next((market for market in registry["markets"] if market["market_id"] == market_id), None)
+if market is None:
+    sys.exit(f"unknown registry market {market_id}")
+value = market
+for part in field.split("."):
+    value = value[part]
+print(str(value).lower() if isinstance(value, bool) else value)
+PY
+}
+
 # the manifest names the exact commit deployed, so the deployed code must be that commit.
-if [[ "${ZYLITH_ALLOW_DIRTY_DEPLOY:-}" != "1" ]] && ! git -C "${ROOT_DIR}" diff --quiet HEAD --; then
-  die "tracked files differ from HEAD; commit the release first (or set ZYLITH_ALLOW_DIRTY_DEPLOY=1 for a scratch deploy)"
+if [[ "${ZYLITH_ALLOW_DIRTY_DEPLOY:-}" != "1" ]] && [[ -n "$(git -C "${ROOT_DIR}" status --porcelain=v1 --untracked-files=all)" ]]; then
+  die "tracked or untracked files differ from HEAD; commit the release first (or set ZYLITH_ALLOW_DIRTY_DEPLOY=1 for a scratch deploy)"
 fi
 RELEASE_COMMIT="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
 
@@ -193,13 +247,19 @@ RELEASE_COMMIT="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
 registry_class="$(declare_class "${CONTRACTS_DIR}" zylith_protocol CommitmentRegistry)"
 bridge_class="$(declare_class "${CONTRACTS_DIR}" zylith_protocol PrivacyDepositBridge)"
 exchange_class="$(declare_class "${CONTRACTS_DIR}" zylith_protocol Exchange)"
-router_class="$(declare_class "${CONTRACTS_DIR}" zylith_protocol EkuboExternalMatchRouter)"
+router_class=""
+if [[ -n "${EXTERNAL_PAIRS}" ]]; then
+  router_class="$(declare_class "${CONTRACTS_DIR}" zylith_protocol EkuboExternalMatchRouter)"
+fi
 program_class="$(declare_class "${PROOF_PROGRAM_DIR}" zylith_proof_program ExchangeProofProgram)"
 
 registry="$(deploy_class "${registry_class}" "${ADMIN}")"
 bridge="$(deploy_class "${bridge_class}" "${ADMIN}" "${registry}" "${PRIVACY_POOL}")"
 exchange="$(deploy_class "${exchange_class}" "${ADMIN}")"
-router="$(deploy_class "${router_class}" "${EKUBO_CORE}" "${EKUBO_ROUTER}" "${exchange}" "${bridge}")"
+router="0x0"
+if [[ -n "${EXTERNAL_PAIRS}" ]]; then
+  router="$(deploy_class "${router_class}" "${EKUBO_CORE}" "${EKUBO_ROUTER}" "${exchange}" "${bridge}")"
+fi
 proof_program="$(deploy_class "${program_class}")"
 
 invoke "${registry}" set_privacy_deposit_bridge "${bridge}"
@@ -215,60 +275,62 @@ done
 invoke "${exchange}" set_custody "${bridge}" "${registry}" "${router}"
 invoke "${exchange}" set_settlement_account "${SETTLEMENT_ACCOUNT}"
 invoke "${exchange}" set_reference_signer "${REFERENCE_SIGNER}"
-invoke "${exchange}" set_objective_numeraire "$(id_of USDC)"
-invoke "${exchange}" set_timing "${MAX_CLOSE_DELAY_MS}" "${WITHDRAWAL_DELAY_SECONDS}" "${EXTERNAL_WINDOW_SECONDS}"
+invoke "${exchange}" set_objective_numeraire "$(id_of "${OBJECTIVE_NUMERAIRE}")"
+invoke "${exchange}" set_market_registry_hash "${REGISTRY_HASH_HIGH}" "${REGISTRY_HASH_LOW}"
+invoke "${exchange}" set_timing "${EPOCH_MS}" "${MAX_CLOSE_DELAY_MS}" "${WITHDRAWAL_DELAY_SECONDS}" "${EXTERNAL_WINDOW_SECONDS}"
 invoke "${exchange}" set_protocol_fee_recipient "${FEE_RECIPIENT}"
 invoke "${exchange}" set_pause_guardian "${PAUSE_GUARDIAN}"
 for pair in ${PAIRS}; do
-  invoke "${exchange}" register_pair "$(id_of "${pair}")" "$(id_of "${pair%%/*}")" "$(id_of "${pair#*/}")" "${PAIR_FEE_BPS}"
+  invoke "${exchange}" register_pair "$(id_of "${pair}")" "$(id_of "${pair%%/*}")" "$(id_of "${pair#*/}")" "$(market_field "${pair}" taker_fee_bps)"
+  if [[ " ${EXTERNAL_PAIRS} " == *" ${pair} "* ]]; then
+    invoke "${exchange}" set_pair_external_support "$(id_of "${pair}")" "$(market_field "${pair}" external_settlement_support_quote)"
+  fi
 done
 
 KEY_FINGERPRINT="$(execution_key_fingerprint)"
 [[ "${KEY_FINGERPRINT}" =~ ^[0-9a-f]{64}$ ]] || die "the execution key fingerprint must be 64 lowercase hex characters"
 mkdir -p "$(dirname "${STATE_FILE}")"
-python3 - "${MANIFEST_TEMPLATE}" "${STATE_FILE}" "${CLIENT_MANIFEST}" <<PY
+python3 - "${DEPLOYMENT_TEMPLATE}" "${MARKET_REGISTRY}" "${STATE_FILE}" "${CLIENT_MANIFEST}" <<PY
 import json, sys
-template, state_path, client_path = sys.argv[1:]
+template, registry_path, state_path, client_path = sys.argv[1:]
 manifest = json.load(open(template))
+registry = json.load(open(registry_path))
 manifest["deployment"] = {"finalized": False, "release_commit": "${RELEASE_COMMIT}"}
 manifest["rpc_url"] = "${ZYLITH_PUBLIC_STARKNET_RPC_URL:-${RPC_URL}}"
+manifest["network"] = registry["network"]
+manifest["chain_id"] = registry["chain_id"]
+manifest["market_registry"] = registry
 manifest["contracts"] = {
     "commitment_registry": "${registry}",
     "privacy_deposit_bridge": "${bridge}",
     "ekubo_external_match_router": "${router}",
     "exchange": "${exchange}",
 }
-tokens = dict(entry.split("=", 1) for entry in "${TOKENS}".split())
-manifest["token_addresses"] = tokens
 rail = manifest["funding"]["starknet_privacy"]
 rail["privacy_pool"] = "${PRIVACY_POOL}"
 rail["bridge_adapter"] = "${bridge}"
+rail["discovery_url"] = "${PRIVACY_DISCOVERY_URL}"
+rail["proving_url"] = "${PRIVACY_PROVING_URL}"
+rail["paymaster_address"] = "${PRIVACY_PAYMASTER_ADDRESS}"
+rail["paymaster_url"] = "${PRIVACY_PAYMASTER_URL}"
+rail["proof_signer_class_hash"] = "${PRIVACY_PROOF_SIGNER_CLASS_HASH}"
 rail["ingress_key_registry_fingerprint"] = "${KEY_FINGERPRINT}"
 rail.pop("ingress_key_registry_next_fingerprint", None)
-manifest["funding"]["assets"] = {name: {**manifest["funding"]["assets"].get(name, {}), "asset_id": name, "token_address": token, "rail_token_address": token} for name, token in tokens.items()}
-manifest["product"]["assets"] = {name: {**manifest["product"]["assets"].get(name, {}), "token_address": token} for name, token in tokens.items() if name in manifest["product"]["assets"]}
-# the template's decimals and minimum sizes must describe these tokens: one asset name can be a
-# different token, with different decimals, on another network.
+# the registry's decimals and minimum sizes must describe these exact deployed tokens.
 import urllib.request
 def token_decimals(token):
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "starknet_call", "params": {"request": {"contract_address": token, "entry_point_selector": "0x004c4fb1ab068f6039d5780c68dd0fa2f8742cceb3426d19667778ca7f3518a9", "calldata": []}, "block_id": "latest"}}).encode()
     request = urllib.request.Request("${RPC_URL}", data=body, headers={"content-type": "application/json"})
     return int(json.load(urllib.request.urlopen(request, timeout=30))["result"][0], 16)
-for name, token in tokens.items():
-    asset = manifest["product"]["assets"].get(name)
-    if asset is not None and token_decimals(token) != asset["decimals"]:
-        sys.exit(f"{name} at {token} has {token_decimals(token)} decimals on chain, the template says {asset['decimals']}; fix its decimals and minimum sizes")
-pairs = "${PAIRS}".split()
-external = set("${EXTERNAL_PAIRS}".split())
-manifest["product"]["pairs"] = {name: {**manifest["product"]["pairs"][name], "taker_fee_bps": int("${PAIR_FEE_BPS}"), "external_match_enabled": name in external} for name in pairs}
-for asset in manifest["funding"]["assets"].values():
-    asset["enabled_pairs"] = [pair for pair in pairs if asset["asset_id"] in pair.split("/")]
-manifest["proof"].update({"proof_program_address": "${proof_program}", "proof_account_address": "${PROOF_ACCOUNT}", "settlement_account_address": "${SETTLEMENT_ACCOUNT}"})
+for asset in registry["assets"]:
+    if asset["enabled"] and token_decimals(asset["token_address"]) != asset["decimals"]:
+        sys.exit(f'{asset["asset_id"]} at {asset["token_address"]} does not match registry decimals {asset["decimals"]}')
+manifest["proof"].update({"proof_program_address": "${proof_program}", "proof_account_address": "${PROOF_ACCOUNT}", "settlement_account_address": "${SETTLEMENT_ACCOUNT}", "config_locked_after_deploy": False, "prover_build_id": "${PROVER_BUILD_ID}"})
 manifest["roles"] = {"protocol_fee_recipient": "${FEE_RECIPIENT}", "pause_guardian_address": "${PAUSE_GUARDIAN}", "reference_price_signer": "${REFERENCE_SIGNER}"}
-manifest["runtime"].update({"max_close_delay_ms": int("${MAX_CLOSE_DELAY_MS}"), "withdrawal_delay_seconds": int("${WITHDRAWAL_DELAY_SECONDS}"), "external_window_seconds": int("${EXTERNAL_WINDOW_SECONDS}")})
+manifest["runtime"].update({"epoch_ms": int("${EPOCH_MS}"), "max_close_delay_ms": int("${MAX_CLOSE_DELAY_MS}"), "withdrawal_delay_seconds": int("${WITHDRAWAL_DELAY_SECONDS}"), "external_window_seconds": int("${EXTERNAL_WINDOW_SECONDS}")})
 for path in (state_path, client_path):
     json.dump(manifest, open(path, "w"), indent=2)
     open(path, "a").write("\n")
 PY
 echo "deployed: exchange ${exchange}, registry ${registry}, bridge ${bridge}, router ${router}, proof program ${proof_program}"
-echo "next: prove one transition with zylith-prover bench, then $0 pin <proof_version> <virtual_program_hash> <os_config_hash>, then $0 lock"
+echo "next: prove one transition with zylith-operator bench, then $0 pin <proof_version> <virtual_program_hash> <os_config_hash>, then $0 lock"

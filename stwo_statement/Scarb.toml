@@ -15,6 +15,10 @@ sierra = true
 name = "exchange_withdrawal"
 function = "zylith_exchange_statement::exchange::withdrawal_executable::main"
 
+[[target.executable]]
+name = "residual_recovery"
+function = "zylith_exchange_statement::exchange::residual_recovery_executable::main"
+
 [cairo]
 enable-gas = false
 unstable-add-statements-functions-debug-info = true

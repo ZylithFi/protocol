@@ -46,6 +46,8 @@ pub trait IPrivacyDepositBridge<TContractState> {
     fn escrowed_asset_amount(self: @TContractState, asset_id: felt252) -> u128;
     fn pending_exit_asset_amount(self: @TContractState, asset_id: felt252) -> u128;
     fn asset_token(self: @TContractState, asset_id: felt252) -> ContractAddress;
+    fn supported_asset_count(self: @TContractState) -> u64;
+    fn supported_asset_id_at(self: @TContractState, index: u64) -> felt252;
     fn is_asset_supported(self: @TContractState, asset_id: felt252) -> bool;
     fn admin_address(self: @TContractState) -> ContractAddress;
     fn pending_admin_address(self: @TContractState) -> ContractAddress;
@@ -88,6 +90,7 @@ pub mod PrivacyDepositBridge {
         privacy_pool: ContractAddress,
         asset_tokens: Map<felt252, ContractAddress>,
         supported_asset_count: u64,
+        supported_asset_ids: Map<u64, felt252>,
         strk20_exit_asset_ids: Map<felt252, felt252>,
         strk20_exit_amounts: Map<felt252, u128>,
         strk20_exit_note_commitments: Map<felt252, felt252>,
@@ -159,7 +162,9 @@ pub mod PrivacyDepositBridge {
             let existing = self.asset_tokens.read(asset_id);
             if existing.is_zero() {
                 self.asset_tokens.write(asset_id, token_address);
-                self.supported_asset_count.write(self.supported_asset_count.read() + 1);
+                let asset_index = self.supported_asset_count.read();
+                self.supported_asset_ids.write(asset_index, asset_id);
+                self.supported_asset_count.write(asset_index + 1);
             } else {
                 assert(existing == token_address, 'ASSET_IMMUTABLE');
             }
@@ -295,6 +300,15 @@ pub mod PrivacyDepositBridge {
 
         fn asset_token(self: @ContractState, asset_id: felt252) -> ContractAddress {
             self.asset_tokens.read(asset_id)
+        }
+
+        fn supported_asset_count(self: @ContractState) -> u64 {
+            self.supported_asset_count.read()
+        }
+
+        fn supported_asset_id_at(self: @ContractState, index: u64) -> felt252 {
+            assert(index < self.supported_asset_count.read(), 'ASSET_INDEX_OOB');
+            self.supported_asset_ids.read(index)
         }
 
         fn is_asset_supported(self: @ContractState, asset_id: felt252) -> bool {

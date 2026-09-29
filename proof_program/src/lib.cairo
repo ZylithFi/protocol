@@ -12,6 +12,9 @@ pub trait IExchangeProofProgram<TContractState> {
     fn compile_withdrawal_proof(
         ref self: TContractState, exchange: ContractAddress, witness: Span<felt252>,
     ) -> felt252;
+    fn compile_residual_recovery_proof(
+        ref self: TContractState, exchange: ContractAddress, witness: Span<felt252>,
+    ) -> felt252;
 }
 
 #[starknet::contract]
@@ -20,11 +23,13 @@ pub mod ExchangeProofProgram {
     use core::poseidon::{hades_permutation, poseidon_hash_span};
     use starknet::syscalls::send_message_to_l1_syscall;
     use starknet::{ContractAddress, SyscallResultTrait, get_contract_address};
+    use zylith_exchange_statement::exchange::residual_recovery::verify_residual_recovery_statement;
     use zylith_exchange_statement::exchange::transition::verify_transition_statement;
     use zylith_exchange_statement::exchange::withdrawal::verify_exchange_withdrawal_statement;
 
     pub const TRANSITION_MESSAGE_DOMAIN: felt252 = 'zylith_transition_msg_v1';
     pub const WITHDRAWAL_MESSAGE_DOMAIN: felt252 = 'zylith_withdraw_msg_v1';
+    pub const RESIDUAL_RECOVERY_MESSAGE_DOMAIN: felt252 = 'zylith_res_recover_msg_v1';
     const PROOF_MESSAGE_TO: felt252 = 0;
 
     #[storage]
@@ -46,6 +51,14 @@ pub mod ExchangeProofProgram {
             assert(!exchange.is_zero(), 'BAD_EXCHANGE');
             let commitment = verify_exchange_withdrawal_statement(witness);
             emit_bound_message(WITHDRAWAL_MESSAGE_DOMAIN, exchange, commitment)
+        }
+
+        fn compile_residual_recovery_proof(
+            ref self: ContractState, exchange: ContractAddress, witness: Span<felt252>,
+        ) -> felt252 {
+            assert(!exchange.is_zero(), 'BAD_EXCHANGE');
+            let commitment = verify_residual_recovery_statement(witness);
+            emit_bound_message(RESIDUAL_RECOVERY_MESSAGE_DOMAIN, exchange, commitment)
         }
     }
 

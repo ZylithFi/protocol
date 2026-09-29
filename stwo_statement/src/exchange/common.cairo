@@ -12,6 +12,8 @@ pub const OUTPUT_NOTE_NODE_DOMAIN: felt252 =
     0x03c6998f476a618431be1c1764a6724f13c0739be395bab4c1217bc0a65b2ee7;
 pub const NOTE_ACCUMULATOR_LEAF_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f6163635f6c6561665f7631;
 pub const NOTE_ACCUMULATOR_NODE_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f6163635f6e6f64655f7631;
+pub const RESIDUAL_NOTE_DOMAIN: felt252 = 'zylith_residual_v1';
+pub const RESIDUAL_NOTE_LEAF_DOMAIN: felt252 = 'zylith_res_leaf_v1';
 pub const NOTE_ACCUMULATOR_DEPTH: u32 = 32;
 pub const MAX_OUTPUT_SUBTREE_DEPTH: u32 = 16;
 
@@ -155,6 +157,45 @@ pub fn sponge7(
     let (s0, s1, s2) = hades_permutation(s0 + e, s1 + f, s2);
     let (result, _, _) = hades_permutation(s0 + g, s1 + 1, s2);
     result
+}
+
+pub fn residual_note_commitment(
+    chain_context: felt252,
+    input_asset_id: felt252,
+    pair_id: felt252,
+    sell: bool,
+    external: bool,
+    remaining: felt252,
+    limit: u128,
+    funding: felt252,
+    reserved: felt252,
+    reserved_offset: felt252,
+    reserved_seq: felt252,
+    expiry: felt252,
+    order_id: felt252,
+    generation: felt252,
+    owner_digest: felt252,
+    blinding: felt252,
+) -> felt252 {
+    let mut commitment = SpongeTrait::new();
+    commitment.absorb_pair(RESIDUAL_NOTE_DOMAIN, chain_context);
+    commitment.absorb_pair(input_asset_id, pair_id);
+    commitment.absorb_pair(if sell {
+        1
+    } else {
+        0
+    }, if external {
+        1
+    } else {
+        0
+    });
+    commitment.absorb_pair(remaining, limit.into());
+    commitment.absorb_pair(funding, reserved);
+    commitment.absorb_pair(reserved_offset, reserved_seq);
+    commitment.absorb_pair(expiry, order_id);
+    commitment.absorb_pair(generation, owner_digest);
+    commitment.absorb(blinding);
+    commitment.finish()
 }
 
 #[inline(always)]

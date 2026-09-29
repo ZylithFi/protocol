@@ -78,6 +78,9 @@ pub struct CapacityEntry {
 pub struct OutputRecord {
     pub leaf: felt252,
     pub enc: felt252,
+    pub enc_remaining: felt252,
+    pub enc_reserved: felt252,
+    pub enc_reserved_offset: felt252,
 }
 
 #[derive(Drop, Serde, Copy, PartialEq, Debug)]
@@ -85,6 +88,7 @@ pub struct PairConfig {
     pub base_asset_id: felt252,
     pub quote_asset_id: felt252,
     pub fee_bps: u128,
+    pub external_settlement_support_quote: u128,
 }
 
 #[derive(Drop, Serde, Copy, PartialEq, Debug, starknet::Store)]
@@ -111,7 +115,50 @@ pub struct PendingExit {
     pub amount: u128,
     pub exit_commitment: felt252,
     pub exit_authority: felt252,
+    pub requested_at_ms: u64,
     pub matures_at: u64,
+}
+
+#[derive(Drop, Serde, Copy, PartialEq, Debug, starknet::Store)]
+pub struct PendingResidualExit {
+    pub input_asset_id: felt252,
+    pub input_amount: u128,
+    pub input_exit_commitment: felt252,
+    pub input_exit_authority: felt252,
+    pub output_asset_id: felt252,
+    pub output_amount: u128,
+    pub output_exit_commitment: felt252,
+    pub output_exit_authority: felt252,
+    pub fee_amount: u128,
+    pub fee_exit_commitment: felt252,
+    pub fee_exit_authority: felt252,
+    pub requested_at_ms: u64,
+    pub matures_at: u64,
+}
+
+#[derive(Drop, Serde, Copy)]
+pub struct ResidualRecovery {
+    pub note_root: felt252,
+    pub nullifier: felt252,
+    pub pair_id: felt252,
+    pub sell: bool,
+    pub fee_bps: u128,
+    pub reserved_seq: u32,
+    pub capacity_generation: u64,
+    pub capacity_status: u8,
+    pub capacity_total: u128,
+    pub capacity_consumed_base: u128,
+    pub capacity_pool_quote: u128,
+    pub capacity_scale: u128,
+    pub input_asset_id: felt252,
+    pub input_amount: u128,
+    pub output_asset_id: felt252,
+    pub output_amount: u128,
+    pub fee_amount: u128,
+    pub input_exit_commitment: felt252,
+    pub input_exit_authority: felt252,
+    pub output_exit_commitment: felt252,
+    pub output_exit_authority: felt252,
 }
 
 #[starknet::interface]
@@ -141,8 +188,10 @@ pub trait IExchange<TContractState> {
     fn propose_reference_signer(ref self: TContractState, signer: felt252);
     fn execute_reference_signer(ref self: TContractState);
     fn set_objective_numeraire(ref self: TContractState, asset_id: felt252);
+    fn set_market_registry_hash(ref self: TContractState, high: u128, low: u128);
     fn set_timing(
         ref self: TContractState,
+        epoch_ms: u64,
         max_close_delay_ms: u64,
         withdrawal_delay_seconds: u64,
         external_window_seconds: u64,
@@ -154,8 +203,7 @@ pub trait IExchange<TContractState> {
         quote_asset_id: felt252,
         fee_bps: u128,
     );
-    fn propose_pair_fee(ref self: TContractState, pair_id: felt252, fee_bps: u128);
-    fn execute_pair_fee(ref self: TContractState, pair_id: felt252);
+    fn set_pair_external_support(ref self: TContractState, pair_id: felt252, support_quote: u128);
     fn set_protocol_fee_recipient(ref self: TContractState, recipient: felt252);
     fn propose_protocol_fee_recipient(ref self: TContractState, recipient: felt252);
     fn execute_protocol_fee_recipient(ref self: TContractState);
@@ -170,6 +218,7 @@ pub trait IExchange<TContractState> {
         outcomes: Span<OutcomeRecord>,
         capacities: Span<CapacityEntry>,
         nullifiers: Span<felt252>,
+        retired_nullifiers: Span<felt252>,
         outputs: Span<OutputRecord>,
     );
     fn settle_external_fill(
@@ -183,6 +232,9 @@ pub trait IExchange<TContractState> {
     fn freeze_capacity(
         ref self: TContractState, seq: u32, pair_id: felt252, sell: bool, expected_generation: u64,
     );
+    fn freeze_expired_capacity(
+        ref self: TContractState, seq: u32, pair_id: felt252, sell: bool, expected_generation: u64,
+    );
     fn request_withdrawal(
         ref self: TContractState,
         note_root: felt252,
@@ -193,20 +245,46 @@ pub trait IExchange<TContractState> {
         exit_authority: felt252,
     );
     fn finalize_withdrawal(ref self: TContractState, nullifier: felt252);
+    fn request_residual_recovery(ref self: TContractState, recovery: ResidualRecovery);
+    fn finalize_residual_recovery(ref self: TContractState, nullifier: felt252);
     fn transition_seq(self: @TContractState) -> u32;
     fn book_root(self: @TContractState) -> felt252;
     fn last_close_time_ms(self: @TContractState) -> u64;
+    fn epoch_length_ms(self: @TContractState) -> u64;
+    fn max_close_delay_ms(self: @TContractState) -> u64;
+    fn withdrawal_delay_seconds(self: @TContractState) -> u64;
+    fn external_window_seconds(self: @TContractState) -> u64;
     fn note_root(self: @TContractState) -> felt252;
     fn note_batch_count(self: @TContractState) -> u64;
+    fn note_batch_root(self: @TContractState, index: u64) -> felt252;
+    fn note_batch_roots(self: @TContractState, start: u64, end: u64) -> Array<felt252>;
     fn is_known_note_root(self: @TContractState, root: felt252) -> bool;
     fn nullifier_state(self: @TContractState, nullifier: felt252) -> u8;
     fn pending_exit(self: @TContractState, nullifier: felt252) -> PendingExit;
+    fn pending_residual_exit(self: @TContractState, nullifier: felt252) -> PendingResidualExit;
     fn capacity(self: @TContractState, seq: u32, pair_id: felt252, sell: bool) -> Capacity;
     fn pair_config(self: @TContractState, pair_id: felt252) -> PairConfig;
+    fn pair_count(self: @TContractState) -> u64;
+    fn pair_id_at(self: @TContractState, index: u64) -> felt252;
+    fn objective_numeraire(self: @TContractState) -> felt252;
+    fn market_registry_hash(self: @TContractState) -> (u128, u128);
     fn protocol_fee_recipient(self: @TContractState) -> felt252;
     fn reference_signer(self: @TContractState) -> felt252;
+    fn settlement_account(self: @TContractState) -> ContractAddress;
+    fn pause_guardian(self: @TContractState) -> ContractAddress;
+    fn proof_program(self: @TContractState) -> ContractAddress;
+    fn virtual_program_hash(self: @TContractState) -> felt252;
+    fn proof_version(self: @TContractState) -> felt252;
+    fn starknet_os_config_hash(self: @TContractState) -> felt252;
+    fn proof_validity_blocks(self: @TContractState) -> u64;
+    fn bridge(self: @TContractState) -> ContractAddress;
+    fn deposit_root_registrar(self: @TContractState) -> ContractAddress;
+    fn external_router(self: @TContractState) -> ContractAddress;
     fn transition_message_hash(self: @TContractState, transition_commitment: felt252) -> felt252;
     fn withdrawal_message_hash(self: @TContractState, withdrawal_commitment: felt252) -> felt252;
+    fn residual_recovery_message_hash(
+        self: @TContractState, recovery_commitment: felt252,
+    ) -> felt252;
     fn admin_address(self: @TContractState) -> ContractAddress;
     fn is_paused(self: @TContractState) -> bool;
     fn config_is_locked(self: @TContractState) -> bool;
@@ -248,8 +326,8 @@ pub mod Exchange {
     };
     use super::{
         Capacity, CapacityEntry, IExitStagingDispatcher, IExitStagingDispatcherTrait,
-        MarketAttestation, OutcomeRecord, OutputRecord, PairConfig, PendingExit, ProofFacts,
-        TransitionHeader,
+        MarketAttestation, OutcomeRecord, OutputRecord, PairConfig, PendingExit,
+        PendingResidualExit, ProofFacts, ResidualRecovery, TransitionHeader,
     };
 
     const VIRTUAL_SNOS: felt252 = 'VIRTUAL_SNOS';
@@ -257,12 +335,17 @@ pub mod Exchange {
     const PROOF_MESSAGE_TO: felt252 = 0;
     const TRANSITION_MESSAGE_DOMAIN: felt252 = 'zylith_transition_msg_v1';
     const WITHDRAWAL_MESSAGE_DOMAIN: felt252 = 'zylith_withdraw_msg_v1';
+    const RESIDUAL_RECOVERY_MESSAGE_DOMAIN: felt252 = 'zylith_res_recover_msg_v1';
     const TRANSITION_DOMAIN: felt252 = 'zylith_transition_v1';
     const WITHDRAWAL_DOMAIN: felt252 = 'zylith_withdrawal_v2';
+    const RESIDUAL_RECOVERY_DOMAIN: felt252 = 'zylith_res_recovery_v1';
+    const RESIDUAL_EXIT_LEG_DOMAIN: felt252 = 'zylith_res_exit_leg_v1';
+    const RESIDUAL_FEE_EXIT_DOMAIN: felt252 = 'zylith_res_fee_exit_v1';
     const M0_DOMAIN: felt252 = 'zylith_m0_v1';
     const OUTCOMES_DOMAIN: felt252 = 'zylith_outcomes_v1';
     const CAPACITY_DOMAIN: felt252 = 'zylith_capacity_v1';
     const NULLIFIERS_DOMAIN: felt252 = 'zylith_nullifiers_v1';
+    const RETIRED_NULLIFIERS_DOMAIN: felt252 = 'zylith_retired_v1';
     const OUTPUTS_DOMAIN: felt252 = 'zylith_outputs_v1';
     const REFERENCE_PRICE_ATTESTATION_DOMAIN: felt252 =
         0x79508ce25b318644e4a7aea66c1edc2342856b522eb62152b5c118fc1ef3e67;
@@ -271,9 +354,9 @@ pub mod Exchange {
     const NOTE_ACCUMULATOR_NODE_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f6163635f6e6f64655f7631;
     const NOTE_ACCUMULATOR_DEPTH: u64 = 32;
     const NOTE_ACCUMULATOR_CAPACITY: u64 = 0x100000000;
+    const MAX_NOTE_BATCH_RANGE: u64 = 256;
     const DEFAULT_PROOF_VALIDITY_BLOCKS: u64 = 450;
     const MAX_FEE_BPS: u128 = 100;
-    const FEE_TIMELOCK_SECONDS: u64 = 86400;
     const RECIPIENT_TIMELOCK_SECONDS: u64 = 604800;
     const REFERENCE_SIGNER_TIMELOCK_SECONDS: u64 = 86400;
     const MAX_REFERENCE_WINDOW_MS: u64 = 15000;
@@ -310,14 +393,18 @@ pub mod Exchange {
         pending_reference_signer: felt252,
         pending_reference_signer_eta: u64,
         objective_numeraire: felt252,
+        market_registry_hash_high: u128,
+        market_registry_hash_low: u128,
+        epoch_ms: u64,
         max_close_delay_ms: u64,
         withdrawal_delay_seconds: u64,
         external_window_seconds: u64,
         pair_base: Map<felt252, felt252>,
         pair_quote: Map<felt252, felt252>,
         pair_fee_bps: Map<felt252, u128>,
-        pending_pair_fee_bps: Map<felt252, u128>,
-        pending_pair_fee_eta: Map<felt252, u64>,
+        pair_external_support_quote: Map<felt252, u128>,
+        pair_count: u64,
+        pair_ids: Map<u64, felt252>,
         protocol_fee_recipient: felt252,
         pending_fee_recipient: felt252,
         pending_fee_recipient_eta: u64,
@@ -325,12 +412,14 @@ pub mod Exchange {
         book_root: felt252,
         last_close_time_ms: u64,
         note_batch_count: u64,
+        note_batch_roots: Map<u64, felt252>,
         note_frontier: Map<u64, felt252>,
         current_note_root: felt252,
         known_note_roots: Map<felt252, bool>,
         activated_funding: Map<felt252, bool>,
         nullifier_states: Map<felt252, u8>,
         pending_exits: Map<felt252, PendingExit>,
+        pending_residual_exits: Map<felt252, PendingResidualExit>,
         capacities: Map<(u32, felt252, bool), Capacity>,
     }
 
@@ -342,6 +431,8 @@ pub mod Exchange {
         ExternalFilled: ExternalFilled,
         WithdrawalRequested: WithdrawalRequested,
         WithdrawalFinalized: WithdrawalFinalized,
+        ResidualRecoveryRequested: ResidualRecoveryRequested,
+        ResidualRecoveryFinalized: ResidualRecoveryFinalized,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -391,11 +482,25 @@ pub mod Exchange {
         pub exit_commitment: felt252,
     }
 
+    #[derive(Drop, starknet::Event)]
+    pub struct ResidualRecoveryRequested {
+        #[key]
+        pub nullifier: felt252,
+        pub matures_at: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct ResidualRecoveryFinalized {
+        #[key]
+        pub nullifier: felt252,
+    }
+
     #[constructor]
     fn constructor(ref self: ContractState, admin: ContractAddress) {
         assert(!admin.is_zero(), 'BAD_ADMIN');
         self.admin.write(admin);
         self.proof_validity_blocks.write(DEFAULT_PROOF_VALIDITY_BLOCKS);
+        self.epoch_ms.write(6000);
         self.max_close_delay_ms.write(60000);
         self.withdrawal_delay_seconds.write(120);
         self.book_root.write(empty_book_root(get_contract_address().into()));
@@ -509,14 +614,26 @@ pub mod Exchange {
             self.objective_numeraire.write(asset_id);
         }
 
+        fn set_market_registry_hash(ref self: ContractState, high: u128, low: u128) {
+            assert_unlocked_admin(@self);
+            assert(high != 0 || low != 0, 'BAD_REGISTRY_HASH');
+            self.market_registry_hash_high.write(high);
+            self.market_registry_hash_low.write(low);
+        }
+
         fn set_timing(
             ref self: ContractState,
+            epoch_ms: u64,
             max_close_delay_ms: u64,
             withdrawal_delay_seconds: u64,
             external_window_seconds: u64,
         ) {
             assert_unlocked_admin(@self);
-            assert(max_close_delay_ms != 0 && withdrawal_delay_seconds != 0, 'BAD_TIMING');
+            assert(
+                epoch_ms != 0 && max_close_delay_ms != 0 && withdrawal_delay_seconds != 0,
+                'BAD_TIMING',
+            );
+            self.epoch_ms.write(epoch_ms);
             self.max_close_delay_ms.write(max_close_delay_ms);
             self.withdrawal_delay_seconds.write(withdrawal_delay_seconds);
             self.external_window_seconds.write(external_window_seconds);
@@ -537,22 +654,17 @@ pub mod Exchange {
             self.pair_base.write(pair_id, base_asset_id);
             self.pair_quote.write(pair_id, quote_asset_id);
             self.pair_fee_bps.write(pair_id, fee_bps);
+            let pair_index = self.pair_count.read();
+            self.pair_ids.write(pair_index, pair_id);
+            self.pair_count.write(pair_index + 1);
         }
 
-        fn propose_pair_fee(ref self: ContractState, pair_id: felt252, fee_bps: u128) {
-            assert_admin(@self);
+        fn set_pair_external_support(
+            ref self: ContractState, pair_id: felt252, support_quote: u128,
+        ) {
+            assert_unlocked_admin(@self);
             assert(self.pair_base.read(pair_id) != 0, 'UNKNOWN_PAIR');
-            assert(fee_bps <= MAX_FEE_BPS, 'BAD_FEE');
-            self.pending_pair_fee_bps.write(pair_id, fee_bps);
-            self.pending_pair_fee_eta.write(pair_id, get_block_timestamp() + FEE_TIMELOCK_SECONDS);
-        }
-
-        fn execute_pair_fee(ref self: ContractState, pair_id: felt252) {
-            assert_admin(@self);
-            let eta = self.pending_pair_fee_eta.read(pair_id);
-            assert(eta != 0 && get_block_timestamp() >= eta, 'FEE_TIMELOCK');
-            self.pair_fee_bps.write(pair_id, self.pending_pair_fee_bps.read(pair_id));
-            self.pending_pair_fee_eta.write(pair_id, 0);
+            self.pair_external_support_quote.write(pair_id, support_quote);
         }
 
         fn set_protocol_fee_recipient(ref self: ContractState, recipient: felt252) {
@@ -586,6 +698,12 @@ pub mod Exchange {
             assert(!self.bridge.read().is_zero(), 'CUSTODY_UNSET');
             assert(self.reference_signer.read() != 0, 'SIGNER_UNSET');
             assert(self.objective_numeraire.read() != 0, 'NUMERAIRE_UNSET');
+            assert(self.pair_count.read() > 0, 'NO_PAIRS');
+            assert(
+                self.market_registry_hash_high.read() != 0
+                    || self.market_registry_hash_low.read() != 0,
+                'REGISTRY_UNSET',
+            );
             assert(self.protocol_fee_recipient.read() != 0, 'RECIPIENT_UNSET');
             self.config_locked.write(true);
         }
@@ -609,6 +727,7 @@ pub mod Exchange {
             outcomes: Span<OutcomeRecord>,
             capacities: Span<CapacityEntry>,
             nullifiers: Span<felt252>,
+            retired_nullifiers: Span<felt252>,
             outputs: Span<OutputRecord>,
         ) {
             assert(get_caller_address() == self.settlement_account.read(), 'UNAUTHORIZED');
@@ -619,8 +738,9 @@ pub mod Exchange {
             assert(header.seq == self.seq.read() + 1, 'BAD_SEQ');
             assert(header.prior_book_root == self.book_root.read(), 'STALE_BOOK');
             assert(header.close_time_ms > self.last_close_time_ms.read(), 'STALE_CLOSE');
+            assert(header.close_time_ms % self.epoch_ms.read() == 0, 'UNALIGNED_CLOSE');
             let now_ms = get_block_timestamp() * 1000;
-            assert(header.close_time_ms <= now_ms + MAX_REFERENCE_FUTURE_SKEW_MS, 'FUTURE_CLOSE');
+            assert(header.close_time_ms <= now_ms, 'FUTURE_CLOSE');
             assert(now_ms <= header.close_time_ms + self.max_close_delay_ms.read(), 'LATE_CLOSE');
             if nullifiers_admit_orders(header.note_root) {
                 assert(self.known_note_roots.read(header.note_root), 'UNKNOWN_NOTE_ROOT');
@@ -633,7 +753,12 @@ pub mod Exchange {
             let capacity_commitment = open_capacities(
                 ref self, chain_context, header.seq, markets, capacities,
             );
-            let nullifiers_commitment = spend_nullifiers(ref self, chain_context, nullifiers);
+            let nullifiers_commitment = spend_nullifiers(
+                ref self, chain_context, header.close_time_ms, nullifiers,
+            );
+            let retired_nullifiers_commitment = verify_retired_nullifiers(
+                @self, chain_context, header.close_time_ms, retired_nullifiers,
+            );
             let outputs_commitment = outputs_commitment(chain_context, outputs);
             let fee_recipient = self.protocol_fee_recipient.read();
             assert(fee_recipient != 0, 'RECIPIENT_UNSET');
@@ -641,8 +766,9 @@ pub mod Exchange {
             let mut commitment = array![
                 TRANSITION_DOMAIN, chain_context, header.seq.into(), header.close_time_ms.into(),
                 header.prior_book_root, header.new_book_root, header.note_root, markets_commitment,
-                outcomes_commitment, capacity_commitment, nullifiers_commitment, outputs_commitment,
-                header.output_root, fee_recipient,
+                outcomes_commitment, capacity_commitment, nullifiers_commitment,
+                retired_nullifiers_commitment, outputs_commitment, header.output_root,
+                fee_recipient,
             ];
             let transition_commitment = poseidon_hash_span(commitment.span());
             assert_proof_facts_message(
@@ -785,6 +911,26 @@ pub mod Exchange {
             self.capacities.write(key, capacity);
         }
 
+        fn freeze_expired_capacity(
+            ref self: ContractState,
+            seq: u32,
+            pair_id: felt252,
+            sell: bool,
+            expected_generation: u64,
+        ) {
+            let key = (seq, pair_id, sell);
+            let mut capacity = self.capacities.read(key);
+            assert(capacity.status == CAPACITY_OPEN, 'CAPACITY_CLOSED');
+            assert(capacity.generation == expected_generation, 'STALE_CAPACITY');
+            assert(
+                get_block_timestamp() >= capacity.opened_at + self.external_window_seconds.read(),
+                'CAPACITY_NOT_EXPIRED',
+            );
+            capacity.status = CAPACITY_FROZEN;
+            capacity.generation += 1;
+            self.capacities.write(key, capacity);
+        }
+
         fn request_withdrawal(
             ref self: ContractState,
             note_root: felt252,
@@ -794,7 +940,6 @@ pub mod Exchange {
             exit_commitment: felt252,
             exit_authority: felt252,
         ) {
-            assert_not_paused(@self);
             assert(nullifier != 0 && asset_id != 0 && amount != 0, 'BAD_WITHDRAWAL');
             assert(exit_commitment != 0 && exit_authority != 0, 'BAD_EXIT');
             assert(self.known_note_roots.read(note_root), 'UNKNOWN_NOTE_ROOT');
@@ -812,23 +957,32 @@ pub mod Exchange {
                 bound_message(WITHDRAWAL_MESSAGE_DOMAIN, chain_context, commitment),
                 WITHDRAWAL_MESSAGE_DOMAIN,
             );
-            let matures_at = get_block_timestamp() + self.withdrawal_delay_seconds.read();
+            let requested_at = get_block_timestamp();
+            let requested_at_ms = requested_at * 1000;
+            let matures_at = requested_at + self.withdrawal_delay_seconds.read();
             self.nullifier_states.write(nullifier, NULLIFIER_EXIT_PENDING);
             self
                 .pending_exits
                 .write(
                     nullifier,
-                    PendingExit { asset_id, amount, exit_commitment, exit_authority, matures_at },
+                    PendingExit {
+                        asset_id,
+                        amount,
+                        exit_commitment,
+                        exit_authority,
+                        requested_at_ms,
+                        matures_at,
+                    },
                 );
             self.emit(WithdrawalRequested { nullifier, matures_at });
         }
 
         fn finalize_withdrawal(ref self: ContractState, nullifier: felt252) {
-            assert_not_paused(@self);
             assert(
                 self.nullifier_states.read(nullifier) == NULLIFIER_EXIT_PENDING, 'NO_PENDING_EXIT',
             );
             let exit = self.pending_exits.read(nullifier);
+            assert(exit.amount != 0, 'NO_PENDING_WITHDRAWAL');
             assert(get_block_timestamp() >= exit.matures_at, 'EXIT_NOT_MATURE');
             self.nullifier_states.write(nullifier, NULLIFIER_EXITED);
             IExitStagingDispatcher { contract_address: self.bridge.read() }
@@ -840,6 +994,206 @@ pub mod Exchange {
                     exit.exit_commitment,
                 );
             self.emit(WithdrawalFinalized { nullifier, exit_commitment: exit.exit_commitment });
+        }
+
+        fn request_residual_recovery(ref self: ContractState, recovery: ResidualRecovery) {
+            assert(recovery.nullifier != 0 && recovery.pair_id != 0, 'BAD_RECOVERY');
+            assert(recovery.input_asset_id != 0 && recovery.output_asset_id != 0, 'BAD_RECOVERY');
+            assert(
+                recovery.input_amount != 0
+                    || recovery.output_amount != 0
+                    || recovery.fee_amount != 0,
+                'BAD_RECOVERY',
+            );
+            assert(self.known_note_roots.read(recovery.note_root), 'UNKNOWN_NOTE_ROOT');
+            assert(
+                self.nullifier_states.read(recovery.nullifier) == NULLIFIER_UNUSED,
+                'NULLIFIER_USED',
+            );
+            let pair = pair_config_of(@self, recovery.pair_id);
+            assert(recovery.fee_bps == pair.fee_bps, 'RECOVERY_FEE');
+            let (expected_input, expected_output) = if recovery.sell {
+                (pair.base_asset_id, pair.quote_asset_id)
+            } else {
+                (pair.quote_asset_id, pair.base_asset_id)
+            };
+            assert(
+                recovery.input_asset_id == expected_input
+                    && recovery.output_asset_id == expected_output,
+                'RECOVERY_ASSET',
+            );
+            if recovery.input_amount == 0 {
+                assert(
+                    recovery.input_exit_commitment == 0 && recovery.input_exit_authority == 0,
+                    'BAD_RECOVERY_EXIT',
+                );
+            } else {
+                assert(
+                    recovery.input_exit_commitment != 0 && recovery.input_exit_authority != 0,
+                    'BAD_RECOVERY_EXIT',
+                );
+            }
+            if recovery.output_amount == 0 {
+                assert(
+                    recovery.output_exit_commitment == 0 && recovery.output_exit_authority == 0,
+                    'BAD_RECOVERY_EXIT',
+                );
+            } else {
+                assert(
+                    recovery.output_exit_commitment != 0 && recovery.output_exit_authority != 0,
+                    'BAD_RECOVERY_EXIT',
+                );
+            }
+            if recovery.input_amount != 0 && recovery.output_amount != 0 {
+                assert(
+                    recovery.input_exit_commitment != recovery.output_exit_commitment,
+                    'DUPLICATE_RECOVERY_EXIT',
+                );
+            }
+            if recovery.reserved_seq == 0 {
+                assert(
+                    recovery.capacity_generation == 0
+                        && recovery.capacity_status == 0
+                        && recovery.capacity_total == 0
+                        && recovery.capacity_consumed_base == 0
+                        && recovery.capacity_pool_quote == 0
+                        && recovery.capacity_scale == 0,
+                    'RECOVERY_CAPACITY',
+                );
+            } else {
+                let capacity = self
+                    .capacities
+                    .read((recovery.reserved_seq, recovery.pair_id, recovery.sell));
+                assert(
+                    capacity.status == CAPACITY_FILLED || capacity.status == CAPACITY_FROZEN,
+                    'RECOVERY_CAPACITY_OPEN',
+                );
+                assert(
+                    capacity.generation == recovery.capacity_generation
+                        && capacity.status == recovery.capacity_status
+                        && capacity.total == recovery.capacity_total
+                        && capacity.consumed_base == recovery.capacity_consumed_base
+                        && capacity.pool_quote == recovery.capacity_pool_quote
+                        && capacity.scale == recovery.capacity_scale,
+                    'RECOVERY_CAPACITY',
+                );
+            }
+            let chain_context: felt252 = get_contract_address().into();
+            let commitment = poseidon_hash_span(
+                array![
+                    RESIDUAL_RECOVERY_DOMAIN, chain_context, recovery.note_root, recovery.nullifier,
+                    recovery.pair_id, if recovery.sell {
+                        1
+                    } else {
+                        0
+                    }, recovery.fee_bps.into(),
+                    recovery.reserved_seq.into(), recovery.capacity_generation.into(),
+                    recovery.capacity_status.into(), recovery.capacity_total.into(),
+                    recovery.capacity_consumed_base.into(), recovery.capacity_pool_quote.into(),
+                    recovery.capacity_scale.into(), recovery.input_asset_id,
+                    recovery.input_amount.into(), recovery.output_asset_id,
+                    recovery.output_amount.into(), recovery.fee_amount.into(),
+                    recovery.input_exit_commitment, recovery.input_exit_authority,
+                    recovery.output_exit_commitment, recovery.output_exit_authority,
+                ]
+                    .span(),
+            );
+            assert_proof_facts_message(
+                @self,
+                bound_message(RESIDUAL_RECOVERY_MESSAGE_DOMAIN, chain_context, commitment),
+                RESIDUAL_RECOVERY_MESSAGE_DOMAIN,
+            );
+            let requested_at = get_block_timestamp();
+            let requested_at_ms = requested_at * 1000;
+            let matures_at = requested_at + self.withdrawal_delay_seconds.read();
+            let fee_exit_commitment = if recovery.fee_amount == 0 {
+                0
+            } else {
+                poseidon2(RESIDUAL_FEE_EXIT_DOMAIN, recovery.nullifier)
+            };
+            let fee_exit_authority = if recovery.fee_amount == 0 {
+                0
+            } else {
+                self.protocol_fee_recipient.read()
+            };
+            assert(
+                recovery.fee_amount == 0 || fee_exit_commitment != 0 && fee_exit_authority != 0,
+                'BAD_RECOVERY_FEE',
+            );
+            if recovery.fee_amount != 0 {
+                assert(
+                    recovery.input_exit_commitment != fee_exit_commitment
+                        && recovery.output_exit_commitment != fee_exit_commitment,
+                    'DUPLICATE_RECOVERY_EXIT',
+                );
+            }
+            self.nullifier_states.write(recovery.nullifier, NULLIFIER_EXIT_PENDING);
+            self
+                .pending_residual_exits
+                .write(
+                    recovery.nullifier,
+                    PendingResidualExit {
+                        input_asset_id: recovery.input_asset_id,
+                        input_amount: recovery.input_amount,
+                        input_exit_commitment: recovery.input_exit_commitment,
+                        input_exit_authority: recovery.input_exit_authority,
+                        output_asset_id: recovery.output_asset_id,
+                        output_amount: recovery.output_amount,
+                        output_exit_commitment: recovery.output_exit_commitment,
+                        output_exit_authority: recovery.output_exit_authority,
+                        fee_amount: recovery.fee_amount,
+                        fee_exit_commitment,
+                        fee_exit_authority,
+                        requested_at_ms,
+                        matures_at,
+                    },
+                );
+            self.emit(ResidualRecoveryRequested { nullifier: recovery.nullifier, matures_at });
+        }
+
+        fn finalize_residual_recovery(ref self: ContractState, nullifier: felt252) {
+            assert(
+                self.nullifier_states.read(nullifier) == NULLIFIER_EXIT_PENDING, 'NO_PENDING_EXIT',
+            );
+            let exit = self.pending_residual_exits.read(nullifier);
+            assert(
+                exit.input_amount != 0 || exit.output_amount != 0 || exit.fee_amount != 0,
+                'NO_PENDING_RECOVERY',
+            );
+            assert(get_block_timestamp() >= exit.matures_at, 'EXIT_NOT_MATURE');
+            self.nullifier_states.write(nullifier, NULLIFIER_EXITED);
+            let bridge = IExitStagingDispatcher { contract_address: self.bridge.read() };
+            if exit.input_amount != 0 {
+                bridge
+                    .stage_verified_note_strk20_exit(
+                        exit.input_asset_id,
+                        exit.input_amount,
+                        poseidon2(poseidon2(RESIDUAL_EXIT_LEG_DOMAIN, nullifier), 0),
+                        exit.input_exit_authority,
+                        exit.input_exit_commitment,
+                    );
+            }
+            if exit.output_amount != 0 {
+                bridge
+                    .stage_verified_note_strk20_exit(
+                        exit.output_asset_id,
+                        exit.output_amount,
+                        poseidon2(poseidon2(RESIDUAL_EXIT_LEG_DOMAIN, nullifier), 1),
+                        exit.output_exit_authority,
+                        exit.output_exit_commitment,
+                    );
+            }
+            if exit.fee_amount != 0 {
+                bridge
+                    .stage_verified_note_strk20_exit(
+                        exit.output_asset_id,
+                        exit.fee_amount,
+                        poseidon2(poseidon2(RESIDUAL_EXIT_LEG_DOMAIN, nullifier), 2),
+                        exit.fee_exit_authority,
+                        exit.fee_exit_commitment,
+                    );
+            }
+            self.emit(ResidualRecoveryFinalized { nullifier });
         }
 
         fn transition_seq(self: @ContractState) -> u32 {
@@ -854,12 +1208,48 @@ pub mod Exchange {
             self.last_close_time_ms.read()
         }
 
+        fn epoch_length_ms(self: @ContractState) -> u64 {
+            self.epoch_ms.read()
+        }
+
+        fn max_close_delay_ms(self: @ContractState) -> u64 {
+            self.max_close_delay_ms.read()
+        }
+
+        fn withdrawal_delay_seconds(self: @ContractState) -> u64 {
+            self.withdrawal_delay_seconds.read()
+        }
+
+        fn external_window_seconds(self: @ContractState) -> u64 {
+            self.external_window_seconds.read()
+        }
+
         fn note_root(self: @ContractState) -> felt252 {
             self.current_note_root.read()
         }
 
         fn note_batch_count(self: @ContractState) -> u64 {
             self.note_batch_count.read()
+        }
+
+        fn note_batch_root(self: @ContractState, index: u64) -> felt252 {
+            assert(index < self.note_batch_count.read(), 'BAD_BATCH_INDEX');
+            self.note_batch_roots.read(index)
+        }
+
+        fn note_batch_roots(self: @ContractState, start: u64, end: u64) -> Array<felt252> {
+            assert(start <= end && end - start < MAX_NOTE_BATCH_RANGE, 'BAD_BATCH_RANGE');
+            assert(end < self.note_batch_count.read(), 'BAD_BATCH_INDEX');
+            let mut roots = array![];
+            let mut index = start;
+            loop {
+                roots.append(self.note_batch_roots.read(index));
+                if index == end {
+                    break;
+                }
+                index += 1;
+            }
+            roots
         }
 
         fn is_known_note_root(self: @ContractState, root: felt252) -> bool {
@@ -874,6 +1264,10 @@ pub mod Exchange {
             self.pending_exits.read(nullifier)
         }
 
+        fn pending_residual_exit(self: @ContractState, nullifier: felt252) -> PendingResidualExit {
+            self.pending_residual_exits.read(nullifier)
+        }
+
         fn capacity(self: @ContractState, seq: u32, pair_id: felt252, sell: bool) -> Capacity {
             self.capacities.read((seq, pair_id, sell))
         }
@@ -883,7 +1277,25 @@ pub mod Exchange {
                 base_asset_id: self.pair_base.read(pair_id),
                 quote_asset_id: self.pair_quote.read(pair_id),
                 fee_bps: self.pair_fee_bps.read(pair_id),
+                external_settlement_support_quote: self.pair_external_support_quote.read(pair_id),
             }
+        }
+
+        fn pair_count(self: @ContractState) -> u64 {
+            self.pair_count.read()
+        }
+
+        fn pair_id_at(self: @ContractState, index: u64) -> felt252 {
+            assert(index < self.pair_count.read(), 'PAIR_INDEX_OOB');
+            self.pair_ids.read(index)
+        }
+
+        fn objective_numeraire(self: @ContractState) -> felt252 {
+            self.objective_numeraire.read()
+        }
+
+        fn market_registry_hash(self: @ContractState) -> (u128, u128) {
+            (self.market_registry_hash_high.read(), self.market_registry_hash_low.read())
         }
 
         fn protocol_fee_recipient(self: @ContractState) -> felt252 {
@@ -892,6 +1304,46 @@ pub mod Exchange {
 
         fn reference_signer(self: @ContractState) -> felt252 {
             self.reference_signer.read()
+        }
+
+        fn settlement_account(self: @ContractState) -> ContractAddress {
+            self.settlement_account.read()
+        }
+
+        fn pause_guardian(self: @ContractState) -> ContractAddress {
+            self.pause_guardian.read()
+        }
+
+        fn proof_program(self: @ContractState) -> ContractAddress {
+            self.proof_program.read()
+        }
+
+        fn virtual_program_hash(self: @ContractState) -> felt252 {
+            self.virtual_program_hash.read()
+        }
+
+        fn proof_version(self: @ContractState) -> felt252 {
+            self.expected_proof_version.read()
+        }
+
+        fn starknet_os_config_hash(self: @ContractState) -> felt252 {
+            self.expected_os_config_hash.read()
+        }
+
+        fn proof_validity_blocks(self: @ContractState) -> u64 {
+            self.proof_validity_blocks.read()
+        }
+
+        fn bridge(self: @ContractState) -> ContractAddress {
+            self.bridge.read()
+        }
+
+        fn deposit_root_registrar(self: @ContractState) -> ContractAddress {
+            self.deposit_root_registrar.read()
+        }
+
+        fn external_router(self: @ContractState) -> ContractAddress {
+            self.external_router.read()
         }
 
         fn transition_message_hash(
@@ -914,6 +1366,20 @@ pub mod Exchange {
                 WITHDRAWAL_MESSAGE_DOMAIN,
                 bound_message(
                     WITHDRAWAL_MESSAGE_DOMAIN, get_contract_address().into(), withdrawal_commitment,
+                ),
+            )
+        }
+
+        fn residual_recovery_message_hash(
+            self: @ContractState, recovery_commitment: felt252,
+        ) -> felt252 {
+            proof_message_hash(
+                self.proof_program.read(),
+                RESIDUAL_RECOVERY_MESSAGE_DOMAIN,
+                bound_message(
+                    RESIDUAL_RECOVERY_MESSAGE_DOMAIN,
+                    get_contract_address().into(),
+                    recovery_commitment,
                 ),
             )
         }
@@ -960,6 +1426,7 @@ pub mod Exchange {
             base_asset_id,
             quote_asset_id: self.pair_quote.read(pair_id),
             fee_bps: self.pair_fee_bps.read(pair_id),
+            external_settlement_support_quote: self.pair_external_support_quote.read(pair_id),
         }
     }
 
@@ -1175,6 +1642,11 @@ pub mod Exchange {
         for entry in capacities {
             let entry = *entry;
             assert(entry.bound != 0 && entry.total != 0, 'BAD_CAPACITY');
+            assert(
+                self.external_window_seconds.read() != 0
+                    && self.pair_external_support_quote.read(entry.pair_id) != 0,
+                'EXTERNAL_DISABLED',
+            );
             let mut scale: u128 = 0;
             for market in markets {
                 if (*market).pair_id == entry.pair_id {
@@ -1213,7 +1685,10 @@ pub mod Exchange {
 
     /// spends every admitted note's nullifier; a pending exit on the same note is voided.
     fn spend_nullifiers(
-        ref self: ContractState, chain_context: felt252, nullifiers: Span<felt252>,
+        ref self: ContractState,
+        chain_context: felt252,
+        close_time_ms: u64,
+        nullifiers: Span<felt252>,
     ) -> felt252 {
         let mut state = poseidon2(NULLIFIERS_DOMAIN, chain_context);
         for nullifier in nullifiers {
@@ -1222,8 +1697,45 @@ pub mod Exchange {
             assert(
                 current == NULLIFIER_UNUSED || current == NULLIFIER_EXIT_PENDING, 'NULLIFIER_SPENT',
             );
+            if current == NULLIFIER_EXIT_PENDING {
+                let residual = self.pending_residual_exits.read(nullifier);
+                let requested_at_ms = if residual.input_amount != 0
+                    || residual.output_amount != 0
+                    || residual.fee_amount != 0 {
+                    residual.requested_at_ms
+                } else {
+                    self.pending_exits.read(nullifier).requested_at_ms
+                };
+                assert(
+                    requested_at_ms != 0 && close_time_ms <= requested_at_ms, 'EXIT_AFTER_CUTOFF',
+                );
+            }
             self.nullifier_states.write(nullifier, NULLIFIER_SPENT);
             state = poseidon2(state, nullifier);
+        }
+        poseidon2(state, nullifiers.len().into())
+    }
+
+    fn verify_retired_nullifiers(
+        self: @ContractState, chain_context: felt252, close_time_ms: u64, nullifiers: Span<felt252>,
+    ) -> felt252 {
+        let mut state = poseidon2(RETIRED_NULLIFIERS_DOMAIN, chain_context);
+        for nullifier in nullifiers {
+            let nullifier_state = self.nullifier_states.read(*nullifier);
+            if nullifier_state == NULLIFIER_EXIT_PENDING {
+                let residual = self.pending_residual_exits.read(*nullifier);
+                assert(
+                    (residual.input_amount != 0
+                        || residual.output_amount != 0
+                        || residual.fee_amount != 0)
+                        && residual.requested_at_ms != 0
+                        && close_time_ms > residual.requested_at_ms,
+                    'NOT_RECOVERED',
+                );
+            } else {
+                assert(nullifier_state == NULLIFIER_EXITED, 'NOT_RECOVERED');
+            }
+            state = poseidon2(state, *nullifier);
         }
         poseidon2(state, nullifiers.len().into())
     }
@@ -1233,6 +1745,9 @@ pub mod Exchange {
         for output in outputs {
             values.append((*output).leaf);
             values.append((*output).enc);
+            values.append((*output).enc_remaining);
+            values.append((*output).enc_reserved);
+            values.append((*output).enc_reserved_offset);
         }
         values.append(outputs.len().into());
         poseidon_hash_span(values.span())
@@ -1269,6 +1784,7 @@ pub mod Exchange {
         }
         self.note_frontier.write(level, carry);
         let size = leaf_count + 1;
+        self.note_batch_roots.write(leaf_count, batch_root);
         self.note_batch_count.write(size);
         // fold the frontier into the root: a peak at every set bit of the size.
         let mut root: felt252 = 0;

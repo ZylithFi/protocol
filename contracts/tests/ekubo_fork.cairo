@@ -8,8 +8,8 @@
 //! the escrow receives, take the usdc it pays, buy exactly 1000 strk back over ekubo's two
 //! exact-output splits, repay) and keeps the surplus.
 //!
-//! in both, the next transition applies the filled outcome. they need network access:
-//! `snforge test --include-ignored ekubo_fork`.
+//! in both, the next transition applies the filled outcome. run the pinned network test with
+//! `contracts/scripts/run_ekubo_mainnet_fork_tests.sh` from the repository root.
 
 use snforge_std::fs::{FileTrait, read_txt};
 use snforge_std::{
@@ -59,6 +59,7 @@ struct TransitionCall {
     outcomes: Span<OutcomeRecord>,
     capacities: Span<CapacityEntry>,
     nullifiers: Span<felt252>,
+    retired_nullifiers: Span<felt252>,
     outputs: Span<OutputRecord>,
 }
 
@@ -106,6 +107,7 @@ fn submit(exchange: IExchangeDispatcher, message: felt252, call: @TransitionCall
             *call.outcomes,
             *call.capacities,
             *call.nullifiers,
+            *call.retired_nullifiers,
             *call.outputs,
         );
 }
@@ -186,28 +188,24 @@ fn route(amount: u128) -> Array<Swap> {
 }
 
 #[test]
-#[ignore]
 #[fork(url: "https://api.cartridge.gg/x/starknet/mainnet", block_number: 15489308)]
 fn a_real_ekubo_hedge_fills_an_external_capacity_for_profit() {
     fill("tests/fixtures/exchange_fork.txt", true, 1, 600_000, 40_500_000);
 }
 
 #[test]
-#[ignore]
 #[fork(url: "https://api.cartridge.gg/x/starknet/mainnet", block_number: 15489308)]
 fn two_real_ekubo_hedges_fill_one_sell_capacity_in_halves() {
     fill("tests/fixtures/exchange_fork.txt", true, 2, 600_000, 40_500_000);
 }
 
 #[test]
-#[ignore]
 #[fork(url: "https://api.cartridge.gg/x/starknet/mainnet", block_number: 15513293)]
 fn a_real_ekubo_exact_output_hedge_fills_an_external_buy_for_profit() {
     fill("tests/fixtures/exchange_fork_buy.txt", false, 1, 300_000, 41_500_000);
 }
 
 #[test]
-#[ignore]
 #[fork(url: "https://api.cartridge.gg/x/starknet/mainnet", block_number: 15513293)]
 fn two_real_ekubo_hedges_fill_one_buy_capacity_in_halves() {
     fill("tests/fixtures/exchange_fork_buy.txt", false, 2, 300_000, 41_500_000);
@@ -257,7 +255,7 @@ fn fill(fixture: ByteArray, sell: bool, parts: u128, min_profit: u128, pool_quot
     bridge.set_exchange(exchange_address);
     bridge.register_supported_asset(BASE, address(STRK));
     bridge.register_supported_asset(QUOTE, address(USDC));
-    cheat_caller_address(exchange_address, address(ADMIN), CheatSpan::TargetCalls(9));
+    cheat_caller_address(exchange_address, address(ADMIN), CheatSpan::TargetCalls(10));
     exchange.set_settlement_account(address(SETTLEMENT));
     exchange.set_proof_program(address(proof_program), 0xabc);
     exchange.set_proof_validation('PROOF1', 0xc0f, 450);
@@ -265,8 +263,9 @@ fn fill(fixture: ByteArray, sell: bool, parts: u128, min_profit: u128, pool_quot
     exchange.set_reference_signer(signer);
     exchange.set_objective_numeraire(QUOTE);
     exchange.register_pair(PAIR, BASE, QUOTE, 30);
+    exchange.set_pair_external_support(PAIR, 1);
     exchange.set_protocol_fee_recipient(FEE_RECIPIENT);
-    exchange.set_timing(60000, 120, 0);
+    exchange.set_timing(1, 60000, 120, 30);
 
     // the trader's deposit (strk for a sell, usdc for a buy), funded from ekubo core's balance.
     let deposit_count: u32 = next(ref data).try_into().unwrap();
@@ -313,6 +312,7 @@ fn fill(fixture: ByteArray, sell: bool, parts: u128, min_profit: u128, pool_quot
     // m1. the capacity stays open while strk is left.
     let searcher = starknet::get_contract_address();
     let usdc_before = usdc.balance_of(searcher);
+    let support_before = usdc.balance_of(address(SETTLEMENT));
     let router = IEkuboExternalMatchRouterDispatcher { contract_address: router_address };
     let part = SIZE / parts;
     let mut profit = 0_u128;
@@ -337,6 +337,10 @@ fn fill(fixture: ByteArray, sell: bool, parts: u128, min_profit: u128, pool_quot
     stop_cheat_block_timestamp(exchange_address);
     assert(profit >= min_profit, 'hedge profit');
     assert(usdc.balance_of(searcher) - usdc_before == profit.into(), 'profit paid out');
+    assert(
+        usdc.balance_of(address(SETTLEMENT)) - support_before == parts.into(),
+        'settlement support paid',
+    );
     let filled = exchange.capacity(1, PAIR, sell);
     assert(filled.status == 2 && filled.consumed_base == SIZE, 'capacity filled');
     assert(filled.pool_quote == pool_quote, 'escrow traded at m1');
