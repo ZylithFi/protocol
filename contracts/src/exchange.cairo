@@ -45,6 +45,14 @@ pub struct MarketAttestation {
     pub lower_price: u128,
     pub upper_price: u128,
     pub scale: u128,
+    pub reference_methodology: u8,
+    pub derivation_base_market_id: felt252,
+    pub derivation_quote_market_id: felt252,
+    pub derivation_base_bid: u128,
+    pub derivation_base_ask: u128,
+    pub derivation_quote_bid: u128,
+    pub derivation_quote_ask: u128,
+    pub max_leg_skew_ms: u64,
     pub source_count: u64,
     pub observed_at_ms: u64,
     pub valid_until_ms: u64,
@@ -87,8 +95,13 @@ pub struct OutputRecord {
 pub struct PairConfig {
     pub base_asset_id: felt252,
     pub quote_asset_id: felt252,
+    pub price_base_scale: u128,
     pub fee_bps: u128,
     pub external_settlement_support_quote: u128,
+    pub reference_methodology: u8,
+    pub derivation_base_market_id: felt252,
+    pub derivation_quote_market_id: felt252,
+    pub max_leg_skew_ms: u64,
 }
 
 #[derive(Drop, Serde, Copy, PartialEq, Debug, starknet::Store)]
@@ -201,7 +214,12 @@ pub trait IExchange<TContractState> {
         pair_id: felt252,
         base_asset_id: felt252,
         quote_asset_id: felt252,
+        price_base_scale: u128,
         fee_bps: u128,
+        reference_methodology: u8,
+        derivation_base_market_id: felt252,
+        derivation_quote_market_id: felt252,
+        max_leg_skew_ms: u64,
     );
     fn set_pair_external_support(ref self: TContractState, pair_id: felt252, support_quote: u128);
     fn set_protocol_fee_recipient(ref self: TContractState, recipient: felt252);
@@ -362,6 +380,8 @@ pub mod Exchange {
     const MAX_REFERENCE_WINDOW_MS: u64 = 15000;
     const MAX_REFERENCE_FUTURE_SKEW_MS: u64 = 5000;
     const MIN_REFERENCE_SOURCES: u64 = 3;
+    const REFERENCE_METHOD_DIRECT_BBO: u8 = 0;
+    const REFERENCE_METHOD_SYNTHETIC_CROSS_BBO: u8 = 1;
     const NULLIFIER_UNUSED: u8 = 0;
     const NULLIFIER_SPENT: u8 = 1;
     const NULLIFIER_EXIT_PENDING: u8 = 2;
@@ -401,8 +421,13 @@ pub mod Exchange {
         external_window_seconds: u64,
         pair_base: Map<felt252, felt252>,
         pair_quote: Map<felt252, felt252>,
+        pair_price_base_scale: Map<felt252, u128>,
         pair_fee_bps: Map<felt252, u128>,
         pair_external_support_quote: Map<felt252, u128>,
+        pair_reference_methodology: Map<felt252, u8>,
+        pair_derivation_base_market_id: Map<felt252, felt252>,
+        pair_derivation_quote_market_id: Map<felt252, felt252>,
+        pair_max_leg_skew_ms: Map<felt252, u64>,
         pair_count: u64,
         pair_ids: Map<u64, felt252>,
         protocol_fee_recipient: felt252,
@@ -644,16 +669,49 @@ pub mod Exchange {
             pair_id: felt252,
             base_asset_id: felt252,
             quote_asset_id: felt252,
+            price_base_scale: u128,
             fee_bps: u128,
+            reference_methodology: u8,
+            derivation_base_market_id: felt252,
+            derivation_quote_market_id: felt252,
+            max_leg_skew_ms: u64,
         ) {
             assert_unlocked_admin(@self);
             assert(pair_id != 0 && base_asset_id != 0 && quote_asset_id != 0, 'BAD_PAIR');
             assert(base_asset_id != quote_asset_id, 'BAD_PAIR');
+            assert(price_base_scale != 0, 'BAD_SCALE');
             assert(fee_bps <= MAX_FEE_BPS, 'BAD_FEE');
+            if reference_methodology == REFERENCE_METHOD_DIRECT_BBO {
+                assert(
+                    derivation_base_market_id == 0
+                        && derivation_quote_market_id == 0
+                        && max_leg_skew_ms == 0,
+                    'BAD_DIRECT_REF',
+                );
+            } else {
+                assert(
+                    reference_methodology == REFERENCE_METHOD_SYNTHETIC_CROSS_BBO, 'BAD_REF_METHOD',
+                );
+                assert(
+                    derivation_base_market_id != 0
+                        && derivation_quote_market_id != 0
+                        && derivation_base_market_id != derivation_quote_market_id
+                        && derivation_base_market_id != pair_id
+                        && derivation_quote_market_id != pair_id
+                        && max_leg_skew_ms != 0
+                        && max_leg_skew_ms <= MAX_REFERENCE_WINDOW_MS,
+                    'BAD_SYNTH_REF',
+                );
+            }
             assert(self.pair_base.read(pair_id) == 0, 'PAIR_EXISTS');
             self.pair_base.write(pair_id, base_asset_id);
             self.pair_quote.write(pair_id, quote_asset_id);
+            self.pair_price_base_scale.write(pair_id, price_base_scale);
             self.pair_fee_bps.write(pair_id, fee_bps);
+            self.pair_reference_methodology.write(pair_id, reference_methodology);
+            self.pair_derivation_base_market_id.write(pair_id, derivation_base_market_id);
+            self.pair_derivation_quote_market_id.write(pair_id, derivation_quote_market_id);
+            self.pair_max_leg_skew_ms.write(pair_id, max_leg_skew_ms);
             let pair_index = self.pair_count.read();
             self.pair_ids.write(pair_index, pair_id);
             self.pair_count.write(pair_index + 1);
@@ -699,6 +757,32 @@ pub mod Exchange {
             assert(self.reference_signer.read() != 0, 'SIGNER_UNSET');
             assert(self.objective_numeraire.read() != 0, 'NUMERAIRE_UNSET');
             assert(self.pair_count.read() > 0, 'NO_PAIRS');
+            let mut pair_index = 0;
+            while pair_index < self.pair_count.read() {
+                let pair_id = self.pair_ids.read(pair_index);
+                let pair = pair_config_of(@self, pair_id);
+                if pair.reference_methodology == REFERENCE_METHOD_DIRECT_BBO {
+                    assert(
+                        pair.quote_asset_id == self.objective_numeraire.read(),
+                        'DIRECT_NOT_NUMERAIRE',
+                    );
+                } else {
+                    let base = pair_config_of(@self, pair.derivation_base_market_id);
+                    let quote = pair_config_of(@self, pair.derivation_quote_market_id);
+                    assert(
+                        base.reference_methodology == REFERENCE_METHOD_DIRECT_BBO
+                            && quote.reference_methodology == REFERENCE_METHOD_DIRECT_BBO
+                            && base.base_asset_id == pair.base_asset_id
+                            && quote.base_asset_id == pair.quote_asset_id
+                            && base.quote_asset_id == self.objective_numeraire.read()
+                            && quote.quote_asset_id == self.objective_numeraire.read()
+                            && base.price_base_scale == pair.price_base_scale
+                            && quote.price_base_scale == pair.price_base_scale,
+                        'BAD_SYNTH_LEGS',
+                    );
+                }
+                pair_index += 1;
+            }
             assert(
                 self.market_registry_hash_high.read() != 0
                     || self.market_registry_hash_low.read() != 0,
@@ -1276,8 +1360,13 @@ pub mod Exchange {
             PairConfig {
                 base_asset_id: self.pair_base.read(pair_id),
                 quote_asset_id: self.pair_quote.read(pair_id),
+                price_base_scale: self.pair_price_base_scale.read(pair_id),
                 fee_bps: self.pair_fee_bps.read(pair_id),
                 external_settlement_support_quote: self.pair_external_support_quote.read(pair_id),
+                reference_methodology: self.pair_reference_methodology.read(pair_id),
+                derivation_base_market_id: self.pair_derivation_base_market_id.read(pair_id),
+                derivation_quote_market_id: self.pair_derivation_quote_market_id.read(pair_id),
+                max_leg_skew_ms: self.pair_max_leg_skew_ms.read(pair_id),
             }
         }
 
@@ -1425,8 +1514,13 @@ pub mod Exchange {
         PairConfig {
             base_asset_id,
             quote_asset_id: self.pair_quote.read(pair_id),
+            price_base_scale: self.pair_price_base_scale.read(pair_id),
             fee_bps: self.pair_fee_bps.read(pair_id),
             external_settlement_support_quote: self.pair_external_support_quote.read(pair_id),
+            reference_methodology: self.pair_reference_methodology.read(pair_id),
+            derivation_base_market_id: self.pair_derivation_base_market_id.read(pair_id),
+            derivation_quote_market_id: self.pair_derivation_quote_market_id.read(pair_id),
+            max_leg_skew_ms: self.pair_max_leg_skew_ms.read(pair_id),
         }
     }
 
@@ -1513,6 +1607,14 @@ pub mod Exchange {
             values.append(market.observed_at_ms.into());
             values.append(market.valid_until_ms.into());
             values.append(pair.fee_bps.into());
+            values.append(market.reference_methodology.into());
+            values.append(market.derivation_base_market_id);
+            values.append(market.derivation_quote_market_id);
+            values.append(market.derivation_base_bid.into());
+            values.append(market.derivation_base_ask.into());
+            values.append(market.derivation_quote_bid.into());
+            values.append(market.derivation_quote_ask.into());
+            values.append(market.max_leg_skew_ms.into());
         }
         poseidon_hash_span(values.span())
     }
@@ -1528,6 +1630,10 @@ pub mod Exchange {
             for value in array![
                 market.pair_id, pair.base_asset_id, pair.quote_asset_id, market.midpoint.into(),
                 market.lower_price.into(), market.upper_price.into(), market.scale.into(),
+                market.reference_methodology.into(), market.derivation_base_market_id,
+                market.derivation_quote_market_id, market.derivation_base_bid.into(),
+                market.derivation_base_ask.into(), market.derivation_quote_bid.into(),
+                market.derivation_quote_ask.into(), market.max_leg_skew_ms.into(),
                 market.source_count.into(), market.observed_at_ms.into(),
                 market.valid_until_ms.into(), market.source_set_commitment, market.nonce.into(),
             ] {
@@ -1555,6 +1661,14 @@ pub mod Exchange {
             'BAD_REF_WINDOW',
         );
         let pair = pair_config_of(self, market.pair_id);
+        assert(market.scale == pair.price_base_scale, 'BAD_REF_SCALE');
+        assert(
+            market.reference_methodology == pair.reference_methodology
+                && market.derivation_base_market_id == pair.derivation_base_market_id
+                && market.derivation_quote_market_id == pair.derivation_quote_market_id
+                && market.max_leg_skew_ms == pair.max_leg_skew_ms,
+            'BAD_REF_CONFIG',
+        );
         assert(market.price_batch_commitment == expected_batch_commitment, 'BAD_PRICE_BATCH');
         let signer = self.reference_signer.read();
         assert(signer != 0, 'SIGNER_UNSET');
@@ -1562,6 +1676,10 @@ pub mod Exchange {
         for value in array![
             market.pair_id, pair.base_asset_id, pair.quote_asset_id, market.midpoint.into(),
             market.lower_price.into(), market.upper_price.into(), market.scale.into(),
+            market.reference_methodology.into(), market.derivation_base_market_id,
+            market.derivation_quote_market_id, market.derivation_base_bid.into(),
+            market.derivation_base_ask.into(), market.derivation_quote_bid.into(),
+            market.derivation_quote_ask.into(), market.max_leg_skew_ms.into(),
             market.source_count.into(), market.observed_at_ms.into(), market.valid_until_ms.into(),
             market.source_set_commitment, market.nonce.into(), market.price_batch_commitment,
             signer,

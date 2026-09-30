@@ -55,6 +55,8 @@ const MAX_ASSETS: u32 = 8;
 const MAX_MARKETS: u32 = 8;
 const MAX_FUNDING_NOTES: u32 = 4;
 const MAX_FEE_BPS: u128 = 100;
+const REFERENCE_METHOD_DIRECT_BBO: u8 = 0;
+const REFERENCE_METHOD_SYNTHETIC_CROSS_BBO: u8 = 1;
 const FEE_BPS_DENOMINATOR: u128 = 10000;
 const MIN_OUTPUT_BUCKET: u32 = 16;
 const MIN_NULLIFIER_BUCKET: u32 = 8;
@@ -224,18 +226,51 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
         assert(valid < TWO_POW_48, 'EX_M0_WINDOW');
         let fee_bps = next_u128(ref data);
         assert(fee_bps <= MAX_FEE_BPS, 'EX_FEE_BPS');
+        let reference_methodology: u8 = next(ref data).try_into().expect('EX_REF_METHOD');
+        let derivation_base_market_id = next(ref data);
+        let derivation_quote_market_id = next(ref data);
+        let derivation_base_bid = next_u128(ref data);
+        let derivation_base_ask = next_u128(ref data);
+        let derivation_quote_bid = next_u128(ref data);
+        let derivation_quote_ask = next_u128(ref data);
+        let max_leg_skew_ms = next_u64(ref data);
         let base_id = (*assets.at(base)).id;
         let quote_id = (*assets.at(quote)).id;
         m0.absorb_pair(pair_id, base_id);
         m0.absorb_pair(quote_id, midpoint.into());
         m0.absorb_pair(scale.into(), observed_at);
         m0.absorb_pair(valid_until, fee_bps.into());
+        m0.absorb_pair(reference_methodology.into(), derivation_base_market_id);
+        m0.absorb_pair(derivation_quote_market_id, derivation_base_bid.into());
+        m0.absorb_pair(derivation_base_ask.into(), derivation_quote_bid.into());
+        m0.absorb_pair(derivation_quote_ask.into(), max_leg_skew_ms.into());
         markets
-            .append(Market { pair_id, base, quote, base_id, quote_id, midpoint, scale, fee_bps });
+            .append(
+                Market {
+                    pair_id,
+                    base,
+                    quote,
+                    base_id,
+                    quote_id,
+                    midpoint,
+                    scale,
+                    fee_bps,
+                    observed_at_ms: observed,
+                    reference_methodology,
+                    derivation_base_market_id,
+                    derivation_quote_market_id,
+                    derivation_base_bid,
+                    derivation_base_ask,
+                    derivation_quote_bid,
+                    derivation_quote_ask,
+                    max_leg_skew_ms,
+                },
+            );
     }
     let markets = markets.span();
     let markets_commitment = m0.finish();
     assert_distinct_market_pairs(markets);
+    assert_reference_derivations(markets);
     assert_assets_used(asset_count, markets);
     assert_canonical_weights(ref data, assets, markets, objective_numeraire);
 
@@ -1412,6 +1447,106 @@ fn ceil_fee(amount: felt252, fee_bps: u128) -> felt252 {
     } else {
         fee
     }
+}
+
+fn assert_reference_derivations(markets: Span<Market>) {
+    for market in markets {
+        let market = *market;
+        assert(
+            market.derivation_base_bid.into() < TWO_POW_120
+                && market.derivation_base_ask.into() < TWO_POW_120
+                && market.derivation_quote_bid.into() < TWO_POW_120
+                && market.derivation_quote_ask.into() < TWO_POW_120,
+            'EX_REF_BOUND',
+        );
+        if market.reference_methodology == REFERENCE_METHOD_DIRECT_BBO {
+            assert(
+                market.derivation_base_market_id == 0
+                    && market.derivation_quote_market_id == 0
+                    && market.derivation_base_bid != 0
+                    && market.derivation_base_bid <= market.derivation_base_ask
+                    && market.derivation_quote_bid == 0
+                    && market.derivation_quote_ask == 0
+                    && market.max_leg_skew_ms == 0,
+                'EX_DIRECT_REF',
+            );
+            assert(
+                market.midpoint == (market.derivation_base_bid + market.derivation_base_ask) / 2,
+                'EX_DIRECT_MID',
+            );
+        } else {
+            assert(
+                market.reference_methodology == REFERENCE_METHOD_SYNTHETIC_CROSS_BBO,
+                'EX_REF_METHOD',
+            );
+            assert(
+                market.derivation_base_market_id != 0
+                    && market.derivation_quote_market_id != 0
+                    && market.derivation_base_market_id != market.derivation_quote_market_id
+                    && market.max_leg_skew_ms != 0,
+                'EX_SYNTH_REF',
+            );
+            let base = market_by_pair(markets, market.derivation_base_market_id);
+            let quote = market_by_pair(markets, market.derivation_quote_market_id);
+            assert(
+                base.reference_methodology == REFERENCE_METHOD_DIRECT_BBO
+                    && quote.reference_methodology == REFERENCE_METHOD_DIRECT_BBO
+                    && base.base_id == market.base_id
+                    && quote.base_id == market.quote_id
+                    && base.quote_id == quote.quote_id
+                    && base.scale == market.scale
+                    && quote.scale == market.scale,
+                'EX_SYNTH_LEGS',
+            );
+            assert(
+                market.derivation_base_bid == base.derivation_base_bid
+                    && market.derivation_base_ask == base.derivation_base_ask
+                    && market.derivation_quote_bid == quote.derivation_base_bid
+                    && market.derivation_quote_ask == quote.derivation_base_ask,
+                'EX_SYNTH_BBO',
+            );
+            let skew = if base.observed_at_ms >= quote.observed_at_ms {
+                base.observed_at_ms - quote.observed_at_ms
+            } else {
+                quote.observed_at_ms - base.observed_at_ms
+            };
+            assert(skew <= market.max_leg_skew_ms, 'EX_SYNTH_SKEW');
+            let observed_at = if base.observed_at_ms <= quote.observed_at_ms {
+                base.observed_at_ms
+            } else {
+                quote.observed_at_ms
+            };
+            assert(market.observed_at_ms == observed_at, 'EX_SYNTH_TIME');
+            let (bid, _) = felt_div_rem(
+                market.derivation_base_bid.into() * market.scale.into(),
+                market.derivation_quote_ask,
+            );
+            let (ask_floor, ask_remainder) = felt_div_rem(
+                market.derivation_base_ask.into() * market.scale.into(),
+                market.derivation_quote_bid,
+            );
+            let ask = ask_floor + if ask_remainder {
+                1
+            } else {
+                0
+            };
+            let bid = u128_of(bid, 'EX_SYNTH_BID');
+            let ask = u128_of(ask, 'EX_SYNTH_ASK');
+            assert(bid != 0 && bid <= ask, 'EX_SYNTH_BBO');
+            assert(market.midpoint == (bid + ask) / 2, 'EX_SYNTH_MID');
+        }
+    }
+}
+
+fn market_by_pair(markets: Span<Market>, pair_id: felt252) -> Market {
+    let mut found: Option<Market> = Option::None;
+    for market in markets {
+        if (*market).pair_id == pair_id {
+            assert(found.is_none(), 'EX_SYNTH_DUP');
+            found = Option::Some(*market);
+        }
+    }
+    found.expect('EX_SYNTH_LEG')
 }
 
 #[inline(always)]

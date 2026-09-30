@@ -281,7 +281,20 @@ invoke "${exchange}" set_timing "${EPOCH_MS}" "${MAX_CLOSE_DELAY_MS}" "${WITHDRA
 invoke "${exchange}" set_protocol_fee_recipient "${FEE_RECIPIENT}"
 invoke "${exchange}" set_pause_guardian "${PAUSE_GUARDIAN}"
 for pair in ${PAIRS}; do
-  invoke "${exchange}" register_pair "$(id_of "${pair}")" "$(id_of "${pair%%/*}")" "$(id_of "${pair#*/}")" "$(market_field "${pair}" taker_fee_bps)"
+  reference_methodology="$(market_field "${pair}" reference_price.methodology)"
+  if [[ "${reference_methodology}" == "direct_bbo_midpoint" ]]; then
+    reference_args=(0 0 0 0)
+  elif [[ "${reference_methodology}" == "synthetic_cross_bbo_midpoint" ]]; then
+    reference_args=(
+      1
+      "$(id_of "$(market_field "${pair}" reference_price.base_market_id)")"
+      "$(id_of "$(market_field "${pair}" reference_price.quote_market_id)")"
+      "$(market_field "${pair}" reference_price.max_leg_skew_ms)"
+    )
+  else
+    die "unsupported reference methodology ${reference_methodology} for ${pair}"
+  fi
+  invoke "${exchange}" register_pair "$(id_of "${pair}")" "$(id_of "${pair%%/*}")" "$(id_of "${pair#*/}")" "$(market_field "${pair}" price_base_scale)" "$(market_field "${pair}" taker_fee_bps)" "${reference_args[@]}"
   if [[ " ${EXTERNAL_PAIRS} " == *" ${pair} "* ]]; then
     invoke "${exchange}" set_pair_external_support "$(id_of "${pair}")" "$(market_field "${pair}" external_settlement_support_quote)"
   fi

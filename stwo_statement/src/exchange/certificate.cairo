@@ -23,6 +23,15 @@ pub struct Market {
     pub midpoint: u128,
     pub scale: u128,
     pub fee_bps: u128,
+    pub observed_at_ms: u64,
+    pub reference_methodology: u8,
+    pub derivation_base_market_id: felt252,
+    pub derivation_quote_market_id: felt252,
+    pub derivation_base_bid: u128,
+    pub derivation_base_ask: u128,
+    pub derivation_quote_bid: u128,
+    pub derivation_quote_ask: u128,
+    pub max_leg_skew_ms: u64,
 }
 
 /// `ceil(capacity * (2 * scale + midpoint) / (scale * 2^64))`.

@@ -46,6 +46,7 @@ const USDC: felt252 = 0x053c91253bc9682c04929ca02ed00b3e423f6710d2ee7e0d5ebb06f3
 const HOP: felt252 = 0x033068f6539f8e6e6b131e6b2b814e6c34a5224bc66947c47dab9dfee93b35fb;
 const EKUBO_CORE: felt252 = 0x00000005dd3d2f4429af886cd1a3b08289dbcea99a294197e9eb43b0e0325b4b;
 const EKUBO_ROUTER: felt252 = 0x0199741822c2dc722f6f605204f35e56dbc23bceed54818168c4c49e4fb8737e;
+const SCALE: u128 = 1_000_000_000_000_000_000;
 const SIZE: u128 = 1_000_000_000_000_000_000_000;
 
 fn address(value: felt252) -> ContractAddress {
@@ -262,7 +263,7 @@ fn fill(fixture: ByteArray, sell: bool, parts: u128, min_profit: u128, pool_quot
     exchange.set_custody(bridge_address, registry_address, router_address);
     exchange.set_reference_signer(signer);
     exchange.set_objective_numeraire(QUOTE);
-    exchange.register_pair(PAIR, BASE, QUOTE, 30);
+    exchange.register_pair(PAIR, BASE, QUOTE, SCALE, 30, 0, 0, 0, 0);
     exchange.set_pair_external_support(PAIR, 1);
     exchange.set_protocol_fee_recipient(FEE_RECIPIENT);
     exchange.set_timing(1, 60000, 120, 30);
@@ -298,7 +299,7 @@ fn fill(fixture: ByteArray, sell: bool, parts: u128, min_profit: u128, pool_quot
     let (reserve_message, reserve) = read_transition(ref data);
     let (apply_message, apply) = read_transition(ref data);
     let mut m1_fields = array![];
-    for _ in 0..13_u32 {
+    for _ in 0..21_u32 {
         m1_fields.append(next(ref data));
     }
     let mut m1_span = m1_fields.span();

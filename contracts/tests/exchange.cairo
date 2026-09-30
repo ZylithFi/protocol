@@ -199,7 +199,7 @@ fn setup_with_timing(ref fixture: Fixture, epoch_ms: u64, window: u64) -> Setup 
     exchange.set_reference_signer(signer);
     exchange.set_objective_numeraire(QUOTE);
     exchange.set_market_registry_hash(1, 2);
-    exchange.register_pair(PAIR, BASE, QUOTE, 30);
+    exchange.register_pair(PAIR, BASE, QUOTE, 1, 30, 0, 0, 0, 0);
     exchange.set_pair_external_support(PAIR, if window == 0 {
         0
     } else {
@@ -503,7 +503,7 @@ fn a_locked_exchange_cannot_silently_add_a_market() {
     cheat_caller_address(
         setup.exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1),
     );
-    setup.exchange.register_pair(0x999, BASE, QUOTE, 30);
+    setup.exchange.register_pair(0x999, BASE, QUOTE, 1, 30, 0, 0, 0, 0);
 }
 
 #[test]
@@ -792,11 +792,53 @@ fn an_outcome_waits_for_its_window() {
 
 fn read_attestation(ref fixture: Fixture) -> MarketAttestation {
     let mut values = array![];
-    for _ in 0..13_u32 {
+    for _ in 0..21_u32 {
         values.append(fixture.next());
     }
     let mut span = values.span();
     Serde::deserialize(ref span).unwrap()
+}
+
+#[test]
+fn synthetic_pair_configuration_is_explicit_and_queryable() {
+    let (exchange_address, _) = declare("Exchange")
+        .unwrap()
+        .contract_class()
+        .deploy_at(@array![ADMIN], address(0x5151))
+        .unwrap();
+    let exchange = IExchangeDispatcher { contract_address: exchange_address };
+    cheat_caller_address(exchange_address, address(ADMIN), CheatSpan::TargetCalls(4));
+    exchange.set_objective_numeraire(QUOTE);
+    exchange.register_pair(0x901, BASE, QUOTE, 1, 2, 0, 0, 0, 0);
+    exchange.register_pair(0x902, 0xbeef, QUOTE, 1, 2, 0, 0, 0, 0);
+    exchange.register_pair(0x903, BASE, 0xbeef, 1, 2, 1, 0x901, 0x902, 1500);
+    let pair = exchange.pair_config(0x903);
+    assert(pair.base_asset_id == BASE && pair.quote_asset_id == 0xbeef, 'BAD_PAIR');
+    assert(pair.price_base_scale == 1, 'BAD_SCALE');
+    assert(pair.reference_methodology == 1, 'BAD_REF_METHOD');
+    assert(
+        pair.derivation_base_market_id == 0x901
+            && pair.derivation_quote_market_id == 0x902
+            && pair.max_leg_skew_ms == 1500,
+        'BAD_SYNTH_CONFIG',
+    );
+}
+
+#[test]
+fn a_synthetic_pair_can_enable_residual_external_matching() {
+    let (exchange_address, _) = declare("Exchange")
+        .unwrap()
+        .contract_class()
+        .deploy_at(@array![ADMIN], address(0x5152))
+        .unwrap();
+    let exchange = IExchangeDispatcher { contract_address: exchange_address };
+    cheat_caller_address(exchange_address, address(ADMIN), CheatSpan::TargetCalls(5));
+    exchange.set_objective_numeraire(QUOTE);
+    exchange.register_pair(0x901, BASE, QUOTE, 1, 2, 0, 0, 0, 0);
+    exchange.register_pair(0x902, 0xbeef, QUOTE, 1, 2, 0, 0, 0, 0);
+    exchange.register_pair(0x903, BASE, 0xbeef, 1, 2, 1, 0x901, 0x902, 1500);
+    exchange.set_pair_external_support(0x903, 1);
+    assert(exchange.pair_config(0x903).external_settlement_support_quote == 1, 'BAD_SUPPORT');
 }
 
 #[test]
