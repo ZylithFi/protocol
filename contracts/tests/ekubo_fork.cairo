@@ -258,7 +258,10 @@ fn fill(fixture: ByteArray, sell: bool, parts: u128, min_profit: u128, pool_quot
     bridge.register_supported_asset(QUOTE, address(USDC));
     cheat_caller_address(exchange_address, address(ADMIN), CheatSpan::TargetCalls(10));
     exchange.set_settlement_account(address(SETTLEMENT));
-    exchange.set_proof_program(address(proof_program), 0xabc);
+    exchange
+        .set_proof_programs(
+            address(proof_program), address(proof_program), address(proof_program), 0xabc,
+        );
     exchange.set_proof_validation('PROOF1', 0xc0f, 450);
     exchange.set_custody(bridge_address, registry_address, router_address);
     exchange.set_reference_signer(signer);

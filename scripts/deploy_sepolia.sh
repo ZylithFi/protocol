@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# deploys the exchange, its custody contracts and the proof program, wires them together and
+# deploys the exchange, its custody contracts and the proof programs, wires them together and
 # writes the deployment manifest. `deploy_sepolia.sh pin <proof_version> <virtual_program_hash>
-# <os_config_hash>` later pins the proof program from the facts `zylith-operator bench` prints, and
+# <os_config_hash>` later pins the prover facts `zylith-operator bench` prints, and
 # `deploy_sepolia.sh lock` freezes the configuration and finalizes the manifest.
 set -euo pipefail
 
@@ -117,7 +117,11 @@ case "${1:-deploy}" in
     [[ "$#" -eq 4 ]] || { echo "usage: $0 pin <proof_version> <virtual_program_hash> <os_config_hash>" >&2; exit 1; }
     require_clean_release
     exchange="$(contract_address exchange)"
-    invoke "${exchange}" set_proof_program "$(proof_field proof_program_address)" "$3"
+    invoke "${exchange}" set_proof_programs \
+      "$(proof_field transition_proof_program_address)" \
+      "$(proof_field withdrawal_proof_program_address)" \
+      "$(proof_field residual_recovery_proof_program_address)" \
+      "$3"
     invoke "${exchange}" set_proof_validation "$2" "$4" "${ZYLITH_PROOF_VALIDITY_BLOCKS:-450}"
     python3 - "${STATE_FILE}" "${CLIENT_MANIFEST}" "$2" "$3" "$4" <<'PY'
 import json, sys
@@ -133,7 +137,7 @@ PY
     ;;
   lock)
     require_clean_release
-    # a manifest is final only once the proof program is pinned and the contracts are locked.
+    # a manifest is final only once the prover facts are pinned and the contracts are locked.
     python3 - "${STATE_FILE}" <<'PY' || die "pin the proof program before locking"
 import json, sys
 data = json.load(open(sys.argv[1]))
@@ -166,7 +170,15 @@ esac
 [[ -n "${PROVER_BUILD_ID}" ]] || die "ZYLITH_PROVER_BUILD_ID is required"
 ADMIN="${ZYLITH_DEPLOY_ADMIN_ADDRESS:?ZYLITH_DEPLOY_ADMIN_ADDRESS is required}"
 SETTLEMENT_ACCOUNT="${ZYLITH_SETTLEMENT_ACCOUNT_ADDRESS:?ZYLITH_SETTLEMENT_ACCOUNT_ADDRESS is required}"
-PROOF_ACCOUNT="${ZYLITH_PROOF_ACCOUNT_ADDRESS:?ZYLITH_PROOF_ACCOUNT_ADDRESS is required}"
+PROOF_ACCOUNT_PUBLIC_KEY="${ZYLITH_PROOF_ACCOUNT_PUBLIC_KEY:?ZYLITH_PROOF_ACCOUNT_PUBLIC_KEY is required}"
+PROOF_ACCOUNT_PRIVATE_KEY="${ZYLITH_PROOF_ACCOUNT_PRIVATE_KEY:?ZYLITH_PROOF_ACCOUNT_PRIVATE_KEY is required}"
+derived_proof_public_key="$(
+  ZYLITH_PROOF_ACCOUNT_PRIVATE_KEY="${PROOF_ACCOUNT_PRIVATE_KEY}" \
+    cargo run --quiet --manifest-path "${ROOT_DIR}/Cargo.toml" -p zylith-operator --bin zylith-operator -- proof-public-key
+)"
+python3 -c 'import sys; raise SystemExit(0 if int(sys.argv[1], 0) == int(sys.argv[2], 0) else 1)' \
+  "${PROOF_ACCOUNT_PUBLIC_KEY}" "${derived_proof_public_key}" ||
+    die "the proof account public key does not match its private key"
 PRIVACY_POOL="${ZYLITH_STARKNET_PRIVACY_POOL_ADDRESS:?ZYLITH_STARKNET_PRIVACY_POOL_ADDRESS is required}"
 PRIVACY_DISCOVERY_URL="${ZYLITH_STARKNET_PRIVACY_DISCOVERY_URL:?ZYLITH_STARKNET_PRIVACY_DISCOVERY_URL is required}"
 PRIVACY_PROVING_URL="${ZYLITH_STARKNET_PRIVACY_PROVING_URL:?ZYLITH_STARKNET_PRIVACY_PROVING_URL is required}"
@@ -251,7 +263,10 @@ router_class=""
 if [[ -n "${EXTERNAL_PAIRS}" ]]; then
   router_class="$(declare_class "${CONTRACTS_DIR}" zylith_protocol EkuboExternalMatchRouter)"
 fi
-program_class="$(declare_class "${PROOF_PROGRAM_DIR}" zylith_proof_program ExchangeProofProgram)"
+transition_program_class="$(declare_class "${PROOF_PROGRAM_DIR}" zylith_proof_program TransitionProofProgram)"
+withdrawal_program_class="$(declare_class "${PROOF_PROGRAM_DIR}" zylith_proof_program WithdrawalProofProgram)"
+residual_recovery_program_class="$(declare_class "${PROOF_PROGRAM_DIR}" zylith_proof_program ResidualRecoveryProofProgram)"
+proof_account_class="$(declare_class "${PROOF_PROGRAM_DIR}" zylith_proof_program ProofAccount)"
 
 registry="$(deploy_class "${registry_class}" "${ADMIN}")"
 bridge="$(deploy_class "${bridge_class}" "${ADMIN}" "${registry}" "${PRIVACY_POOL}")"
@@ -260,7 +275,15 @@ router="0x0"
 if [[ -n "${EXTERNAL_PAIRS}" ]]; then
   router="$(deploy_class "${router_class}" "${EKUBO_CORE}" "${EKUBO_ROUTER}" "${exchange}" "${bridge}")"
 fi
-proof_program="$(deploy_class "${program_class}")"
+transition_proof_program="$(deploy_class "${transition_program_class}")"
+withdrawal_proof_program="$(deploy_class "${withdrawal_program_class}")"
+residual_recovery_proof_program="$(deploy_class "${residual_recovery_program_class}")"
+proof_account="$(deploy_class \
+  "${proof_account_class}" \
+  "${PROOF_ACCOUNT_PUBLIC_KEY}" \
+  "${transition_proof_program}" \
+  "${withdrawal_proof_program}" \
+  "${residual_recovery_proof_program}")"
 
 invoke "${registry}" set_privacy_deposit_bridge "${bridge}"
 invoke "${registry}" set_exchange "${exchange}"
@@ -338,12 +361,12 @@ def token_decimals(token):
 for asset in registry["assets"]:
     if asset["enabled"] and token_decimals(asset["token_address"]) != asset["decimals"]:
         sys.exit(f'{asset["asset_id"]} at {asset["token_address"]} does not match registry decimals {asset["decimals"]}')
-manifest["proof"].update({"proof_program_address": "${proof_program}", "proof_account_address": "${PROOF_ACCOUNT}", "settlement_account_address": "${SETTLEMENT_ACCOUNT}", "config_locked_after_deploy": False, "prover_build_id": "${PROVER_BUILD_ID}"})
+manifest["proof"].update({"transition_proof_program_address": "${transition_proof_program}", "withdrawal_proof_program_address": "${withdrawal_proof_program}", "residual_recovery_proof_program_address": "${residual_recovery_proof_program}", "proof_account_address": "${proof_account}", "settlement_account_address": "${SETTLEMENT_ACCOUNT}", "config_locked_after_deploy": False, "prover_build_id": "${PROVER_BUILD_ID}"})
 manifest["roles"] = {"protocol_fee_recipient": "${FEE_RECIPIENT}", "pause_guardian_address": "${PAUSE_GUARDIAN}", "reference_price_signer": "${REFERENCE_SIGNER}"}
 manifest["runtime"].update({"epoch_ms": int("${EPOCH_MS}"), "max_close_delay_ms": int("${MAX_CLOSE_DELAY_MS}"), "withdrawal_delay_seconds": int("${WITHDRAWAL_DELAY_SECONDS}"), "external_window_seconds": int("${EXTERNAL_WINDOW_SECONDS}")})
 for path in (state_path, client_path):
     json.dump(manifest, open(path, "w"), indent=2)
     open(path, "a").write("\n")
 PY
-echo "deployed: exchange ${exchange}, registry ${registry}, bridge ${bridge}, router ${router}, proof program ${proof_program}"
+echo "deployed: exchange ${exchange}, registry ${registry}, bridge ${bridge}, router ${router}, transition proof program ${transition_proof_program}, withdrawal proof program ${withdrawal_proof_program}, residual recovery proof program ${residual_recovery_proof_program}, proof account ${proof_account}"
 echo "next: prove one transition with zylith-operator bench, then $0 pin <proof_version> <virtual_program_hash> <os_config_hash>, then $0 lock"

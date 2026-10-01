@@ -2,7 +2,7 @@
 //! `zylith_core::exchange` (`core/examples/exchange_contract_fixtures.rs`), and the contract must
 //! accept its exact calldata, commitments and proof messages through the real deposit path.
 
-use core::poseidon::hades_permutation;
+use core::poseidon::{hades_permutation, poseidon_hash_span};
 use snforge_std::fs::{FileTrait, read_txt};
 use snforge_std::{
     CheatSpan, ContractClassTrait, DeclareResultTrait, cheat_block_number, cheat_block_timestamp,
@@ -33,11 +33,61 @@ const PROOF_VERSION: felt252 = 'PROOF1';
 const VIRTUAL_PROGRAM_HASH: felt252 = 0xabc;
 const OS_CONFIG_HASH: felt252 = 0xc0f;
 const BASE_BLOCK_HASH: felt252 = 0xb10c;
+const TRANSITION_MESSAGE_DOMAIN: felt252 = 'zylith_transition_msg_v1';
+const WITHDRAWAL_MESSAGE_DOMAIN: felt252 = 'zylith_withdraw_msg_v1';
+const RESIDUAL_RECOVERY_MESSAGE_DOMAIN: felt252 = 'zylith_res_recover_msg_v1';
 const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
     0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
 
 fn address(value: felt252) -> ContractAddress {
     value.try_into().unwrap()
+}
+
+fn bound_proof_message(
+    program: felt252, domain: felt252, exchange: felt252, commitment: felt252,
+) -> felt252 {
+    let (inner, _, _) = hades_permutation(domain, exchange, 2);
+    let (statement, _, _) = hades_permutation(inner, commitment, 2);
+    poseidon_hash_span(array![program, 0, 2, domain, statement].span())
+}
+
+#[test]
+fn each_statement_is_bound_to_its_single_purpose_program() {
+    let exchange_address = address(0x12345);
+    let (deployed, _) = declare("Exchange")
+        .unwrap()
+        .contract_class()
+        .deploy_at(@array![ADMIN], exchange_address)
+        .unwrap();
+    let exchange = IExchangeDispatcher { contract_address: deployed };
+    cheat_caller_address(deployed, address(ADMIN), CheatSpan::TargetCalls(1));
+    exchange.set_proof_programs(address(0x111), address(0x222), address(0x333), 0x444);
+    assert(exchange.transition_proof_program() == address(0x111), 'transition program');
+    assert(exchange.withdrawal_proof_program() == address(0x222), 'withdrawal program');
+    assert(exchange.residual_recovery_proof_program() == address(0x333), 'residual program');
+    assert(
+        exchange
+            .transition_message_hash(
+                0x555,
+            ) == bound_proof_message(0x111, TRANSITION_MESSAGE_DOMAIN, deployed.into(), 0x555),
+        'transition binding',
+    );
+    assert(
+        exchange
+            .withdrawal_message_hash(
+                0x666,
+            ) == bound_proof_message(0x222, WITHDRAWAL_MESSAGE_DOMAIN, deployed.into(), 0x666),
+        'withdrawal binding',
+    );
+    assert(
+        exchange
+            .residual_recovery_message_hash(
+                0x777,
+            ) == bound_proof_message(
+                0x333, RESIDUAL_RECOVERY_MESSAGE_DOMAIN, deployed.into(), 0x777,
+            ),
+        'residual binding',
+    );
 }
 
 #[derive(Drop)]
@@ -193,7 +243,13 @@ fn setup_with_timing(ref fixture: Fixture, epoch_ms: u64, window: u64) -> Setup 
     bridge.register_supported_asset(QUOTE, quote_token);
     cheat_caller_address(exchange_address, address(ADMIN), CheatSpan::TargetCalls(12));
     exchange.set_settlement_account(address(SETTLEMENT));
-    exchange.set_proof_program(address(proof_program), VIRTUAL_PROGRAM_HASH);
+    exchange
+        .set_proof_programs(
+            address(proof_program),
+            address(proof_program),
+            address(proof_program),
+            VIRTUAL_PROGRAM_HASH,
+        );
     exchange.set_proof_validation(PROOF_VERSION, OS_CONFIG_HASH, 450);
     exchange.set_custody(bridge_address, registry_address, address(ROUTER));
     exchange.set_reference_signer(signer);

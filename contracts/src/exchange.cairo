@@ -182,8 +182,12 @@ pub trait IExchange<TContractState> {
     fn pause(ref self: TContractState);
     fn unpause(ref self: TContractState);
     fn set_settlement_account(ref self: TContractState, account: ContractAddress);
-    fn set_proof_program(
-        ref self: TContractState, proof_program: ContractAddress, virtual_program_hash: felt252,
+    fn set_proof_programs(
+        ref self: TContractState,
+        transition_proof_program: ContractAddress,
+        withdrawal_proof_program: ContractAddress,
+        residual_recovery_proof_program: ContractAddress,
+        virtual_program_hash: felt252,
     );
     fn set_proof_validation(
         ref self: TContractState,
@@ -290,7 +294,9 @@ pub trait IExchange<TContractState> {
     fn reference_signer(self: @TContractState) -> felt252;
     fn settlement_account(self: @TContractState) -> ContractAddress;
     fn pause_guardian(self: @TContractState) -> ContractAddress;
-    fn proof_program(self: @TContractState) -> ContractAddress;
+    fn transition_proof_program(self: @TContractState) -> ContractAddress;
+    fn withdrawal_proof_program(self: @TContractState) -> ContractAddress;
+    fn residual_recovery_proof_program(self: @TContractState) -> ContractAddress;
     fn virtual_program_hash(self: @TContractState) -> felt252;
     fn proof_version(self: @TContractState) -> felt252;
     fn starknet_os_config_hash(self: @TContractState) -> felt252;
@@ -401,7 +407,9 @@ pub mod Exchange {
         paused: bool,
         config_locked: bool,
         settlement_account: ContractAddress,
-        proof_program: ContractAddress,
+        transition_proof_program: ContractAddress,
+        withdrawal_proof_program: ContractAddress,
+        residual_recovery_proof_program: ContractAddress,
         virtual_program_hash: felt252,
         expected_proof_version: felt252,
         expected_os_config_hash: felt252,
@@ -572,12 +580,24 @@ pub mod Exchange {
             self.settlement_account.write(account);
         }
 
-        fn set_proof_program(
-            ref self: ContractState, proof_program: ContractAddress, virtual_program_hash: felt252,
+        fn set_proof_programs(
+            ref self: ContractState,
+            transition_proof_program: ContractAddress,
+            withdrawal_proof_program: ContractAddress,
+            residual_recovery_proof_program: ContractAddress,
+            virtual_program_hash: felt252,
         ) {
             assert_unlocked_admin(@self);
-            assert(!proof_program.is_zero() && virtual_program_hash != 0, 'BAD_PROOF_PROGRAM');
-            self.proof_program.write(proof_program);
+            assert(
+                !transition_proof_program.is_zero()
+                    && !withdrawal_proof_program.is_zero()
+                    && !residual_recovery_proof_program.is_zero()
+                    && virtual_program_hash != 0,
+                'BAD_PROOF_PROGRAM',
+            );
+            self.transition_proof_program.write(transition_proof_program);
+            self.withdrawal_proof_program.write(withdrawal_proof_program);
+            self.residual_recovery_proof_program.write(residual_recovery_proof_program);
             self.virtual_program_hash.write(virtual_program_hash);
         }
 
@@ -751,7 +771,9 @@ pub mod Exchange {
         fn lock_config(ref self: ContractState) {
             assert_admin(@self);
             assert(!self.settlement_account.read().is_zero(), 'SETTLEMENT_UNSET');
-            assert(!self.proof_program.read().is_zero(), 'PROOF_PROGRAM_UNSET');
+            assert(!self.transition_proof_program.read().is_zero(), 'PROOF_PROGRAM_UNSET');
+            assert(!self.withdrawal_proof_program.read().is_zero(), 'PROOF_PROGRAM_UNSET');
+            assert(!self.residual_recovery_proof_program.read().is_zero(), 'PROOF_PROGRAM_UNSET');
             assert(self.expected_proof_version.read() != 0, 'PROOF_CONFIG_UNSET');
             assert(!self.bridge.read().is_zero(), 'CUSTODY_UNSET');
             assert(self.reference_signer.read() != 0, 'SIGNER_UNSET');
@@ -857,6 +879,7 @@ pub mod Exchange {
             let transition_commitment = poseidon_hash_span(commitment.span());
             assert_proof_facts_message(
                 @self,
+                self.transition_proof_program.read(),
                 bound_message(TRANSITION_MESSAGE_DOMAIN, chain_context, transition_commitment),
                 TRANSITION_MESSAGE_DOMAIN,
             );
@@ -1038,6 +1061,7 @@ pub mod Exchange {
             );
             assert_proof_facts_message(
                 @self,
+                self.withdrawal_proof_program.read(),
                 bound_message(WITHDRAWAL_MESSAGE_DOMAIN, chain_context, commitment),
                 WITHDRAWAL_MESSAGE_DOMAIN,
             );
@@ -1184,6 +1208,7 @@ pub mod Exchange {
             );
             assert_proof_facts_message(
                 @self,
+                self.residual_recovery_proof_program.read(),
                 bound_message(RESIDUAL_RECOVERY_MESSAGE_DOMAIN, chain_context, commitment),
                 RESIDUAL_RECOVERY_MESSAGE_DOMAIN,
             );
@@ -1403,8 +1428,16 @@ pub mod Exchange {
             self.pause_guardian.read()
         }
 
-        fn proof_program(self: @ContractState) -> ContractAddress {
-            self.proof_program.read()
+        fn transition_proof_program(self: @ContractState) -> ContractAddress {
+            self.transition_proof_program.read()
+        }
+
+        fn withdrawal_proof_program(self: @ContractState) -> ContractAddress {
+            self.withdrawal_proof_program.read()
+        }
+
+        fn residual_recovery_proof_program(self: @ContractState) -> ContractAddress {
+            self.residual_recovery_proof_program.read()
         }
 
         fn virtual_program_hash(self: @ContractState) -> felt252 {
@@ -1439,7 +1472,7 @@ pub mod Exchange {
             self: @ContractState, transition_commitment: felt252,
         ) -> felt252 {
             proof_message_hash(
-                self.proof_program.read(),
+                self.transition_proof_program.read(),
                 TRANSITION_MESSAGE_DOMAIN,
                 bound_message(
                     TRANSITION_MESSAGE_DOMAIN, get_contract_address().into(), transition_commitment,
@@ -1451,7 +1484,7 @@ pub mod Exchange {
             self: @ContractState, withdrawal_commitment: felt252,
         ) -> felt252 {
             proof_message_hash(
-                self.proof_program.read(),
+                self.withdrawal_proof_program.read(),
                 WITHDRAWAL_MESSAGE_DOMAIN,
                 bound_message(
                     WITHDRAWAL_MESSAGE_DOMAIN, get_contract_address().into(), withdrawal_commitment,
@@ -1463,7 +1496,7 @@ pub mod Exchange {
             self: @ContractState, recovery_commitment: felt252,
         ) -> felt252 {
             proof_message_hash(
-                self.proof_program.read(),
+                self.residual_recovery_proof_program.read(),
                 RESIDUAL_RECOVERY_MESSAGE_DOMAIN,
                 bound_message(
                     RESIDUAL_RECOVERY_MESSAGE_DOMAIN,
@@ -1544,7 +1577,10 @@ pub mod Exchange {
     }
 
     fn assert_proof_facts_message(
-        self: @ContractState, statement_message: felt252, domain: felt252,
+        self: @ContractState,
+        proof_program: ContractAddress,
+        statement_message: felt252,
+        domain: felt252,
     ) {
         let execution_info = get_execution_info_v3_syscall().unwrap_syscall();
         let current_block_number = execution_info.block_info.block_number;
@@ -1561,7 +1597,6 @@ pub mod Exchange {
         let os_config_hash = self.expected_os_config_hash.read();
         assert(os_config_hash != 0, 'OS_CONFIG_UNSET');
         assert(facts.starknet_os_config_hash == os_config_hash, 'BAD_OS_CONFIG');
-        let proof_program = self.proof_program.read();
         assert(!proof_program.is_zero(), 'PROOF_PROGRAM_UNSET');
         assert(facts.virtual_program_hash == self.virtual_program_hash.read(), 'BAD_PROOF_HASH');
         assert(facts.base_block_number < current_block_number, 'STALE_PROOF_BASE');
