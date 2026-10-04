@@ -1,5 +1,6 @@
 //! permissionless conversion of the latest residual order authority into exact exits.
 
+use core::cmp::min;
 use core::ecdsa::check_ecdsa_signature;
 use super::common::{
     RESIDUAL_NOTE_LEAF_DOMAIN, SpongeTrait, TWO_POW_120, next, next_bool, next_u128, next_u32,
@@ -144,11 +145,7 @@ pub fn verify_residual_recovery_statement(data: Span<felt252>) -> felt252 {
         } else {
             0
         };
-        let allocated = if after_offset < reserved {
-            after_offset
-        } else {
-            reserved
-        };
+        let allocated = min(after_offset, reserved);
         let quote = if allocated == 0 {
             0
         } else {
@@ -156,11 +153,7 @@ pub fn verify_residual_recovery_statement(data: Span<felt252>) -> felt252 {
             let (floor, has_remainder) = super::common::felt_div_rem(
                 allocated.into() * capacity_quote.into(), capacity_consumed,
             );
-            if !sell && has_remainder {
-                floor + 1
-            } else {
-                floor
-            }
+            floor + (!sell && has_remainder).into()
         };
         (allocated.into(), quote)
     };
@@ -177,11 +170,7 @@ pub fn verify_residual_recovery_statement(data: Span<felt252>) -> felt252 {
         let (floor, remainder) = super::common::felt_div_rem(
             gross_output.into() * fee_bps.into(), FEE_DENOMINATOR,
         );
-        if remainder {
-            floor + 1
-        } else {
-            floor
-        }
+        floor + remainder.into()
     };
     let output_amount = next_amount(gross_output.into() - fee, 'RR_OUTPUT');
     assert_exit(input_amount, input_exit_commitment, input_exit_authority);
@@ -190,11 +179,7 @@ pub fn verify_residual_recovery_statement(data: Span<felt252>) -> felt252 {
     let mut commitment = SpongeTrait::new();
     commitment.absorb_pair(RECOVERY_DOMAIN, chain_context);
     commitment.absorb_pair(note_root, nullifier);
-    commitment.absorb_pair(pair_id, if sell {
-        1
-    } else {
-        0
-    });
+    commitment.absorb_pair(pair_id, sell.into());
     commitment.absorb_pair(fee_bps.into(), reserved_seq.into());
     commitment.absorb(capacity_generation.into());
     commitment.absorb_pair(capacity_status.into(), capacity_total.into());

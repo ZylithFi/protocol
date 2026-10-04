@@ -82,7 +82,7 @@ fn read_transition(ref data: Span<felt252>) -> (felt252, TransitionCall) {
 
 fn proof_facts(message: felt252) -> Span<felt252> {
     let facts = ProofFacts {
-        proof_version: 'PROOF1',
+        proof_version: 'PROOF2',
         program_variant: 'VIRTUAL_SNOS',
         virtual_program_hash: 0xabc,
         starknet_os_output_version: 'VIRTUAL_SNOS0',
@@ -262,11 +262,11 @@ fn fill(fixture: ByteArray, sell: bool, parts: u128, min_profit: u128, pool_quot
         .set_proof_programs(
             address(proof_program), address(proof_program), address(proof_program), 0xabc,
         );
-    exchange.set_proof_validation('PROOF1', 0xc0f, 450);
+    exchange.set_proof_validation('PROOF2', 0xc0f, 450);
     exchange.set_custody(bridge_address, registry_address, router_address);
     exchange.set_reference_signer(signer);
     exchange.set_objective_numeraire(QUOTE);
-    exchange.register_pair(PAIR, BASE, QUOTE, SCALE, 30, 0, 0, 0, 0);
+    exchange.register_pair(PAIR, BASE, QUOTE, SCALE, 30, 1, 0, 0, 0, 0);
     exchange.set_pair_external_support(PAIR, 1);
     exchange.set_protocol_fee_recipient(FEE_RECIPIENT);
     exchange.set_timing(1, 60000, 120, 30);
@@ -317,7 +317,12 @@ fn fill(fixture: ByteArray, sell: bool, parts: u128, min_profit: u128, pool_quot
     let searcher = starknet::get_contract_address();
     let usdc_before = usdc.balance_of(searcher);
     let support_before = usdc.balance_of(address(SETTLEMENT));
+    let base_surplus_before = strk.balance_of(address(SETTLEMENT));
     let router = IEkuboExternalMatchRouterDispatcher { contract_address: router_address };
+    // arbitrary dust at ekubo's shared router must be swept to settlement, not make the fill
+    // revert or become searcher profit.
+    cheat_caller_address(strk.contract_address, address(EKUBO_CORE), CheatSpan::TargetCalls(1));
+    strk.transfer(address(EKUBO_ROUTER), 1_u128.into());
     let part = SIZE / parts;
     let mut profit = 0_u128;
     // the legs run while the capacity's window is open, at its timestamp.
@@ -344,6 +349,10 @@ fn fill(fixture: ByteArray, sell: bool, parts: u128, min_profit: u128, pool_quot
     assert(
         usdc.balance_of(address(SETTLEMENT)) - support_before == parts.into(),
         'settlement support paid',
+    );
+    assert(
+        strk.balance_of(address(SETTLEMENT)) - base_surplus_before == 1_u128.into(),
+        'base surplus swept',
     );
     let filled = exchange.capacity(1, PAIR, sell);
     assert(filled.status == 2 && filled.consumed_base == SIZE, 'capacity filled');

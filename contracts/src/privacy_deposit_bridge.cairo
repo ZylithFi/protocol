@@ -62,7 +62,7 @@ pub trait IPrivacyDepositBridge<TContractState> {
 pub mod PrivacyDepositBridge {
     use core::ecdsa::check_ecdsa_signature;
     use core::integer::u256;
-    use core::num::traits::Zero;
+    use core::num::traits::{CheckedAdd, Zero};
     use core::poseidon::hades_permutation;
     use starknet::storage::{
         Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
@@ -367,11 +367,7 @@ pub mod PrivacyDepositBridge {
         let commitment_registry = ICommitmentRegistryDispatcher {
             contract_address: self.commitment_registry.read(),
         };
-        let mut index = 0;
-        loop {
-            if index == len {
-                break;
-            }
+        for index in 0..len {
             let funding_commitment = *funding_commitments.at(index);
             let deposit_root = *deposit_roots.at(index);
             let encrypted_note_activation = *encrypted_note_activations.at(index);
@@ -394,31 +390,33 @@ pub mod PrivacyDepositBridge {
             );
             let token_address = self.asset_tokens.read(asset_id);
             assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
-            let mut duplicate_index = index + 1;
-            loop {
-                if duplicate_index == len {
-                    break;
-                }
+            for duplicate_index in index + 1..len {
                 assert(
                     funding_commitment != *funding_commitments.at(duplicate_index),
                     'DUPLICATE_FUNDING',
                 );
                 assert(deposit_root != *deposit_roots.at(duplicate_index), 'DUPLICATE_ROOT');
                 assert(note_commitment != *note_commitments.at(duplicate_index), 'DUPLICATE_NOTE');
-                duplicate_index += 1;
             }
             let escrowed = self.escrowed_asset_amounts.read(asset_id);
             let pending_exits = self.pending_exit_asset_amounts.read(asset_id);
             let token = IERC20Dispatcher { contract_address: token_address };
             let bridge_balance = checked_token_balance(token, get_contract_address());
-            assert(bridge_balance >= escrowed + pending_exits + amount, 'TOKEN_CUSTODY_LOW');
+            let outstanding_allowance = checked_token_allowance(
+                token, get_contract_address(), self.privacy_pool.read(),
+            );
+            let liabilities = escrowed
+                .checked_add(pending_exits)
+                .and_then(|value| value.checked_add(outstanding_allowance))
+                .and_then(|value| value.checked_add(amount))
+                .expect('CUSTODY_OVERFLOW');
+            assert(bridge_balance >= liabilities, 'TOKEN_CUSTODY_LOW');
             self.escrowed_asset_amounts.write(asset_id, escrowed + amount);
             commitment_registry
                 .register_funding_activation(
                     funding_commitment, deposit_root, encrypted_note_activation,
                 );
-            index += 1;
-        };
+        }
     }
 
     fn claim_strk20_exit_internal(
@@ -477,6 +475,10 @@ pub mod PrivacyDepositBridge {
         let token = IERC20Dispatcher { contract_address: token_address };
         let bridge_balance = checked_token_balance(token, get_contract_address());
         assert(bridge_balance >= amount, 'TOKEN_BALANCE_LOW');
+        assert(
+            checked_token_allowance(token, get_contract_address(), privacy_pool) == 0,
+            'EXIT_ALLOWANCE_PENDING',
+        );
         // the strk20 pool consumes the returned open note deposit from privacy_invoke
         // and pulls this approved amount in the same transaction.
         token.approve(privacy_pool, as_u256(amount));
@@ -491,6 +493,14 @@ pub mod PrivacyDepositBridge {
         let balance = token.balance_of(owner);
         assert(balance.high == 0, 'TOKEN_BALANCE_HIGH');
         balance.low
+    }
+
+    fn checked_token_allowance(
+        token: IERC20Dispatcher, owner: ContractAddress, spender: ContractAddress,
+    ) -> u128 {
+        let allowance = token.allowance(owner, spender);
+        assert(allowance.high == 0, 'TOKEN_ALLOWANCE_HIGH');
+        allowance.low
     }
 
     fn output_note_leaf(

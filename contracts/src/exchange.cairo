@@ -97,6 +97,7 @@ pub struct PairConfig {
     pub quote_asset_id: felt252,
     pub price_base_scale: u128,
     pub fee_bps: u128,
+    pub min_order_quote_amount: u128,
     pub external_settlement_support_quote: u128,
     pub reference_methodology: u8,
     pub derivation_base_market_id: felt252,
@@ -182,6 +183,8 @@ pub trait IExchange<TContractState> {
     fn pause(ref self: TContractState);
     fn unpause(ref self: TContractState);
     fn set_settlement_account(ref self: TContractState, account: ContractAddress);
+    fn propose_settlement_account(ref self: TContractState, account: ContractAddress);
+    fn execute_settlement_account(ref self: TContractState);
     fn set_proof_programs(
         ref self: TContractState,
         transition_proof_program: ContractAddress,
@@ -220,6 +223,7 @@ pub trait IExchange<TContractState> {
         quote_asset_id: felt252,
         price_base_scale: u128,
         fee_bps: u128,
+        min_order_quote_amount: u128,
         reference_methodology: u8,
         derivation_base_market_id: felt252,
         derivation_quote_market_id: felt252,
@@ -383,6 +387,8 @@ pub mod Exchange {
     const MAX_FEE_BPS: u128 = 100;
     const RECIPIENT_TIMELOCK_SECONDS: u64 = 604800;
     const REFERENCE_SIGNER_TIMELOCK_SECONDS: u64 = 86400;
+    const ADMIN_TIMELOCK_SECONDS: u64 = 86400;
+    const SETTLEMENT_TIMELOCK_SECONDS: u64 = 86400;
     const MAX_REFERENCE_WINDOW_MS: u64 = 15000;
     const MAX_REFERENCE_FUTURE_SKEW_MS: u64 = 5000;
     const MIN_REFERENCE_SOURCES: u64 = 3;
@@ -403,10 +409,13 @@ pub mod Exchange {
     struct Storage {
         admin: ContractAddress,
         pending_admin: ContractAddress,
+        pending_admin_eta: u64,
         pause_guardian: ContractAddress,
         paused: bool,
         config_locked: bool,
         settlement_account: ContractAddress,
+        pending_settlement_account: ContractAddress,
+        pending_settlement_account_eta: u64,
         transition_proof_program: ContractAddress,
         withdrawal_proof_program: ContractAddress,
         residual_recovery_proof_program: ContractAddress,
@@ -431,6 +440,7 @@ pub mod Exchange {
         pair_quote: Map<felt252, felt252>,
         pair_price_base_scale: Map<felt252, u128>,
         pair_fee_bps: Map<felt252, u128>,
+        pair_min_order_quote_amount: Map<felt252, u128>,
         pair_external_support_quote: Map<felt252, u128>,
         pair_reference_methodology: Map<felt252, u8>,
         pair_derivation_base_market_id: Map<felt252, felt252>,
@@ -451,6 +461,7 @@ pub mod Exchange {
         known_note_roots: Map<felt252, bool>,
         activated_funding: Map<felt252, bool>,
         nullifier_states: Map<felt252, u8>,
+        reserved_exit_commitments: Map<felt252, bool>,
         pending_exits: Map<felt252, PendingExit>,
         pending_residual_exits: Map<felt252, PendingResidualExit>,
         capacities: Map<(u32, felt252, bool), Capacity>,
@@ -545,13 +556,16 @@ pub mod Exchange {
             assert_admin(@self);
             assert(!new_admin.is_zero(), 'BAD_ADMIN');
             self.pending_admin.write(new_admin);
+            self.pending_admin_eta.write(get_block_timestamp() + ADMIN_TIMELOCK_SECONDS);
         }
 
         fn accept_admin(ref self: ContractState) {
             let pending = self.pending_admin.read();
             assert(!pending.is_zero() && get_caller_address() == pending, 'UNAUTHORIZED');
+            assert(get_block_timestamp() >= self.pending_admin_eta.read(), 'ADMIN_TIMELOCK');
             self.admin.write(pending);
             self.pending_admin.write(Zero::zero());
+            self.pending_admin_eta.write(0);
         }
 
         fn set_pause_guardian(ref self: ContractState, guardian: ContractAddress) {
@@ -575,9 +589,31 @@ pub mod Exchange {
         }
 
         fn set_settlement_account(ref self: ContractState, account: ContractAddress) {
-            assert_admin(@self);
+            assert_unlocked_admin(@self);
             assert(!account.is_zero(), 'BAD_ACCOUNT');
             self.settlement_account.write(account);
+        }
+
+        fn propose_settlement_account(ref self: ContractState, account: ContractAddress) {
+            assert_admin(@self);
+            assert(self.config_locked.read(), 'CONFIG_UNLOCKED');
+            assert(!account.is_zero() && account != self.settlement_account.read(), 'BAD_ACCOUNT');
+            self.pending_settlement_account.write(account);
+            self
+                .pending_settlement_account_eta
+                .write(get_block_timestamp() + SETTLEMENT_TIMELOCK_SECONDS);
+        }
+
+        fn execute_settlement_account(ref self: ContractState) {
+            assert_admin(@self);
+            assert(self.paused.read(), 'NOT_PAUSED');
+            let pending = self.pending_settlement_account.read();
+            let eta = self.pending_settlement_account_eta.read();
+            assert(!pending.is_zero() && eta != 0, 'NO_SETTLEMENT_CHANGE');
+            assert(get_block_timestamp() >= eta, 'SETTLEMENT_TIMELOCK');
+            self.settlement_account.write(pending);
+            self.pending_settlement_account.write(Zero::zero());
+            self.pending_settlement_account_eta.write(0);
         }
 
         fn set_proof_programs(
@@ -678,6 +714,7 @@ pub mod Exchange {
                 epoch_ms != 0 && max_close_delay_ms != 0 && withdrawal_delay_seconds != 0,
                 'BAD_TIMING',
             );
+            assert(withdrawal_delay_seconds > max_close_delay_ms / 1000, 'BAD_EXIT_DELAY');
             self.epoch_ms.write(epoch_ms);
             self.max_close_delay_ms.write(max_close_delay_ms);
             self.withdrawal_delay_seconds.write(withdrawal_delay_seconds);
@@ -691,6 +728,7 @@ pub mod Exchange {
             quote_asset_id: felt252,
             price_base_scale: u128,
             fee_bps: u128,
+            min_order_quote_amount: u128,
             reference_methodology: u8,
             derivation_base_market_id: felt252,
             derivation_quote_market_id: felt252,
@@ -701,6 +739,7 @@ pub mod Exchange {
             assert(base_asset_id != quote_asset_id, 'BAD_PAIR');
             assert(price_base_scale != 0, 'BAD_SCALE');
             assert(fee_bps <= MAX_FEE_BPS, 'BAD_FEE');
+            assert(min_order_quote_amount != 0, 'BAD_MIN_ORDER_VALUE');
             if reference_methodology == REFERENCE_METHOD_DIRECT_BBO {
                 assert(
                     derivation_base_market_id == 0
@@ -728,6 +767,7 @@ pub mod Exchange {
             self.pair_quote.write(pair_id, quote_asset_id);
             self.pair_price_base_scale.write(pair_id, price_base_scale);
             self.pair_fee_bps.write(pair_id, fee_bps);
+            self.pair_min_order_quote_amount.write(pair_id, min_order_quote_amount);
             self.pair_reference_methodology.write(pair_id, reference_methodology);
             self.pair_derivation_base_market_id.write(pair_id, derivation_base_market_id);
             self.pair_derivation_quote_market_id.write(pair_id, derivation_quote_market_id);
@@ -1065,6 +1105,7 @@ pub mod Exchange {
                 bound_message(WITHDRAWAL_MESSAGE_DOMAIN, chain_context, commitment),
                 WITHDRAWAL_MESSAGE_DOMAIN,
             );
+            reserve_exit_commitment(ref self, exit_commitment);
             let requested_at = get_block_timestamp();
             let requested_at_ms = requested_at * 1000;
             let matures_at = requested_at + self.withdrawal_delay_seconds.read();
@@ -1215,26 +1256,27 @@ pub mod Exchange {
             let requested_at = get_block_timestamp();
             let requested_at_ms = requested_at * 1000;
             let matures_at = requested_at + self.withdrawal_delay_seconds.read();
-            let fee_exit_commitment = if recovery.fee_amount == 0 {
-                0
+            let (fee_exit_commitment, fee_exit_authority) = if recovery.fee_amount == 0 {
+                (0, 0)
             } else {
-                poseidon2(RESIDUAL_FEE_EXIT_DOMAIN, recovery.nullifier)
-            };
-            let fee_exit_authority = if recovery.fee_amount == 0 {
-                0
-            } else {
-                self.protocol_fee_recipient.read()
-            };
-            assert(
-                recovery.fee_amount == 0 || fee_exit_commitment != 0 && fee_exit_authority != 0,
-                'BAD_RECOVERY_FEE',
-            );
-            if recovery.fee_amount != 0 {
+                let commitment = poseidon2(RESIDUAL_FEE_EXIT_DOMAIN, recovery.nullifier);
+                let authority = self.protocol_fee_recipient.read();
+                assert(commitment != 0 && authority != 0, 'BAD_RECOVERY_FEE');
                 assert(
-                    recovery.input_exit_commitment != fee_exit_commitment
-                        && recovery.output_exit_commitment != fee_exit_commitment,
+                    recovery.input_exit_commitment != commitment
+                        && recovery.output_exit_commitment != commitment,
                     'DUPLICATE_RECOVERY_EXIT',
                 );
+                (commitment, authority)
+            };
+            if recovery.input_amount != 0 {
+                reserve_exit_commitment(ref self, recovery.input_exit_commitment);
+            }
+            if recovery.output_amount != 0 {
+                reserve_exit_commitment(ref self, recovery.output_exit_commitment);
+            }
+            if recovery.fee_amount != 0 {
+                reserve_exit_commitment(ref self, fee_exit_commitment);
             }
             self.nullifier_states.write(recovery.nullifier, NULLIFIER_EXIT_PENDING);
             self
@@ -1387,6 +1429,7 @@ pub mod Exchange {
                 quote_asset_id: self.pair_quote.read(pair_id),
                 price_base_scale: self.pair_price_base_scale.read(pair_id),
                 fee_bps: self.pair_fee_bps.read(pair_id),
+                min_order_quote_amount: self.pair_min_order_quote_amount.read(pair_id),
                 external_settlement_support_quote: self.pair_external_support_quote.read(pair_id),
                 reference_methodology: self.pair_reference_methodology.read(pair_id),
                 derivation_base_market_id: self.pair_derivation_base_market_id.read(pair_id),
@@ -1537,6 +1580,12 @@ pub mod Exchange {
         assert(!self.paused.read(), 'PAUSED');
     }
 
+    fn reserve_exit_commitment(ref self: ContractState, exit_commitment: felt252) {
+        assert(exit_commitment != 0, 'BAD_EXIT');
+        assert(!self.reserved_exit_commitments.read(exit_commitment), 'EXIT_COMMITMENT_USED');
+        self.reserved_exit_commitments.write(exit_commitment, true);
+    }
+
     fn nullifiers_admit_orders(note_root: felt252) -> bool {
         note_root != 0
     }
@@ -1549,6 +1598,7 @@ pub mod Exchange {
             quote_asset_id: self.pair_quote.read(pair_id),
             price_base_scale: self.pair_price_base_scale.read(pair_id),
             fee_bps: self.pair_fee_bps.read(pair_id),
+            min_order_quote_amount: self.pair_min_order_quote_amount.read(pair_id),
             external_settlement_support_quote: self.pair_external_support_quote.read(pair_id),
             reference_methodology: self.pair_reference_methodology.read(pair_id),
             derivation_base_market_id: self.pair_derivation_base_market_id.read(pair_id),
@@ -1642,6 +1692,7 @@ pub mod Exchange {
             values.append(market.observed_at_ms.into());
             values.append(market.valid_until_ms.into());
             values.append(pair.fee_bps.into());
+            values.append(pair.min_order_quote_amount.into());
             values.append(market.reference_methodology.into());
             values.append(market.derivation_base_market_id);
             values.append(market.derivation_quote_market_id);
@@ -1661,21 +1712,25 @@ pub mod Exchange {
         state = poseidon2(state, markets.len().into());
         for market in markets {
             let market = *market;
-            let pair = pair_config_of(self, market.pair_id);
-            for value in array![
-                market.pair_id, pair.base_asset_id, pair.quote_asset_id, market.midpoint.into(),
-                market.lower_price.into(), market.upper_price.into(), market.scale.into(),
-                market.reference_methodology.into(), market.derivation_base_market_id,
-                market.derivation_quote_market_id, market.derivation_base_bid.into(),
-                market.derivation_base_ask.into(), market.derivation_quote_bid.into(),
-                market.derivation_quote_ask.into(), market.max_leg_skew_ms.into(),
-                market.source_count.into(), market.observed_at_ms.into(),
-                market.valid_until_ms.into(), market.source_set_commitment, market.nonce.into(),
-            ] {
+            for value in attestation_fields(market, pair_config_of(self, market.pair_id)) {
                 state = poseidon2(state, value);
             }
         }
         state
+    }
+
+    /// an attestation's price batch fields, which its signed message extends.
+    fn attestation_fields(market: MarketAttestation, pair: PairConfig) -> Array<felt252> {
+        array![
+            market.pair_id, pair.base_asset_id, pair.quote_asset_id, market.midpoint.into(),
+            market.lower_price.into(), market.upper_price.into(), market.scale.into(),
+            market.reference_methodology.into(), market.derivation_base_market_id,
+            market.derivation_quote_market_id, market.derivation_base_bid.into(),
+            market.derivation_base_ask.into(), market.derivation_quote_bid.into(),
+            market.derivation_quote_ask.into(), market.max_leg_skew_ms.into(),
+            market.source_count.into(), market.observed_at_ms.into(), market.valid_until_ms.into(),
+            market.source_set_commitment, market.nonce.into(),
+        ]
     }
 
     fn verify_attestation(
@@ -1708,17 +1763,10 @@ pub mod Exchange {
         let signer = self.reference_signer.read();
         assert(signer != 0, 'SIGNER_UNSET');
         let mut state = poseidon2(REFERENCE_PRICE_ATTESTATION_DOMAIN, verifier);
-        for value in array![
-            market.pair_id, pair.base_asset_id, pair.quote_asset_id, market.midpoint.into(),
-            market.lower_price.into(), market.upper_price.into(), market.scale.into(),
-            market.reference_methodology.into(), market.derivation_base_market_id,
-            market.derivation_quote_market_id, market.derivation_base_bid.into(),
-            market.derivation_base_ask.into(), market.derivation_quote_bid.into(),
-            market.derivation_quote_ask.into(), market.max_leg_skew_ms.into(),
-            market.source_count.into(), market.observed_at_ms.into(), market.valid_until_ms.into(),
-            market.source_set_commitment, market.nonce.into(), market.price_batch_commitment,
-            signer,
-        ] {
+        let mut fields = attestation_fields(market, pair);
+        fields.append(market.price_batch_commitment);
+        fields.append(signer);
+        for value in fields {
             state = poseidon2(state, value);
         }
         assert(
@@ -1767,11 +1815,7 @@ pub mod Exchange {
             self.capacities.write(key, capacity);
             values.append(outcome.seq.into());
             values.append(outcome.pair_id);
-            values.append(if outcome.sell {
-                1
-            } else {
-                0
-            });
+            values.append(outcome.sell.into());
             values.append(outcome.consumed_base.into());
             values.append(outcome.pool_quote.into());
             values.append(outcome.m1.into());
@@ -1824,11 +1868,7 @@ pub mod Exchange {
                     },
                 );
             values.append(entry.pair_id);
-            values.append(if entry.sell {
-                1
-            } else {
-                0
-            });
+            values.append(entry.sell.into());
             values.append(entry.bound.into());
             values.append(entry.total.into());
         }

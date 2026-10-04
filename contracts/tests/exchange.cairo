@@ -29,7 +29,7 @@ const PAIR: felt252 = 0x9a1;
 const BASE: felt252 = 0xba5e;
 const QUOTE: felt252 = 0x9a07e;
 const FEE_RECIPIENT: felt252 = 0xfee;
-const PROOF_VERSION: felt252 = 'PROOF1';
+const PROOF_VERSION: felt252 = 'PROOF2';
 const VIRTUAL_PROGRAM_HASH: felt252 = 0xabc;
 const OS_CONFIG_HASH: felt252 = 0xc0f;
 const BASE_BLOCK_HASH: felt252 = 0xb10c;
@@ -88,6 +88,20 @@ fn each_statement_is_bound_to_its_single_purpose_program() {
             ),
         'residual binding',
     );
+}
+
+#[test]
+#[should_panic(expected: 'BAD_EXIT_DELAY')]
+fn withdrawal_delay_must_outlast_the_transition_close_window() {
+    let exchange_address = address(0x12346);
+    let (deployed, _) = declare("Exchange")
+        .unwrap()
+        .contract_class()
+        .deploy_at(@array![ADMIN], exchange_address)
+        .unwrap();
+    let exchange = IExchangeDispatcher { contract_address: deployed };
+    cheat_caller_address(deployed, address(ADMIN), CheatSpan::TargetCalls(1));
+    exchange.set_timing(6000, 60000, 60, 1);
 }
 
 #[derive(Drop)]
@@ -255,7 +269,7 @@ fn setup_with_timing(ref fixture: Fixture, epoch_ms: u64, window: u64) -> Setup 
     exchange.set_reference_signer(signer);
     exchange.set_objective_numeraire(QUOTE);
     exchange.set_market_registry_hash(1, 2);
-    exchange.register_pair(PAIR, BASE, QUOTE, 1, 30, 0, 0, 0, 0);
+    exchange.register_pair(PAIR, BASE, QUOTE, 1, 30, 1, 0, 0, 0, 0);
     exchange.set_pair_external_support(PAIR, if window == 0 {
         0
     } else {
@@ -414,6 +428,26 @@ fn duplicate_residual_recovery_submission_is_rejected() {
 }
 
 #[test]
+#[should_panic(expected: 'EXIT_COMMITMENT_USED')]
+fn an_exit_commitment_is_reserved_across_recovery_and_withdrawal_paths() {
+    let mut fixture = FixtureTrait::load("exchange_residual_recovery");
+    let setup = setup(ref fixture);
+    let (_, transition_message, transition) = read_transition(ref fixture);
+    submit(@setup, transition_message, @transition, 11);
+    let (_, recovery_message, recovery) = read_residual_recovery(ref fixture);
+    cheat_proof_facts(
+        setup.exchange.contract_address, proof_facts(recovery_message), CheatSpan::TargetCalls(1),
+    );
+    cheat_block_number(setup.exchange.contract_address, 100, CheatSpan::TargetCalls(1));
+    cheat_block_timestamp(setup.exchange.contract_address, 12, CheatSpan::TargetCalls(1));
+    setup.exchange.request_residual_recovery(recovery);
+    let _ = read_transition(ref fixture);
+    let _ = read_transition(ref fixture);
+    let colliding_withdrawal = read_withdrawal(ref fixture);
+    request(@setup, colliding_withdrawal, 13);
+}
+
+#[test]
 #[should_panic(expected: 'BAD_PROOF_MSG')]
 fn a_changed_residual_recovery_fee_is_not_the_proven_recovery() {
     let mut fixture = FixtureTrait::load("exchange_residual_recovery");
@@ -552,6 +586,39 @@ fn a_pending_exit_cannot_back_a_new_shielded_deposit() {
 }
 
 #[test]
+#[should_panic(expected: 'TOKEN_CUSTODY_LOW')]
+fn an_unconsumed_pool_allowance_cannot_back_a_new_shielded_deposit() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let asset_id = BASE;
+    let amount = 1_u128;
+    let note_commitment = 0xc012;
+    let withdraw_authority = 0xa118;
+    let token = IERC20Dispatcher { contract_address: setup.base_token };
+
+    IMockERC20Dispatcher { contract_address: setup.base_token }
+        .mint(setup.bridge.contract_address, amount.into());
+    cheat_caller_address(
+        setup.base_token, setup.bridge.contract_address, CheatSpan::TargetCalls(1),
+    );
+    token.approve(setup.pool, amount.into());
+
+    let deposit_root = output_note_leaf(note_commitment, asset_id, amount, withdraw_authority);
+    cheat_caller_address(setup.bridge.contract_address, setup.pool, CheatSpan::TargetCalls(1));
+    setup
+        .bridge
+        .privacy_invoke(
+            array![0xf012].span(),
+            array![deposit_root].span(),
+            array![0xead].span(),
+            array![note_commitment].span(),
+            array![asset_id].span(),
+            array![amount].span(),
+            array![withdraw_authority].span(),
+        );
+}
+
+#[test]
 #[should_panic(expected: 'CONFIG_LOCKED')]
 fn a_locked_exchange_cannot_silently_add_a_market() {
     let mut fixture = FixtureTrait::load("exchange_cross");
@@ -559,7 +626,7 @@ fn a_locked_exchange_cannot_silently_add_a_market() {
     cheat_caller_address(
         setup.exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1),
     );
-    setup.exchange.register_pair(0x999, BASE, QUOTE, 1, 30, 0, 0, 0, 0);
+    setup.exchange.register_pair(0x999, BASE, QUOTE, 1, 30, 1, 0, 0, 0, 0);
 }
 
 #[test]
@@ -599,6 +666,84 @@ fn a_locked_exchange_rotates_its_online_reference_signer_only_after_pause_and_ti
     cheat_caller_address(exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1));
     exchange.execute_reference_signer();
     assert(exchange.reference_signer() == replacement, 'new signer');
+}
+
+#[test]
+fn a_locked_exchange_rotates_its_settlement_account_only_after_pause_and_timelock() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let exchange = setup.exchange;
+    let replacement = address(0x987655);
+    cheat_caller_address(exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(2));
+    exchange.propose_settlement_account(replacement);
+    exchange.pause();
+    cheat_block_timestamp(exchange.contract_address, 86400, CheatSpan::TargetCalls(1));
+    cheat_caller_address(exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1));
+    exchange.execute_settlement_account();
+    assert(exchange.settlement_account() == replacement, 'new settlement');
+}
+
+#[test]
+#[should_panic(expected: 'SETTLEMENT_TIMELOCK')]
+fn a_locked_exchange_rejects_an_early_settlement_rotation() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let exchange = setup.exchange;
+    cheat_caller_address(exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(3));
+    exchange.propose_settlement_account(address(0x987655));
+    exchange.pause();
+    exchange.execute_settlement_account();
+}
+
+#[test]
+#[should_panic(expected: 'NOT_PAUSED')]
+fn a_locked_exchange_requires_pause_for_a_settlement_rotation() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let exchange = setup.exchange;
+    cheat_caller_address(exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1));
+    exchange.propose_settlement_account(address(0x987655));
+    cheat_block_timestamp(exchange.contract_address, 86400, CheatSpan::TargetCalls(1));
+    cheat_caller_address(exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1));
+    exchange.execute_settlement_account();
+}
+
+#[test]
+#[should_panic(expected: 'CONFIG_LOCKED')]
+fn a_locked_exchange_cannot_change_its_settlement_account_immediately() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    cheat_caller_address(
+        setup.exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1),
+    );
+    setup.exchange.set_settlement_account(address(0x987655));
+}
+
+#[test]
+fn an_admin_transfer_waits_for_its_timelock() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let exchange = setup.exchange;
+    let replacement = address(0x987656);
+    cheat_caller_address(exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1));
+    exchange.propose_admin(replacement);
+    cheat_block_timestamp(exchange.contract_address, 86400, CheatSpan::TargetCalls(1));
+    cheat_caller_address(exchange.contract_address, replacement, CheatSpan::TargetCalls(1));
+    exchange.accept_admin();
+    assert(exchange.admin_address() == replacement, 'new admin');
+}
+
+#[test]
+#[should_panic(expected: 'ADMIN_TIMELOCK')]
+fn an_admin_transfer_cannot_be_accepted_early() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let exchange = setup.exchange;
+    let replacement = address(0x987656);
+    cheat_caller_address(exchange.contract_address, address(ADMIN), CheatSpan::TargetCalls(1));
+    exchange.propose_admin(replacement);
+    cheat_caller_address(exchange.contract_address, replacement, CheatSpan::TargetCalls(1));
+    exchange.accept_admin();
 }
 
 #[test]
@@ -649,6 +794,19 @@ fn a_cross_settles_and_its_output_withdraws_after_the_delay() {
         setup.bridge.pending_exit_asset_amount(withdrawal.asset_id) == withdrawal.amount,
         'exit remains a liability',
     );
+}
+
+#[test]
+#[should_panic(expected: 'EXIT_COMMITMENT_USED')]
+fn an_exit_commitment_cannot_be_reserved_by_two_withdrawals() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let first = read_withdrawal(ref fixture);
+    let (_, _, _) = read_transition(ref fixture);
+    let _ = read_withdrawal(ref fixture);
+    let duplicate = read_withdrawal(ref fixture);
+    request(@setup, first, 11);
+    request(@setup, duplicate, 12);
 }
 
 #[test]
@@ -865,9 +1023,9 @@ fn synthetic_pair_configuration_is_explicit_and_queryable() {
     let exchange = IExchangeDispatcher { contract_address: exchange_address };
     cheat_caller_address(exchange_address, address(ADMIN), CheatSpan::TargetCalls(4));
     exchange.set_objective_numeraire(QUOTE);
-    exchange.register_pair(0x901, BASE, QUOTE, 1, 2, 0, 0, 0, 0);
-    exchange.register_pair(0x902, 0xbeef, QUOTE, 1, 2, 0, 0, 0, 0);
-    exchange.register_pair(0x903, BASE, 0xbeef, 1, 2, 1, 0x901, 0x902, 1500);
+    exchange.register_pair(0x901, BASE, QUOTE, 1, 2, 1, 0, 0, 0, 0);
+    exchange.register_pair(0x902, 0xbeef, QUOTE, 1, 2, 1, 0, 0, 0, 0);
+    exchange.register_pair(0x903, BASE, 0xbeef, 1, 2, 1, 1, 0x901, 0x902, 1500);
     let pair = exchange.pair_config(0x903);
     assert(pair.base_asset_id == BASE && pair.quote_asset_id == 0xbeef, 'BAD_PAIR');
     assert(pair.price_base_scale == 1, 'BAD_SCALE');
@@ -890,9 +1048,9 @@ fn a_synthetic_pair_can_enable_residual_external_matching() {
     let exchange = IExchangeDispatcher { contract_address: exchange_address };
     cheat_caller_address(exchange_address, address(ADMIN), CheatSpan::TargetCalls(5));
     exchange.set_objective_numeraire(QUOTE);
-    exchange.register_pair(0x901, BASE, QUOTE, 1, 2, 0, 0, 0, 0);
-    exchange.register_pair(0x902, 0xbeef, QUOTE, 1, 2, 0, 0, 0, 0);
-    exchange.register_pair(0x903, BASE, 0xbeef, 1, 2, 1, 0x901, 0x902, 1500);
+    exchange.register_pair(0x901, BASE, QUOTE, 1, 2, 1, 0, 0, 0, 0);
+    exchange.register_pair(0x902, 0xbeef, QUOTE, 1, 2, 1, 0, 0, 0, 0);
+    exchange.register_pair(0x903, BASE, 0xbeef, 1, 2, 1, 1, 0x901, 0x902, 1500);
     exchange.set_pair_external_support(0x903, 1);
     assert(exchange.pair_config(0x903).external_settlement_support_quote == 1, 'BAD_SUPPORT');
 }
@@ -1048,6 +1206,27 @@ fn external_recovery_stages_both_the_user_output_and_the_protocol_fee() {
     setup.exchange.finalize_residual_recovery(recovery.nullifier);
     assert(setup.bridge.escrowed_asset_amount(QUOTE) == 0, 'quote fully allocated');
     assert(setup.bridge.pending_exit_asset_amount(QUOTE) == 1010, 'no duplicate allocation');
+}
+
+#[test]
+#[should_panic(expected: 'DUPLICATE_RECOVERY_EXIT')]
+fn residual_recovery_exit_legs_cannot_share_an_exit_commitment() {
+    let mut fixture = FixtureTrait::load("exchange_external_full");
+    let setup = setup_with_window(ref fixture, 60);
+    let (_, reserve_message, reserve) = read_transition(ref fixture);
+    let _ = read_transition(ref fixture);
+    let m1 = read_attestation(ref fixture);
+    let _ = read_residual_recovery(ref fixture);
+    let _ = read_transition(ref fixture);
+    let (_, recovery_message, recovery) = read_residual_recovery(ref fixture);
+    submit(@setup, reserve_message, @reserve, 11);
+    fill(@setup, 10, m1);
+    cheat_proof_facts(
+        setup.exchange.contract_address, proof_facts(recovery_message), CheatSpan::TargetCalls(1),
+    );
+    cheat_block_number(setup.exchange.contract_address, 100, CheatSpan::TargetCalls(1));
+    cheat_block_timestamp(setup.exchange.contract_address, 12, CheatSpan::TargetCalls(1));
+    setup.exchange.request_residual_recovery(recovery);
 }
 
 #[test]

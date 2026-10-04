@@ -1,6 +1,7 @@
 //! the global clearing certificate's market-level checks: canonical weights derived from
 //! m0 and the price-grid precision allowance (see `zylith_core::exact_clearing`).
 
+use core::cmp::max;
 use super::common::{TWO_POW_64, next_u128, next_u32};
 
 const MAX_WEIGHT_MINUS_ONE: u128 = 0xfffffffffffffff;
@@ -23,6 +24,7 @@ pub struct Market {
     pub midpoint: u128,
     pub scale: u128,
     pub fee_bps: u128,
+    pub min_order_quote_amount: u128,
     pub observed_at_ms: u64,
     pub reference_methodology: u8,
     pub derivation_base_market_id: felt252,
@@ -44,11 +46,7 @@ pub fn precision_allowance(market: Market, capacity: felt252) -> felt252 {
     let denominator: u256 = market.scale.into() * TWO_POW_64.into();
     let (quotient, remainder) = DivRem::div_rem(capacity * spread, denominator.try_into().unwrap());
     let quotient: felt252 = quotient.try_into().expect('EX_ALLOWANCE');
-    if remainder == 0 {
-        quotient
-    } else {
-        quotient + 1
-    }
+    quotient + (remainder != 0).into()
 }
 
 pub fn assert_distinct_market_pairs(markets: Span<Market>) {
@@ -129,6 +127,8 @@ pub fn assert_canonical_weights(
     let numeraire = numeraire.expect('EX_USDC_MISSING');
     let mut asset: u32 = 0;
     while asset != count {
+        let value_numerator: u256 = (*numerators.at(asset)).into();
+        let value_denominator: u256 = (*denominators.at(asset)).into();
         let root = *roots.at(asset);
         let depth = *depths.at(asset);
         assert(root == numeraire, 'EX_USDC_ROOT');
@@ -156,16 +156,18 @@ pub fn assert_canonical_weights(
                 );
                 earlier += 1;
             }
-            let numerator: u256 = (*numerators.at(asset)).into();
-            let denominator: u256 = (*denominators.at(asset)).into();
             if asset_is_base {
                 assert(
-                    numerator * market.scale.into() == denominator * market.midpoint.into(),
+                    value_numerator
+                        * market.scale.into() == value_denominator
+                        * market.midpoint.into(),
                     'EX_USDC_VALUE',
                 );
             } else {
                 assert(
-                    numerator * market.midpoint.into() == denominator * market.scale.into(),
+                    value_numerator
+                        * market.midpoint.into() == value_denominator
+                        * market.scale.into(),
                     'EX_USDC_VALUE',
                 );
             }
@@ -173,8 +175,6 @@ pub fn assert_canonical_weights(
         let maximum = *maxima.at(asset);
         assert(maximum < count, 'EX_MAX_COMPONENT');
         assert(*maxima.at(numeraire) == maximum, 'EX_MAX_SHARED');
-        let value_numerator: u256 = (*numerators.at(asset)).into();
-        let value_denominator: u256 = (*denominators.at(asset)).into();
         let max_numerator: u256 = (*numerators.at(maximum)).into();
         let max_denominator: u256 = (*denominators.at(maximum)).into();
         // value(max) >= value(asset).
@@ -186,12 +186,7 @@ pub fn assert_canonical_weights(
         let divisor = value_denominator * max_numerator;
         let (quotient, _) = DivRem::div_rem(scaled, divisor.try_into().unwrap());
         let quotient: u128 = quotient.try_into().expect('EX_WEIGHT');
-        let expected = if quotient == 0 {
-            1
-        } else {
-            quotient
-        };
-        assert((*assets.at(asset)).weight == expected, 'EX_WEIGHT');
+        assert((*assets.at(asset)).weight == max(quotient, 1), 'EX_WEIGHT');
         asset += 1;
     }
 }

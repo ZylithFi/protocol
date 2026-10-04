@@ -118,13 +118,8 @@ pub mod PrivacyProofSigner {
             state = poseidon_hash2(state, *call.selector);
             let calldata = *call.calldata;
             state = poseidon_hash2(state, calldata.len().into());
-            let mut index = 0;
-            loop {
-                if index == calldata.len() {
-                    break;
-                }
-                state = poseidon_hash2(state, *calldata.at(index));
-                index += 1;
+            for value in calldata {
+                state = poseidon_hash2(state, *value);
             }
         }
         state

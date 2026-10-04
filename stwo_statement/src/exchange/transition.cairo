@@ -10,6 +10,7 @@
 //! arithmetic runs on felts: every product multiplies a value below 2^128 by one below 2^120, so
 //! it stays far below the field size and a remainder is checked with one u128 range check.
 
+use core::cmp::{max, min};
 use core::dict::{Felt252Dict, Felt252DictTrait};
 use core::ecdsa::check_ecdsa_signature;
 use super::certificate::{
@@ -62,12 +63,12 @@ const MIN_OUTPUT_BUCKET: u32 = 16;
 const MIN_NULLIFIER_BUCKET: u32 = 8;
 const MAX_BOOK_ORDERS: u32 = 1024;
 const MAX_ORDER_AMOUNT: u128 = 0x3fffffffffffffffffffffffffff;
+const MAX_ORDER_LIFETIME_MS: u64 = 2592000000;
 const TOLERANCE_UNITS: felt252 = 3;
 const REMOVAL_NONE: u32 = 0;
 const REMOVAL_CANCEL: u32 = 1;
 const REMOVAL_EXPIRE: u32 = 2;
 const REMOVAL_RECOVERED: u32 = 3;
-const DISPOSITION_NONE: u32 = 0;
 
 #[derive(Copy, Drop)]
 struct Outcome {
@@ -132,6 +133,8 @@ struct State {
     retired_nullifier_count: u32,
     outcome_left: Felt252Dict<felt252>,
     outcome_user_quote: Felt252Dict<felt252>,
+    order_ids: Felt252Dict<bool>,
+    spent_nullifiers: Felt252Dict<bool>,
 }
 
 /// an order's effect on the stream after the per-order rules.
@@ -226,6 +229,8 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
         assert(valid < TWO_POW_48, 'EX_M0_WINDOW');
         let fee_bps = next_u128(ref data);
         assert(fee_bps <= MAX_FEE_BPS, 'EX_FEE_BPS');
+        let min_order_quote_amount = next_u128(ref data);
+        assert(min_order_quote_amount != 0, 'EX_MIN_ORDER_VALUE');
         let reference_methodology: u8 = next(ref data).try_into().expect('EX_REF_METHOD');
         let derivation_base_market_id = next(ref data);
         let derivation_quote_market_id = next(ref data);
@@ -240,7 +245,8 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
         m0.absorb_pair(quote_id, midpoint.into());
         m0.absorb_pair(scale.into(), observed_at);
         m0.absorb_pair(valid_until, fee_bps.into());
-        m0.absorb_pair(reference_methodology.into(), derivation_base_market_id);
+        m0.absorb_pair(min_order_quote_amount.into(), reference_methodology.into());
+        m0.absorb(derivation_base_market_id);
         m0.absorb_pair(derivation_quote_market_id, derivation_base_bid.into());
         m0.absorb_pair(derivation_base_ask.into(), derivation_quote_bid.into());
         m0.absorb_pair(derivation_quote_ask.into(), max_leg_skew_ms.into());
@@ -255,6 +261,7 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
                     midpoint,
                     scale,
                     fee_bps,
+                    min_order_quote_amount,
                     observed_at_ms: observed,
                     reference_methodology,
                     derivation_base_market_id,
@@ -293,6 +300,8 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
         retired_nullifier_count: 0,
         outcome_left: Default::default(),
         outcome_user_quote: Default::default(),
+        order_ids: Default::default(),
+        spent_nullifiers: Default::default(),
     };
     state.prior_book.absorb_pair(BOOK_DOMAIN, chain_context);
     state.new_book.absorb_pair(BOOK_DOMAIN, chain_context);
@@ -311,11 +320,7 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
         assert(m1 != 0 && m1 < TWO_POW_120 && m1_scale != 0 && m1_scale < TWO_POW_120, 'EX_M1');
         let market = find_market(markets, pair_id).expect('EX_OUTCOME_MARKET');
         outcome_sponge.absorb_pair(outcome_seq, pair_id);
-        outcome_sponge.absorb_pair(if sell {
-            1
-        } else {
-            0
-        }, consumed.into());
+        outcome_sponge.absorb_pair(sell.into(), consumed.into());
         outcome_sponge.absorb_pair(pool_quote.into(), m1.into());
         outcome_sponge.absorb(m1_scale.into());
         state.outcome_left.insert(index.into(), consumed.into());
@@ -401,11 +406,7 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
         }
         if totals.reserved != 0 {
             assert(totals.bound_hit, 'EX_BOUND_UNUSED');
-            capacities.absorb_pair(pair_id, if sell {
-                1
-            } else {
-                0
-            });
+            capacities.absorb_pair(pair_id, sell.into());
             capacities.absorb_pair(slot.bound.into(), totals.reserved);
             capacity_count += 1;
         } else {
@@ -672,15 +673,7 @@ fn slot_constants(
 
 #[inline(always)]
 fn leaf_p1(remaining: felt252, sell: bool, external: bool) -> felt252 {
-    let flags = if sell {
-        1
-    } else {
-        0
-    } + if external {
-        2
-    } else {
-        0
-    };
+    let flags: felt252 = sell.into() + external.into() * 2;
     remaining + flags * TWO_POW_128
 }
 
@@ -709,7 +702,6 @@ fn absorb_leaf(
     sponge.absorb(residual_generation);
 }
 
-/// reads a book leaf; the range checks give each packed field exactly one opening.
 /// an existing order's fixed 21-felt record: its book leaf and this transition's witness. the
 /// range checks give each packed leaf field exactly one opening.
 #[derive(Copy, Drop)]
@@ -804,8 +796,21 @@ fn read_record(ref data: Span<felt252>) -> Record {
 }
 
 #[inline(always)]
+fn assert_unique_order_id(ref state: State, order_id: felt252) {
+    assert(!state.order_ids.get(order_id), 'EX_DUP_ORDER_ID');
+    state.order_ids.insert(order_id, true);
+}
+
+#[inline(always)]
+fn assert_unique_nullifier(ref state: State, nullifier: felt252) {
+    assert(!state.spent_nullifiers.get(nullifier), 'EX_DUP_NULLIFIER');
+    state.spent_nullifiers.insert(nullifier, true);
+}
+
+#[inline(always)]
 fn pass_through(ref data: Span<felt252>, ref state: State, pair_id: felt252, sell: bool) {
     let record = read_record(ref data);
+    assert_unique_order_id(ref state, record.order_id);
     let p1 = leaf_p1(record.remaining, sell, record.external);
     let p2 = record.limit.into() + record.funding * TWO_POW_128;
     let p3 = leaf_p3(record.reserved, record.reserved_seq, record.expiry);
@@ -865,6 +870,7 @@ fn existing_order(
     let expiry = record.expiry;
     let owner_digest = record.owner_digest;
     let order_id = record.order_id;
+    assert_unique_order_id(ref state, order_id);
     absorb_leaf(
         ref state.prior_book,
         slot.pair_id,
@@ -896,37 +902,26 @@ fn existing_order(
         let left = state.outcome_left.get(index.into());
         let reserved_u: u128 = reserved.try_into().unwrap();
         let left_u: u128 = left.try_into().unwrap();
-        let consumed = if reserved_u < left_u {
-            reserved_u
-        } else {
-            left_u
-        };
+        let consumed = min(reserved_u, left_u);
         state.outcome_left.insert(index.into(), left - consumed.into());
         let (quote, has_remainder) = felt_div_rem(
             consumed.into() * outcome.m1.into(), outcome.m1_scale,
         );
         remaining -= consumed.into();
-        if slot.sell {
+        let user_quote = if slot.sell {
             funding -= consumed.into();
             external_out = quote;
+            quote
         } else {
-            let paid = if has_remainder {
-                quote + 1
-            } else {
-                quote
-            };
+            let paid = quote + has_remainder.into();
             funding -= paid;
             u128_of(funding, 'EX_OUTCOME_FUNDING');
             external_out = consumed.into();
-            state
-                .outcome_user_quote
-                .insert(index.into(), state.outcome_user_quote.get(index.into()) + paid);
-        }
-        if slot.sell {
-            state
-                .outcome_user_quote
-                .insert(index.into(), state.outcome_user_quote.get(index.into()) + quote);
-        }
+            paid
+        };
+        state
+            .outcome_user_quote
+            .insert(index.into(), state.outcome_user_quote.get(index.into()) + user_quote);
         reserved = 0;
         reserved_offset = 0;
         reserved_seq = 0;
@@ -1038,6 +1033,7 @@ fn existing_order(
             );
             assert(old_commitment == record.residual_commitment, 'EX_RESIDUAL');
             let old_nullifier = note_nullifier(old_commitment, old_blinding);
+            assert_unique_nullifier(ref state, old_nullifier);
             if removal == REMOVAL_RECOVERED {
                 state.retired_nullifiers = poseidon2(state.retired_nullifiers, old_nullifier);
                 state.retired_nullifier_count += 1;
@@ -1114,7 +1110,11 @@ fn new_order(
     let expiry = next_u64(ref data);
     assert(amount != 0 && amount <= MAX_ORDER_AMOUNT, 'EX_AMOUNT');
     assert(limit != 0 && limit < TWO_POW_120, 'EX_LIMIT');
-    assert(ctx.close_time < expiry && expiry < TWO_POW_48, 'EX_NEW_EXPIRY');
+    assert(
+        ctx.close_time < expiry && expiry <= ctx.close_time
+            + MAX_ORDER_LIFETIME_MS && expiry < TWO_POW_48,
+        'EX_NEW_EXPIRY',
+    );
     let (owner_public_key, spend_authority, withdraw_authority, cancel_authority, nonce) =
         read_owner(
         ref data,
@@ -1135,15 +1135,7 @@ fn new_order(
         cancel_authority,
         nonce,
     );
-    let flags = if slot.sell {
-        1
-    } else {
-        0
-    } + if external {
-        2
-    } else {
-        0
-    };
+    let flags: felt252 = slot.sell.into() + external.into() * 2;
     let order_id = sponge7(
         ORDER_ID_DOMAIN,
         slot.pair_id,
@@ -1153,6 +1145,7 @@ fn new_order(
         expiry.into(),
         owner_digest,
     );
+    assert_unique_order_id(ref state, order_id);
 
     // lock the funding notes: each is a member of the note root, its nullifier becomes public.
     assert(ctx.note_root != 0, 'EX_NOTE_ROOT');
@@ -1190,15 +1183,30 @@ fn new_order(
             commitment, slot.input_id, note_amount.into(), note_withdraw_authority,
         );
         assert(read_membership_root(ref data, leaf) == ctx.note_root, 'EX_FUNDING_MEMBERSHIP');
-        state.nullifiers = poseidon2(state.nullifiers, note_nullifier(commitment, note_blinding));
+        let nullifier = note_nullifier(commitment, note_blinding);
+        assert_unique_nullifier(ref state, nullifier);
+        state.nullifiers = poseidon2(state.nullifiers, nullifier);
         state.nullifier_count += 1;
         funding_set.absorb(commitment);
         funding += note_amount;
     }
     assert(funding <= MAX_ORDER_AMOUNT, 'EX_FUNDING_RANGE');
-    if slot.sell {
-        assert(funding >= amount, 'EX_FUNDING_SHORT');
-    }
+    let (quote_floor, quote_remainder) = felt_div_rem(
+        amount.into() * limit.into(), slot.market.scale,
+    );
+    let quote_floor: u128 = quote_floor.try_into().expect('EX_ORDER_VALUE');
+    let quote_value = quote_floor + if quote_remainder {
+        1
+    } else {
+        0
+    };
+    assert(quote_value >= slot.market.min_order_quote_amount, 'EX_ORDER_VALUE');
+    let required_funding = if slot.sell {
+        amount
+    } else {
+        quote_value
+    };
+    assert(funding >= required_funding, 'EX_FUNDING_SHORT');
     funding_set.absorb(note_count.into());
     let r = next(ref data);
     let s = next(ref data);
@@ -1442,11 +1450,7 @@ fn ceil_fee(amount: felt252, fee_bps: u128) -> felt252 {
         return 0;
     }
     let (fee, has_remainder) = felt_div_rem(amount * fee_bps.into(), FEE_BPS_DENOMINATOR);
-    if has_remainder {
-        fee + 1
-    } else {
-        fee
-    }
+    fee + has_remainder.into()
 }
 
 fn assert_reference_derivations(markets: Span<Market>) {
@@ -1505,18 +1509,10 @@ fn assert_reference_derivations(markets: Span<Market>) {
                     && market.derivation_quote_ask == quote.derivation_base_ask,
                 'EX_SYNTH_BBO',
             );
-            let skew = if base.observed_at_ms >= quote.observed_at_ms {
-                base.observed_at_ms - quote.observed_at_ms
-            } else {
-                quote.observed_at_ms - base.observed_at_ms
-            };
-            assert(skew <= market.max_leg_skew_ms, 'EX_SYNTH_SKEW');
-            let observed_at = if base.observed_at_ms <= quote.observed_at_ms {
-                base.observed_at_ms
-            } else {
-                quote.observed_at_ms
-            };
-            assert(market.observed_at_ms == observed_at, 'EX_SYNTH_TIME');
+            let earlier = min(base.observed_at_ms, quote.observed_at_ms);
+            let later = max(base.observed_at_ms, quote.observed_at_ms);
+            assert(later - earlier <= market.max_leg_skew_ms, 'EX_SYNTH_SKEW');
+            assert(market.observed_at_ms == earlier, 'EX_SYNTH_TIME');
             let (bid, _) = felt_div_rem(
                 market.derivation_base_bid.into() * market.scale.into(),
                 market.derivation_quote_ask,
@@ -1525,11 +1521,7 @@ fn assert_reference_derivations(markets: Span<Market>) {
                 market.derivation_base_ask.into() * market.scale.into(),
                 market.derivation_quote_bid,
             );
-            let ask = ask_floor + if ask_remainder {
-                1
-            } else {
-                0
-            };
+            let ask = ask_floor + ask_remainder.into();
             let bid = u128_of(bid, 'EX_SYNTH_BID');
             let ask = u128_of(ask, 'EX_SYNTH_ASK');
             assert(bid != 0 && bid <= ask, 'EX_SYNTH_BBO');
@@ -1562,49 +1554,45 @@ fn emit_order_outputs(
     nonce: felt252,
 ) {
     if settled.proceeds != 0 {
-        emit_order_output(
+        emit_note_output(
             ref state,
-            ctx,
+            ctx.seq,
             slot.output_id,
             settled.proceeds,
-            OUTPUT_KIND_PROCEEDS,
+            sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_PROCEEDS),
             order_id,
             owner_public_key,
             spend_authority,
             withdraw_authority,
-            nonce,
         );
     }
     if settled.refund != 0 {
-        emit_order_output(
+        emit_note_output(
             ref state,
-            ctx,
+            ctx.seq,
             slot.input_id,
             settled.refund,
-            OUTPUT_KIND_REFUND,
+            sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_REFUND),
             order_id,
             owner_public_key,
             spend_authority,
             withdraw_authority,
-            nonce,
         );
     }
 }
 
 #[inline(always)]
-fn emit_order_output(
+fn emit_note_output(
     ref state: State,
-    ctx: Context,
+    seq: felt252,
     asset_id: felt252,
     amount: felt252,
-    kind: felt252,
-    order_id: felt252,
+    blinding: felt252,
+    metadata: felt252,
     owner_public_key: felt252,
     spend_authority: felt252,
     withdraw_authority: felt252,
-    nonce: felt252,
 ) {
-    let blinding = sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, kind);
     let commitment = note_commitment(
         asset_id,
         amount,
@@ -1612,17 +1600,16 @@ fn emit_order_output(
         spend_authority,
         withdraw_authority,
         blinding,
-        ctx.seq,
-        order_id,
+        seq,
+        metadata,
     );
     let leaf = output_note_leaf(commitment, asset_id, amount, withdraw_authority);
     // the published amount is padded by the output's secret blinding.
-    let enc = amount + blinding;
     state.leaves.append(leaf);
     absorb_output_record(
         ref state.outputs,
         leaf,
-        enc,
+        amount + blinding,
         sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 1),
         sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 2),
         sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 3),

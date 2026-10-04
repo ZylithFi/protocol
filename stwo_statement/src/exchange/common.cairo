@@ -180,15 +180,7 @@ pub fn residual_note_commitment(
     let mut commitment = SpongeTrait::new();
     commitment.absorb_pair(RESIDUAL_NOTE_DOMAIN, chain_context);
     commitment.absorb_pair(input_asset_id, pair_id);
-    commitment.absorb_pair(if sell {
-        1
-    } else {
-        0
-    }, if external {
-        1
-    } else {
-        0
-    });
+    commitment.absorb_pair(sell.into(), external.into());
     commitment.absorb_pair(remaining, limit.into());
     commitment.absorb_pair(funding, reserved);
     commitment.absorb_pair(reserved_offset, reserved_seq);

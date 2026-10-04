@@ -185,16 +185,22 @@ pub mod EkuboExternalMatchRouter {
 
             let base_after = token_balance(base_token, self_address);
             let quote_after = token_balance(quote_token, self_address);
-            assert(base_after == execution.base_balance_before, 'BASE_BALANCE_DELTA');
+            assert(base_after >= execution.base_balance_before, 'BASE_BALANCE_LOSS');
             assert(quote_after >= execution.quote_balance_before, 'QUOTE_BALANCE_LOSS');
-            let profit = quote_after - execution.quote_balance_before;
             let exchange = IExchangeDispatcher { contract_address: execution.exchange };
+            let settlement_account = exchange.settlement_account();
+            let base_surplus = base_after - execution.base_balance_before;
+            if base_surplus != 0 {
+                IERC20Dispatcher { contract_address: base_token }
+                    .transfer(settlement_account, base_surplus.into());
+            }
+            let profit = quote_after - execution.quote_balance_before;
             let support = exchange.pair_config(execution.pair_id).external_settlement_support_quote;
             assert(support != 0, 'SUPPORT_UNSET');
             let required: u256 = support.into() + execution.minimum_profit_quote.into();
             assert(profit.into() >= required, 'PROFIT_TOO_LOW');
             IERC20Dispatcher { contract_address: quote_token }
-                .transfer(exchange.settlement_account(), support.into());
+                .transfer(settlement_account, support.into());
             let searcher_profit = profit - support;
             if searcher_profit != 0 {
                 IERC20Dispatcher { contract_address: quote_token }

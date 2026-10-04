@@ -116,13 +116,18 @@ case "${1:-deploy}" in
   pin)
     [[ "$#" -eq 4 ]] || { echo "usage: $0 pin <proof_version> <virtual_program_hash> <os_config_hash>" >&2; exit 1; }
     require_clean_release
+    proof_version_felt="$2"
+    case "$2" in
+      PROOF1) proof_version_felt="0x50524f4f4631" ;;
+      PROOF2) proof_version_felt="0x50524f4f4632" ;;
+    esac
     exchange="$(contract_address exchange)"
     invoke "${exchange}" set_proof_programs \
       "$(proof_field transition_proof_program_address)" \
       "$(proof_field withdrawal_proof_program_address)" \
       "$(proof_field residual_recovery_proof_program_address)" \
       "$3"
-    invoke "${exchange}" set_proof_validation "$2" "$4" "${ZYLITH_PROOF_VALIDITY_BLOCKS:-450}"
+    invoke "${exchange}" set_proof_validation "${proof_version_felt}" "$4" "${ZYLITH_PROOF_VALIDITY_BLOCKS:-450}"
     python3 - "${STATE_FILE}" "${CLIENT_MANIFEST}" "$2" "$3" "$4" <<'PY'
 import json, sys
 state_path, client_path, version, program_hash, os_hash = sys.argv[1:]
@@ -180,6 +185,7 @@ python3 -c 'import sys; raise SystemExit(0 if int(sys.argv[1], 0) == int(sys.arg
   "${PROOF_ACCOUNT_PUBLIC_KEY}" "${derived_proof_public_key}" ||
     die "the proof account public key does not match its private key"
 PRIVACY_POOL="${ZYLITH_STARKNET_PRIVACY_POOL_ADDRESS:?ZYLITH_STARKNET_PRIVACY_POOL_ADDRESS is required}"
+PRIVACY_POOL_CLASS_HASH="${ZYLITH_STARKNET_PRIVACY_POOL_CLASS_HASH:?ZYLITH_STARKNET_PRIVACY_POOL_CLASS_HASH is required}"
 PRIVACY_DISCOVERY_URL="${ZYLITH_STARKNET_PRIVACY_DISCOVERY_URL:?ZYLITH_STARKNET_PRIVACY_DISCOVERY_URL is required}"
 PRIVACY_PROVING_URL="${ZYLITH_STARKNET_PRIVACY_PROVING_URL:?ZYLITH_STARKNET_PRIVACY_PROVING_URL is required}"
 PRIVACY_PAYMASTER_ADDRESS="${ZYLITH_STARKNET_PRIVACY_PAYMASTER_ADDRESS:?ZYLITH_STARKNET_PRIVACY_PAYMASTER_ADDRESS is required}"
@@ -317,7 +323,7 @@ for pair in ${PAIRS}; do
   else
     die "unsupported reference methodology ${reference_methodology} for ${pair}"
   fi
-  invoke "${exchange}" register_pair "$(id_of "${pair}")" "$(id_of "${pair%%/*}")" "$(id_of "${pair#*/}")" "$(market_field "${pair}" price_base_scale)" "$(market_field "${pair}" taker_fee_bps)" "${reference_args[@]}"
+  invoke "${exchange}" register_pair "$(id_of "${pair}")" "$(id_of "${pair%%/*}")" "$(id_of "${pair#*/}")" "$(market_field "${pair}" price_base_scale)" "$(market_field "${pair}" taker_fee_bps)" "$(market_field "${pair}" min_order_quote_amount)" "${reference_args[@]}"
   if [[ " ${EXTERNAL_PAIRS} " == *" ${pair} "* ]]; then
     invoke "${exchange}" set_pair_external_support "$(id_of "${pair}")" "$(market_field "${pair}" external_settlement_support_quote)"
   fi
@@ -344,6 +350,7 @@ manifest["contracts"] = {
 }
 rail = manifest["funding"]["starknet_privacy"]
 rail["privacy_pool"] = "${PRIVACY_POOL}"
+rail["privacy_pool_class_hash"] = "${PRIVACY_POOL_CLASS_HASH}"
 rail["bridge_adapter"] = "${bridge}"
 rail["discovery_url"] = "${PRIVACY_DISCOVERY_URL}"
 rail["proving_url"] = "${PRIVACY_PROVING_URL}"
