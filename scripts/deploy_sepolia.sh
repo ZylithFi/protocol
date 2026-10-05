@@ -206,6 +206,7 @@ WITHDRAWAL_DELAY_SECONDS="${ZYLITH_WITHDRAWAL_DELAY_SECONDS:-120}"
 [[ -f "${MARKET_REGISTRY}" ]] || die "market registry not found: ${MARKET_REGISTRY}"
 cargo run -q --manifest-path "${ROOT_DIR}/Cargo.toml" -p zylith-core \
   --example market_registry -- "${MARKET_REGISTRY}" --check >/dev/null
+node "${ROOT_DIR}/scripts/check-market-registry.mjs" >/dev/null
 registry_value() {
   python3 - "${MARKET_REGISTRY}" "$1" <<'PY'
 import json, sys
