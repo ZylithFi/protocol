@@ -34,6 +34,14 @@ pub trait IPrivacyDepositBridge<TContractState> {
         withdraw_authority: felt252,
         exit_commitment: felt252,
     );
+    fn authorize_strk20_exit_claim(
+        ref self: TContractState,
+        exit_commitment: felt252,
+        open_note_id: felt252,
+        claim_recipient: felt252,
+        signature_r: felt252,
+        signature_s: felt252,
+    );
     fn settle_external_match_asset_swap(
         ref self: TContractState,
         matcher: ContractAddress,
@@ -74,7 +82,7 @@ pub mod PrivacyDepositBridge {
     };
     use zylith_protocol::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
 
-    const STRK20_EXIT_CLAIM_DOMAIN: felt252 = 0x7a796c6974685f7374726b32305f636c61696d5f7631;
+    const STRK20_EXIT_CLAIM_DOMAIN: felt252 = 0x7a796c6974685f7374726b32305f636c61696d5f7633;
     const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
         0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
 
@@ -97,6 +105,7 @@ pub mod PrivacyDepositBridge {
         strk20_exit_commitments_by_note: Map<felt252, felt252>,
         strk20_exit_withdraw_authorities: Map<felt252, felt252>,
         strk20_exit_claimed_open_note_ids: Map<felt252, felt252>,
+        strk20_exit_claim_authorizations: Map<felt252, felt252>,
         /// shielded liabilities that remain available to exchange transitions.
         escrowed_asset_amounts: Map<felt252, u128>,
         /// finalized exits whose tokens remain in custody until the privacy pool claims them.
@@ -239,6 +248,52 @@ pub mod PrivacyDepositBridge {
             self.escrowed_asset_amounts.write(asset_id, escrowed - amount);
             let pending = self.pending_exit_asset_amounts.read(asset_id);
             self.pending_exit_asset_amounts.write(asset_id, pending + amount);
+        }
+
+        fn authorize_strk20_exit_claim(
+            ref self: ContractState,
+            exit_commitment: felt252,
+            open_note_id: felt252,
+            claim_recipient: felt252,
+            signature_r: felt252,
+            signature_s: felt252,
+        ) {
+            let claim_account = get_caller_address();
+            assert(!claim_account.is_zero(), 'BAD_CLAIM_ACCOUNT');
+            assert(exit_commitment != 0, 'BAD_EXIT');
+            assert(open_note_id != 0, 'BAD_OPEN_NOTE');
+            assert(claim_recipient != 0, 'BAD_CLAIM_RECIPIENT');
+            assert(signature_r != 0 && signature_s != 0, 'BAD_EXIT_SIG');
+            let amount = self.strk20_exit_amounts.read(exit_commitment);
+            assert(amount > 0, 'UNKNOWN_EXIT');
+            let asset_id = self.strk20_exit_asset_ids.read(exit_commitment);
+            let token_address = self.asset_tokens.read(asset_id);
+            let withdraw_authority = self.strk20_exit_withdraw_authorities.read(exit_commitment);
+            assert(
+                check_ecdsa_signature(
+                    strk20_exit_claim_message_hash(
+                        self.privacy_pool.read(),
+                        self.exchange.read(),
+                        asset_id,
+                        token_address,
+                        amount,
+                        exit_commitment,
+                        claim_account,
+                        open_note_id,
+                        claim_recipient,
+                    ),
+                    withdraw_authority,
+                    signature_r,
+                    signature_s,
+                ),
+                'BAD_EXIT_SIG',
+            );
+            let authorization = claim_authorization_hash(
+                claim_account, open_note_id, claim_recipient,
+            );
+            let existing = self.strk20_exit_claim_authorizations.read(exit_commitment);
+            assert(existing == 0 || existing == authorization, 'CLAIM_AUTH_EXISTS');
+            self.strk20_exit_claim_authorizations.write(exit_commitment, authorization);
         }
 
         fn settle_external_match_asset_swap(
@@ -426,49 +481,37 @@ pub mod PrivacyDepositBridge {
     ) -> super::OpenNoteDeposit {
         assert(get_caller_address() == self.privacy_pool.read(), 'BAD_PRIVACY_CALLER');
         assert(encrypted_note_activations.len() == 0, 'BAD_EXIT_CLAIM');
-        assert(claim_fields.len() == 4, 'BAD_EXIT_CLAIM');
+        assert(claim_fields.len() == 3, 'BAD_EXIT_CLAIM');
         let exit_commitment = *claim_fields.at(0);
         let open_note_id = *claim_fields.at(1);
-        let signature_r = *claim_fields.at(2);
-        let signature_s = *claim_fields.at(3);
+        let claim_recipient = *claim_fields.at(2);
         assert(exit_commitment != 0, 'BAD_EXIT');
         assert(open_note_id != 0, 'BAD_OPEN_NOTE');
-        assert(signature_r != 0, 'BAD_EXIT_SIG');
-        assert(signature_s != 0, 'BAD_EXIT_SIG');
+        assert(claim_recipient != 0, 'BAD_CLAIM_RECIPIENT');
         assert(self.strk20_exit_claimed_open_note_ids.read(exit_commitment) == 0, 'EXIT_CLAIMED');
 
         let amount = self.strk20_exit_amounts.read(exit_commitment);
         assert(amount > 0, 'UNKNOWN_EXIT');
         let asset_id = self.strk20_exit_asset_ids.read(exit_commitment);
-        let withdraw_authority = self.strk20_exit_withdraw_authorities.read(exit_commitment);
         let token_address = self.asset_tokens.read(asset_id);
         assert(!token_address.is_zero(), 'UNSUPPORTED_ASSET');
         let privacy_pool = self.privacy_pool.read();
         assert(!privacy_pool.is_zero(), 'BAD_PRIVACY_POOL');
         let exchange = self.exchange.read();
         assert(!exchange.is_zero(), 'BAD_EXCHANGE');
+        let claim_account = get_tx_info().unbox().account_contract_address;
+        assert(!claim_account.is_zero(), 'BAD_CLAIM_ACCOUNT');
         assert(
-            check_ecdsa_signature(
-                strk20_exit_claim_message_hash(
-                    privacy_pool,
-                    exchange,
-                    asset_id,
-                    token_address,
-                    amount,
-                    exit_commitment,
-                    open_note_id,
-                ),
-                withdraw_authority,
-                signature_r,
-                signature_s,
-            ),
-            'BAD_EXIT_SIG',
+            self.strk20_exit_claim_authorizations.read(exit_commitment)
+                == claim_authorization_hash(claim_account, open_note_id, claim_recipient),
+            'BAD_EXIT_AUTH',
         );
 
         let pending = self.pending_exit_asset_amounts.read(asset_id);
         assert(pending >= amount, 'EXIT_LIABILITY_LOW');
 
         self.strk20_exit_amounts.write(exit_commitment, 0);
+        self.strk20_exit_claim_authorizations.write(exit_commitment, 0);
         self.strk20_exit_claimed_open_note_ids.write(exit_commitment, open_note_id);
         self.pending_exit_asset_amounts.write(asset_id, pending - amount);
 
@@ -528,7 +571,9 @@ pub mod PrivacyDepositBridge {
         token_address: ContractAddress,
         amount: u128,
         exit_commitment: felt252,
+        claim_account: ContractAddress,
         open_note_id: felt252,
+        claim_recipient: felt252,
     ) -> felt252 {
         let tx_info = get_tx_info().unbox();
         let mut state = poseidon_hash2(STRK20_EXIT_CLAIM_DOMAIN, tx_info.chain_id);
@@ -539,7 +584,17 @@ pub mod PrivacyDepositBridge {
         state = poseidon_hash2(state, token_address.into());
         state = poseidon_hash2(state, amount.into());
         state = poseidon_hash2(state, exit_commitment);
-        poseidon_hash2(state, open_note_id)
+        state = poseidon_hash2(state, claim_account.into());
+        state = poseidon_hash2(state, open_note_id);
+        poseidon_hash2(state, claim_recipient)
+    }
+
+    fn claim_authorization_hash(
+        claim_account: ContractAddress, open_note_id: felt252, claim_recipient: felt252,
+    ) -> felt252 {
+        let mut state = poseidon_hash2(claim_account.into(), open_note_id);
+        state = poseidon_hash2(state, claim_recipient);
+        state
     }
 
     fn poseidon_hash2(x: felt252, y: felt252) -> felt252 {

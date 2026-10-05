@@ -2,11 +2,13 @@
 //! `zylith_core::exchange` (`core/examples/exchange_contract_fixtures.rs`), and the contract must
 //! accept its exact calldata, commitments and proof messages through the real deposit path.
 
+use core::ecdsa::check_ecdsa_signature;
 use core::poseidon::{hades_permutation, poseidon_hash_span};
 use snforge_std::fs::{FileTrait, read_txt};
 use snforge_std::{
-    CheatSpan, ContractClassTrait, DeclareResultTrait, cheat_block_number, cheat_block_timestamp,
-    cheat_caller_address, cheat_proof_facts, declare,
+    CheatSpan, ContractClassTrait, DeclareResultTrait, cheat_account_contract_address,
+    cheat_block_number, cheat_block_timestamp, cheat_caller_address, cheat_chain_id,
+    cheat_proof_facts, declare,
 };
 use starknet::ContractAddress;
 use zylith_protocol::commitment_registry::{
@@ -38,6 +40,7 @@ const WITHDRAWAL_MESSAGE_DOMAIN: felt252 = 'zylith_withdraw_msg_v1';
 const RESIDUAL_RECOVERY_MESSAGE_DOMAIN: felt252 = 'zylith_res_recover_msg_v1';
 const OUTPUT_NOTE_LEAF_DOMAIN: felt252 =
     0x0f0c89949c6cba4ac7f170f7f00809b458b997f2e394481c7ab58cc68aa49b3;
+const STRK20_EXIT_CLAIM_DOMAIN: felt252 = 0x7a796c6974685f7374726b32305f636c61696d5f7633;
 
 fn address(value: felt252) -> ContractAddress {
     value.try_into().unwrap()
@@ -49,6 +52,28 @@ fn bound_proof_message(
     let (inner, _, _) = hades_permutation(domain, exchange, 2);
     let (statement, _, _) = hades_permutation(inner, commitment, 2);
     poseidon_hash_span(array![program, 0, 2, domain, statement].span())
+}
+
+#[test]
+fn strk20_exit_claim_signature_vector_matches_the_wallet() {
+    let values = array![
+        0x123_felt252, 0x111_felt252, 0x222_felt252, 0x444_felt252, 0x555_felt252, 0x333_felt252,
+        0x7_felt252, 0x666_felt252, 0x777_felt252, 0x999_felt252, 0x888_felt252,
+    ];
+    let mut state = STRK20_EXIT_CLAIM_DOMAIN;
+    for value in values {
+        let (next, _, _) = hades_permutation(state, value, 2);
+        state = next;
+    }
+    assert(
+        check_ecdsa_signature(
+            state,
+            0x3f5c95cca3facbedfcea5994bd53cb39f2c2a5eef6d121c2c2f032c0ebcde4e,
+            0xde23af5851fcec6d88ce6f0f3cf8b777ee2d231c77f79dc4d4298ef7b3724d,
+            0x435792e70521a880ac71b5d4117e95a200ab8635bcca141dff026e1700b41f8,
+        ),
+        'claim signature',
+    );
 }
 
 #[test]
@@ -615,6 +640,151 @@ fn an_unconsumed_pool_allowance_cannot_back_a_new_shielded_deposit() {
             array![asset_id].span(),
             array![amount].span(),
             array![withdraw_authority].span(),
+        );
+}
+
+fn setup_exit_claim_bridge() -> IPrivacyDepositBridgeDispatcher {
+    let exchange_address = address(0x444);
+    let registry_address = address(0x445);
+    let pool = address(0x222);
+    let token = address(0x333);
+    let bridge_address = address(0x111);
+    declare("MockPrivacyPool").unwrap().contract_class().deploy_at(@array![], pool).unwrap();
+    declare("MockERC20").unwrap().contract_class().deploy_at(@array![], token).unwrap();
+    declare("CommitmentRegistry")
+        .unwrap()
+        .contract_class()
+        .deploy_at(@array![ADMIN], registry_address)
+        .unwrap();
+    declare("Exchange")
+        .unwrap()
+        .contract_class()
+        .deploy_at(@array![ADMIN], exchange_address)
+        .unwrap();
+    declare("PrivacyDepositBridge")
+        .unwrap()
+        .contract_class()
+        .deploy_at(@array![ADMIN, registry_address.into(), pool.into()], bridge_address)
+        .unwrap();
+    let bridge = IPrivacyDepositBridgeDispatcher { contract_address: bridge_address };
+    let registry = ICommitmentRegistryDispatcher { contract_address: registry_address };
+    let exchange = IExchangeDispatcher { contract_address: exchange_address };
+    cheat_caller_address(registry_address, address(ADMIN), CheatSpan::TargetCalls(2));
+    registry.set_privacy_deposit_bridge(bridge_address);
+    registry.set_exchange(exchange_address);
+    cheat_caller_address(exchange_address, address(ADMIN), CheatSpan::TargetCalls(1));
+    exchange.set_custody(bridge_address, registry_address, address(0));
+    cheat_caller_address(bridge_address, address(ADMIN), CheatSpan::TargetCalls(2));
+    bridge.set_exchange(exchange_address);
+    bridge.register_supported_asset(0x555, token);
+    IMockERC20Dispatcher { contract_address: token }.mint(bridge_address, 7);
+    let withdraw_authority = 0x3f5c95cca3facbedfcea5994bd53cb39f2c2a5eef6d121c2c2f032c0ebcde4e;
+    let deposit_root = output_note_leaf(0xc00, 0x555, 7, withdraw_authority);
+    cheat_caller_address(bridge_address, pool, CheatSpan::TargetCalls(1));
+    bridge
+        .privacy_invoke(
+            array![0xf00].span(),
+            array![deposit_root].span(),
+            array![0xe00].span(),
+            array![0xc00].span(),
+            array![0x555].span(),
+            array![7].span(),
+            array![withdraw_authority].span(),
+        );
+    cheat_caller_address(bridge_address, exchange_address, CheatSpan::TargetCalls(1));
+    bridge.stage_verified_note_strk20_exit(0x555, 7, 0x51a9, withdraw_authority, 0x666);
+    bridge
+}
+
+#[test]
+fn a_strk20_exit_claim_is_bound_to_the_transaction_account() {
+    let bridge = setup_exit_claim_bridge();
+    cheat_caller_address(bridge.contract_address, address(0x777), CheatSpan::TargetCalls(1));
+    cheat_chain_id(bridge.contract_address, 0x123, CheatSpan::TargetCalls(1));
+    bridge
+        .authorize_strk20_exit_claim(
+            0x666,
+            0x999,
+            0x888,
+            0xde23af5851fcec6d88ce6f0f3cf8b777ee2d231c77f79dc4d4298ef7b3724d,
+            0x435792e70521a880ac71b5d4117e95a200ab8635bcca141dff026e1700b41f8,
+        );
+    cheat_caller_address(bridge.contract_address, address(0x222), CheatSpan::TargetCalls(1));
+    cheat_account_contract_address(
+        bridge.contract_address, address(0x777), CheatSpan::TargetCalls(1),
+    );
+    cheat_chain_id(bridge.contract_address, 0x123, CheatSpan::TargetCalls(1));
+    bridge
+        .privacy_invoke(
+            array![].span(),
+            array![0x666, 0x999, 0x888].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+        );
+    assert(bridge.strk20_exit_claimed_open_note_id(0x666) == 0x999, 'claim recorded');
+}
+
+#[test]
+#[should_panic(expected: 'BAD_EXIT_AUTH')]
+fn another_transaction_account_cannot_take_a_strk20_exit_claim() {
+    let bridge = setup_exit_claim_bridge();
+    cheat_caller_address(bridge.contract_address, address(0x777), CheatSpan::TargetCalls(1));
+    cheat_chain_id(bridge.contract_address, 0x123, CheatSpan::TargetCalls(1));
+    bridge
+        .authorize_strk20_exit_claim(
+            0x666,
+            0x999,
+            0x888,
+            0xde23af5851fcec6d88ce6f0f3cf8b777ee2d231c77f79dc4d4298ef7b3724d,
+            0x435792e70521a880ac71b5d4117e95a200ab8635bcca141dff026e1700b41f8,
+        );
+    cheat_caller_address(bridge.contract_address, address(0x222), CheatSpan::TargetCalls(1));
+    cheat_account_contract_address(
+        bridge.contract_address, address(0x778), CheatSpan::TargetCalls(1),
+    );
+    cheat_chain_id(bridge.contract_address, 0x123, CheatSpan::TargetCalls(1));
+    bridge
+        .privacy_invoke(
+            array![].span(),
+            array![0x666, 0x999, 0x888].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+        );
+}
+
+#[test]
+#[should_panic(expected: 'BAD_EXIT_AUTH')]
+fn a_claim_cannot_replace_the_authorized_private_output() {
+    let bridge = setup_exit_claim_bridge();
+    cheat_caller_address(bridge.contract_address, address(0x777), CheatSpan::TargetCalls(1));
+    cheat_chain_id(bridge.contract_address, 0x123, CheatSpan::TargetCalls(1));
+    bridge
+        .authorize_strk20_exit_claim(
+            0x666,
+            0x999,
+            0x888,
+            0xde23af5851fcec6d88ce6f0f3cf8b777ee2d231c77f79dc4d4298ef7b3724d,
+            0x435792e70521a880ac71b5d4117e95a200ab8635bcca141dff026e1700b41f8,
+        );
+    cheat_caller_address(bridge.contract_address, address(0x222), CheatSpan::TargetCalls(1));
+    cheat_account_contract_address(
+        bridge.contract_address, address(0x777), CheatSpan::TargetCalls(1),
+    );
+    bridge
+        .privacy_invoke(
+            array![].span(),
+            array![0x666, 0x998, 0x888].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
+            array![].span(),
         );
 }
 
