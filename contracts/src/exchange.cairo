@@ -375,6 +375,8 @@ pub mod Exchange {
     const NULLIFIERS_DOMAIN: felt252 = 'zylith_nullifiers_v1';
     const RETIRED_NULLIFIERS_DOMAIN: felt252 = 'zylith_retired_v1';
     const OUTPUTS_DOMAIN: felt252 = 'zylith_outputs_v1';
+    const OUTPUT_NOTE_NODE_DOMAIN: felt252 =
+        0x03c6998f476a618431be1c1764a6724f13c0739be395bab4c1217bc0a65b2ee7;
     const REFERENCE_PRICE_ATTESTATION_DOMAIN: felt252 =
         0x79508ce25b318644e4a7aea66c1edc2342856b522eb62152b5c118fc1ef3e67;
     const REFERENCE_PRICE_BATCH_DOMAIN: felt252 = 'zylith_price_batch_v1';
@@ -392,6 +394,9 @@ pub mod Exchange {
     const MAX_REFERENCE_WINDOW_MS: u64 = 15000;
     const MAX_REFERENCE_FUTURE_SKEW_MS: u64 = 5000;
     const MIN_REFERENCE_SOURCES: u64 = 3;
+    const MIN_OUTPUT_RECORDS: u32 = 16;
+    // the power-of-two padding of two records per order plus one fee record per asset.
+    const MAX_OUTPUT_RECORDS: u32 = 4096;
     const REFERENCE_METHOD_DIRECT_BBO: u8 = 0;
     const REFERENCE_METHOD_SYNTHETIC_CROSS_BBO: u8 = 1;
     const NULLIFIER_UNUSED: u8 = 0;
@@ -644,7 +649,8 @@ pub mod Exchange {
             proof_validity_blocks: u64,
         ) {
             assert_unlocked_admin(@self);
-            assert(proof_version != 0 && starknet_os_config_hash != 0, 'BAD_PROOF_CONFIG');
+            assert(proof_version != 0, 'BAD_PROOF_VERSION');
+            assert(starknet_os_config_hash != 0, 'BAD_PROOF_CONFIG');
             assert(proof_validity_blocks != 0, 'BAD_PROOF_CONFIG');
             self.expected_proof_version.write(proof_version);
             self.expected_os_config_hash.write(starknet_os_config_hash);
@@ -891,6 +897,8 @@ pub mod Exchange {
             if nullifiers_admit_orders(header.note_root) {
                 assert(self.known_note_roots.read(header.note_root), 'UNKNOWN_NOTE_ROOT');
             }
+            let derived_output_root = output_tree_root(outputs);
+            assert(derived_output_root == header.output_root, 'BAD_OUTPUT_ROOT');
 
             let markets_commitment = verify_markets(
                 @self, chain_context, header.seq, header.close_time_ms, markets,
@@ -913,27 +921,27 @@ pub mod Exchange {
                 TRANSITION_DOMAIN, chain_context, header.seq.into(), header.close_time_ms.into(),
                 header.prior_book_root, header.new_book_root, header.note_root, markets_commitment,
                 outcomes_commitment, capacity_commitment, nullifiers_commitment,
-                retired_nullifiers_commitment, outputs_commitment, header.output_root,
+                retired_nullifiers_commitment, outputs_commitment, derived_output_root,
                 fee_recipient,
             ];
             let transition_commitment = poseidon_hash_span(commitment.span());
             assert_proof_facts_message(
                 @self,
                 self.transition_proof_program.read(),
-                bound_message(TRANSITION_MESSAGE_DOMAIN, chain_context, transition_commitment),
+                transition_commitment,
                 TRANSITION_MESSAGE_DOMAIN,
             );
 
             self.seq.write(header.seq);
             self.book_root.write(header.new_book_root);
             self.last_close_time_ms.write(header.close_time_ms);
-            let note_root = append_note_batch(ref self, header.output_root);
+            let note_root = append_note_batch(ref self, derived_output_root);
             self
                 .emit(
                     TransitionSettled {
                         seq: header.seq,
                         new_book_root: header.new_book_root,
-                        output_root: header.output_root,
+                        output_root: derived_output_root,
                         note_root,
                         output_count: outputs.len(),
                     },
@@ -969,10 +977,15 @@ pub mod Exchange {
             assert(m1.observed_at_ms <= now_ms + MAX_REFERENCE_FUTURE_SKEW_MS, 'FUTURE_M1');
             assert(m1.valid_until_ms >= now_ms, 'STALE_M1');
             let singleton = array![m1];
+            let pair = pair_config_of(@self, pair_id);
+            let singleton_pair = array![pair];
+            let verifier: felt252 = get_contract_address().into();
             let batch_commitment = price_batch_commitment(
-                @self, get_contract_address().into(), singleton.span(),
+                verifier, singleton.span(), singleton_pair.span(),
             );
-            verify_attestation(@self, get_contract_address().into(), m1, batch_commitment);
+            let signer = self.reference_signer.read();
+            assert(signer != 0, 'SIGNER_UNSET');
+            verify_attestation(verifier, m1, pair, batch_commitment, signer);
             // the pool trades at m1, which respects every reserved order's limit.
             if sell {
                 assert(m1.midpoint >= capacity.bound, 'M1_BELOW_BOUND');
@@ -984,7 +997,6 @@ pub mod Exchange {
                 product, Into::<u128, u256>::into(m1.scale).try_into().unwrap(),
             );
             let floor: u128 = floor.try_into().expect('QUOTE_OVERFLOW');
-            let pair = pair_config_of(@self, pair_id);
             // every fill is at least as good as the bound after rounding, not only its m1, so
             // the capacity's average price, at which its orders share the fills, respects every
             // reserved order's limit exactly.
@@ -1100,10 +1112,7 @@ pub mod Exchange {
                     .span(),
             );
             assert_proof_facts_message(
-                @self,
-                self.withdrawal_proof_program.read(),
-                bound_message(WITHDRAWAL_MESSAGE_DOMAIN, chain_context, commitment),
-                WITHDRAWAL_MESSAGE_DOMAIN,
+                @self, self.withdrawal_proof_program.read(), commitment, WITHDRAWAL_MESSAGE_DOMAIN,
             );
             reserve_exit_commitment(ref self, exit_commitment);
             let requested_at = get_block_timestamp();
@@ -1250,7 +1259,7 @@ pub mod Exchange {
             assert_proof_facts_message(
                 @self,
                 self.residual_recovery_proof_program.read(),
-                bound_message(RESIDUAL_RECOVERY_MESSAGE_DOMAIN, chain_context, commitment),
+                commitment,
                 RESIDUAL_RECOVERY_MESSAGE_DOMAIN,
             );
             let requested_at = get_block_timestamp();
@@ -1517,9 +1526,7 @@ pub mod Exchange {
             proof_message_hash(
                 self.transition_proof_program.read(),
                 TRANSITION_MESSAGE_DOMAIN,
-                bound_message(
-                    TRANSITION_MESSAGE_DOMAIN, get_contract_address().into(), transition_commitment,
-                ),
+                transition_commitment,
             )
         }
 
@@ -1529,9 +1536,7 @@ pub mod Exchange {
             proof_message_hash(
                 self.withdrawal_proof_program.read(),
                 WITHDRAWAL_MESSAGE_DOMAIN,
-                bound_message(
-                    WITHDRAWAL_MESSAGE_DOMAIN, get_contract_address().into(), withdrawal_commitment,
-                ),
+                withdrawal_commitment,
             )
         }
 
@@ -1541,11 +1546,7 @@ pub mod Exchange {
             proof_message_hash(
                 self.residual_recovery_proof_program.read(),
                 RESIDUAL_RECOVERY_MESSAGE_DOMAIN,
-                bound_message(
-                    RESIDUAL_RECOVERY_MESSAGE_DOMAIN,
-                    get_contract_address().into(),
-                    recovery_commitment,
-                ),
+                recovery_commitment,
             )
         }
 
@@ -1612,11 +1613,6 @@ pub mod Exchange {
         result
     }
 
-    /// the statement message the proof program emits: bound to this contract.
-    fn bound_message(domain: felt252, chain_context: felt252, commitment: felt252) -> felt252 {
-        poseidon2(poseidon2(domain, chain_context), commitment)
-    }
-
     /// the l1 message hash the proof facts carry for a statement message.
     fn proof_message_hash(
         proof_program: ContractAddress, domain: felt252, statement_message: felt252,
@@ -1674,16 +1670,24 @@ pub mod Exchange {
         markets: Span<MarketAttestation>,
     ) -> felt252 {
         assert(!markets.is_empty(), 'NO_MARKETS');
-        let batch_commitment = price_batch_commitment(self, chain_context, markets);
+        let mut pair_configs = array![];
+        for market in markets {
+            pair_configs.append(pair_config_of(self, (*market).pair_id));
+        }
+        let pair_configs = pair_configs.span();
+        let batch_commitment = price_batch_commitment(chain_context, markets, pair_configs);
+        let signer = self.reference_signer.read();
+        assert(signer != 0, 'SIGNER_UNSET');
         let mut values = array![
             M0_DOMAIN, chain_context, seq.into(), close_time_ms.into(),
             self.objective_numeraire.read(), markets.len().into(),
         ];
-        for market in markets {
-            let market = *market;
-            verify_attestation(self, chain_context, market, batch_commitment);
+        let mut index: u32 = 0;
+        while index != markets.len() {
+            let market = *markets.at(index);
+            let pair = *pair_configs.at(index);
+            verify_attestation(chain_context, market, pair, batch_commitment, signer);
             // the statement checks observed_at <= close_time <= valid_until.
-            let pair = pair_config_of(self, market.pair_id);
             values.append(market.pair_id);
             values.append(pair.base_asset_id);
             values.append(pair.quote_asset_id);
@@ -1701,20 +1705,23 @@ pub mod Exchange {
             values.append(market.derivation_quote_bid.into());
             values.append(market.derivation_quote_ask.into());
             values.append(market.max_leg_skew_ms.into());
+            index += 1;
         }
         poseidon_hash_span(values.span())
     }
 
     fn price_batch_commitment(
-        self: @ContractState, verifier: felt252, markets: Span<MarketAttestation>,
+        verifier: felt252, markets: Span<MarketAttestation>, pair_configs: Span<PairConfig>,
     ) -> felt252 {
+        assert(markets.len() == pair_configs.len(), 'BAD_PAIR_CONFIGS');
         let mut state = poseidon2(REFERENCE_PRICE_BATCH_DOMAIN, verifier);
         state = poseidon2(state, markets.len().into());
-        for market in markets {
-            let market = *market;
-            for value in attestation_fields(market, pair_config_of(self, market.pair_id)) {
+        let mut index: u32 = 0;
+        while index != markets.len() {
+            for value in attestation_fields(*markets.at(index), *pair_configs.at(index)) {
                 state = poseidon2(state, value);
             }
+            index += 1;
         }
         state
     }
@@ -1734,10 +1741,11 @@ pub mod Exchange {
     }
 
     fn verify_attestation(
-        self: @ContractState,
         verifier: felt252,
         market: MarketAttestation,
+        pair: PairConfig,
         expected_batch_commitment: felt252,
+        signer: felt252,
     ) {
         assert(market.midpoint != 0 && market.lower_price <= market.midpoint, 'BAD_REF_PRICE');
         assert(market.midpoint <= market.upper_price && market.scale != 0, 'BAD_REF_PRICE');
@@ -1750,7 +1758,6 @@ pub mod Exchange {
             market.valid_until_ms - market.observed_at_ms <= MAX_REFERENCE_WINDOW_MS,
             'BAD_REF_WINDOW',
         );
-        let pair = pair_config_of(self, market.pair_id);
         assert(market.scale == pair.price_base_scale, 'BAD_REF_SCALE');
         assert(
             market.reference_methodology == pair.reference_methodology
@@ -1760,8 +1767,6 @@ pub mod Exchange {
             'BAD_REF_CONFIG',
         );
         assert(market.price_batch_commitment == expected_batch_commitment, 'BAD_PRICE_BATCH');
-        let signer = self.reference_signer.read();
-        assert(signer != 0, 'SIGNER_UNSET');
         let mut state = poseidon2(REFERENCE_PRICE_ATTESTATION_DOMAIN, verifier);
         let mut fields = attestation_fields(market, pair);
         fields.append(market.price_batch_commitment);
@@ -1944,6 +1949,38 @@ pub mod Exchange {
         }
         values.append(outputs.len().into());
         poseidon_hash_span(values.span())
+    }
+
+    /// the statement publishes every output record, so deriving their merkle root here avoids
+    /// spending private-proof capacity on a deterministic function of public calldata.
+    fn output_tree_root(outputs: Span<OutputRecord>) -> felt252 {
+        let count = outputs.len();
+        assert(count >= MIN_OUTPUT_RECORDS && count <= MAX_OUTPUT_RECORDS, 'BAD_OUTPUT_COUNT');
+        let mut size = count;
+        while size > 1 {
+            assert(size % 2 == 0, 'BAD_OUTPUT_COUNT');
+            size /= 2;
+        }
+
+        let mut leaves: Array<felt252> = array![];
+        for output in outputs {
+            leaves.append((*output).leaf);
+        }
+        let mut level = leaves.span();
+        while level.len() > 1 {
+            let mut next_level: Array<felt252> = array![];
+            let mut index: u32 = 0;
+            while index != level.len() {
+                let (node, _, _) = hades_permutation(
+                    *level.at(index), *level.at(index + 1), OUTPUT_NOTE_NODE_DOMAIN,
+                );
+                next_level.append(node);
+                index += 2;
+            }
+            level = next_level.span();
+        }
+        let root = *level.at(0);
+        root
     }
 
     fn empty_book_root(chain_context: felt252) -> felt252 {

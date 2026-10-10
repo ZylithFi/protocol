@@ -14,6 +14,10 @@ pub const NOTE_ACCUMULATOR_LEAF_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f6163
 pub const NOTE_ACCUMULATOR_NODE_DOMAIN: felt252 = 0x7a796c6974685f6e6f74655f6163635f6e6f64655f7631;
 pub const RESIDUAL_NOTE_DOMAIN: felt252 = 'zylith_residual_v1';
 pub const RESIDUAL_NOTE_LEAF_DOMAIN: felt252 = 'zylith_res_leaf_v1';
+const ORDER_OUTPUT_BLINDING_DOMAIN: felt252 = 'zylith_order_blind_prg_v1';
+const OUTPUT_AUX_BLINDING_DOMAIN: felt252 = 'zylith_out_aux_prg_v1';
+const OUTPUT_PADDING_DOMAIN: felt252 = 'zylith_out_pad_v1';
+const NULLIFIER_PADDING_DOMAIN: felt252 = 'zylith_null_pad_v1';
 pub const NOTE_ACCUMULATOR_DEPTH: u32 = 32;
 pub const MAX_OUTPUT_SUBTREE_DEPTH: u32 = 16;
 
@@ -30,6 +34,51 @@ pub const TWO_POW_113: u128 = 0x20000000000000000000000000000;
 pub fn poseidon2(x: felt252, y: felt252) -> felt252 {
     let (result, _, _) = hades_permutation(x, y, 2);
     result
+}
+
+/// one domain-separated pseudorandom field element keyed by `seed` and bound to `index`.
+fn poseidon_prg1(domain: felt252, seed: felt252, index: felt252) -> felt252 {
+    let (value, _, _) = hades_permutation(domain, seed, index);
+    value
+}
+
+/// three domain-separated pseudorandom field elements from one secret key.
+fn poseidon_prg3(domain: felt252, key: felt252, index: felt252) -> (felt252, felt252, felt252) {
+    let (first, second, capacity) = hades_permutation(domain, key, index);
+    let (third, _, _) = hades_permutation(first, second, capacity + 1);
+    (first, second, third)
+}
+
+/// five domain-separated pseudorandom field elements keyed by `seed` and bound to `index`.
+fn poseidon_prg5(
+    domain: felt252, seed: felt252, index: felt252,
+) -> (felt252, felt252, felt252, felt252, felt252) {
+    let (first, second, capacity) = hades_permutation(domain, seed, index);
+    let (third, fourth, capacity) = hades_permutation(first, second, capacity + 1);
+    let (fifth, _, _) = hades_permutation(third, fourth, capacity + 2);
+    (first, second, third, fourth, fifth)
+}
+
+/// proceeds, refund and residual blindings for one order and transition sequence.
+pub fn order_output_blindings(order_secret: felt252, seq: felt252) -> (felt252, felt252, felt252) {
+    poseidon_prg3(ORDER_OUTPUT_BLINDING_DOMAIN, order_secret, seq)
+}
+
+/// masks for the remaining, reserved and reserved-offset fields of one output.
+pub fn output_aux_blindings(blinding: felt252) -> (felt252, felt252, felt252) {
+    poseidon_prg3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 0)
+}
+
+/// the five public fields of one dummy output record.
+pub fn output_padding_record(
+    padding_seed: felt252, index: felt252,
+) -> (felt252, felt252, felt252, felt252, felt252) {
+    poseidon_prg5(OUTPUT_PADDING_DOMAIN, padding_seed, index)
+}
+
+/// one dummy nullifier at its final padded-list index.
+pub fn nullifier_padding_value(padding_seed: felt252, index: felt252) -> felt252 {
+    poseidon_prg1(NULLIFIER_PADDING_DOMAIN, padding_seed, index)
 }
 
 /// a poseidon sponge over a felt sequence; `finish` equals `poseidon_hash_span` of everything

@@ -4,14 +4,12 @@ use core::cmp::min;
 use core::ecdsa::check_ecdsa_signature;
 use super::common::{
     RESIDUAL_NOTE_LEAF_DOMAIN, SpongeTrait, TWO_POW_120, next, next_bool, next_u128, next_u32,
-    next_u64, note_nullifier, poseidon2, read_membership_root, residual_note_commitment, sponge4,
-    sponge6,
+    next_u64, note_nullifier, order_output_blindings, poseidon2, read_membership_root,
+    residual_note_commitment, sponge6,
 };
 
 pub const STATEMENT_TYPE_RESIDUAL_RECOVERY: felt252 = 16;
 const OWNER_DOMAIN: felt252 = 'zylith_owner_v1';
-const OUTPUT_BLINDING_DOMAIN: felt252 = 'zylith_out_blind_v1';
-const OUTPUT_KIND_RESIDUAL: felt252 = 4;
 const RECOVERY_AUTH_DOMAIN: felt252 = 'zylith_res_recover_auth_v1';
 const RECOVERY_DOMAIN: felt252 = 'zylith_res_recovery_v1';
 const CAPACITY_FILLED: u32 = 2;
@@ -83,10 +81,8 @@ pub fn verify_residual_recovery_statement(data: Span<felt252>) -> felt252 {
         cancel_authority,
         nonce,
     );
-    assert(
-        blinding == sponge4(OUTPUT_BLINDING_DOMAIN, nonce, generation.into(), OUTPUT_KIND_RESIDUAL),
-        'RR_BLINDING',
-    );
+    let (_, _, expected_blinding) = order_output_blindings(nonce, generation.into());
+    assert(blinding == expected_blinding, 'RR_BLINDING');
     let residual_commitment = residual_note_commitment(
         chain_context,
         input_asset_id,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploys the exchange, its custody contracts and the proof programs, wires them together and
-# writes the deployment manifest. `deploy_sepolia.sh pin <proof_version> <virtual_program_hash>
+# writes the deployment manifest. `deploy_sepolia.sh pin PROOF2 <virtual_program_hash>
 # <os_config_hash>` later pins the prover facts `zylith-operator bench` prints, and
 # `deploy_sepolia.sh lock` freezes the configuration and finalizes the manifest.
 set -euo pipefail
@@ -90,10 +90,12 @@ proof_field() {
 # the felt ids the exchange uses for manifest asset and pair names.
 # the manifest pins the operator's execution key registry; wallets seal to nothing else.
 execution_key_fingerprint() {
+  [[ "${ZYLITH_ACTIVE_EXECUTION_KEY_ID:-}" =~ ^[a-z0-9]([a-z0-9_-]{0,62}[a-z0-9])?$ ]] ||
+    die "set canonical ZYLITH_ACTIVE_EXECUTION_KEY_ID before pinning execution keys"
   if [[ -n "${ZYLITH_EXECUTION_KEY_FINGERPRINT:-}" ]]; then
     printf '%s\n' "${ZYLITH_EXECUTION_KEY_FINGERPRINT}"
   elif [[ -n "${ZYLITH_EXECUTION_KEYS_PATH:-}" ]]; then
-    cargo run --quiet --manifest-path "${ROOT_DIR}/Cargo.toml" -p zylith-operator --bin zylith-operator -- fingerprint "${ZYLITH_EXECUTION_KEYS_PATH}"
+    cargo run --quiet --manifest-path "${ROOT_DIR}/Cargo.toml" -p zylith-operator --bin zylith-operator -- fingerprint "${ZYLITH_EXECUTION_KEYS_PATH}" "${ZYLITH_ACTIVE_EXECUTION_KEY_ID}"
   else
     die "set ZYLITH_EXECUTION_KEY_FINGERPRINT or ZYLITH_EXECUTION_KEYS_PATH to pin the execution keys"
   fi
@@ -114,13 +116,10 @@ require_clean_release() {
 
 case "${1:-deploy}" in
   pin)
-    [[ "$#" -eq 4 ]] || { echo "usage: $0 pin <proof_version> <virtual_program_hash> <os_config_hash>" >&2; exit 1; }
+    [[ "$#" -eq 4 ]] || { echo "usage: $0 pin PROOF2 <virtual_program_hash> <os_config_hash>" >&2; exit 1; }
+    [[ "$2" == "PROOF2" ]] || die "production supports only the PROOF2 proof family"
     require_clean_release
-    proof_version_felt="$2"
-    case "$2" in
-      PROOF1) proof_version_felt="0x50524f4f4631" ;;
-      PROOF2) proof_version_felt="0x50524f4f4632" ;;
-    esac
+    proof_version_felt="0x50524f4f4632"
     exchange="$(contract_address exchange)"
     invoke "${exchange}" set_proof_programs \
       "$(proof_field transition_proof_program_address)" \
@@ -143,11 +142,11 @@ PY
   lock)
     require_clean_release
     # a manifest is final only once the prover facts are pinned and the contracts are locked.
-    python3 - "${STATE_FILE}" <<'PY' || die "pin the proof program before locking"
+    python3 - "${STATE_FILE}" <<'PY' || die "pin PROOF2 before locking"
 import json, sys
 data = json.load(open(sys.argv[1]))
 proof = data.get("manifest", data)["proof"]
-sys.exit(0 if int(proof.get("virtual_program_hash") or "0x0", 16) != 0 else 1)
+sys.exit(0 if proof.get("proof_version") == "PROOF2" and int(proof.get("virtual_program_hash") or "0x0", 16) != 0 else 1)
 PY
     for name in exchange commitment_registry privacy_deposit_bridge; do
       invoke "$(contract_address "${name}")" lock_config
@@ -367,7 +366,7 @@ def token_decimals(token):
 for asset in registry["assets"]:
     if asset["enabled"] and token_decimals(asset["token_address"]) != asset["decimals"]:
         sys.exit(f'{asset["asset_id"]} at {asset["token_address"]} does not match registry decimals {asset["decimals"]}')
-manifest["proof"].update({"transition_proof_program_address": "${transition_proof_program}", "withdrawal_proof_program_address": "${withdrawal_proof_program}", "residual_recovery_proof_program_address": "${residual_recovery_proof_program}", "proof_account_address": "${proof_account}", "settlement_account_address": "${SETTLEMENT_ACCOUNT}", "config_locked_after_deploy": False, "prover_build_id": "${PROVER_BUILD_ID}"})
+manifest["proof"].update({"transition_proof_program_address": "${transition_proof_program}", "withdrawal_proof_program_address": "${withdrawal_proof_program}", "residual_recovery_proof_program_address": "${residual_recovery_proof_program}", "proof_account_address": "${proof_account}", "proof_account_class_hash": "${proof_account_class}", "transition_proof_program_class_hash": "${transition_program_class}", "withdrawal_proof_program_class_hash": "${withdrawal_program_class}", "residual_recovery_proof_program_class_hash": "${residual_recovery_program_class}", "settlement_account_address": "${SETTLEMENT_ACCOUNT}", "config_locked_after_deploy": False, "prover_build_id": "${PROVER_BUILD_ID}"})
 manifest["roles"] = {"protocol_fee_recipient": "${FEE_RECIPIENT}", "pause_guardian_address": "${PAUSE_GUARDIAN}", "reference_price_signer": "${REFERENCE_SIGNER}"}
 manifest["runtime"].update({"epoch_ms": int("${EPOCH_MS}"), "max_close_delay_ms": int("${MAX_CLOSE_DELAY_MS}"), "withdrawal_delay_seconds": int("${WITHDRAWAL_DELAY_SECONDS}"), "external_window_seconds": int("${EXTERNAL_WINDOW_SECONDS}")})
 for path in (state_path, client_path):
@@ -375,4 +374,4 @@ for path in (state_path, client_path):
     open(path, "a").write("\n")
 PY
 echo "deployed: exchange ${exchange}, registry ${registry}, bridge ${bridge}, router ${router}, transition proof program ${transition_proof_program}, withdrawal proof program ${withdrawal_proof_program}, residual recovery proof program ${residual_recovery_proof_program}, proof account ${proof_account}"
-echo "next: prove one transition with zylith-operator bench, then $0 pin <proof_version> <virtual_program_hash> <os_config_hash>, then $0 lock"
+echo "next: prove one transition with zylith-operator bench, then $0 pin PROOF2 <virtual_program_hash> <os_config_hash>, then $0 lock"

@@ -20,9 +20,10 @@ use super::certificate::{
 use super::common::{
     PairSpongeTrait, RESIDUAL_NOTE_LEAF_DOMAIN, Sponge, SpongeTrait, TWO_POW_120, TWO_POW_128,
     TWO_POW_160, TWO_POW_48, TWO_POW_64, assert_nonnegative, felt_div_rem, felt_lt, next, next_bool,
-    next_u128, next_u32, next_u64, note_commitment, note_nullifier, output_note_leaf,
-    output_tree_root, padded_len, poseidon2, read_membership_root, residual_note_commitment,
-    shift_ceil_64, sponge3, sponge4, sponge5, sponge6, sponge7, u128_of,
+    next_u128, next_u32, next_u64, note_commitment, note_nullifier, nullifier_padding_value,
+    order_output_blindings, output_aux_blindings, output_note_leaf, output_padding_record,
+    padded_len, poseidon2, read_membership_root, residual_note_commitment, shift_ceil_64, sponge3,
+    sponge4, sponge5, sponge6, sponge7, u128_of,
 };
 
 pub const STATEMENT_TYPE_TRANSITION: felt252 = 14;
@@ -39,19 +40,8 @@ const NULLIFIERS_DOMAIN: felt252 = 'zylith_nullifiers_v1';
 const RETIRED_NULLIFIERS_DOMAIN: felt252 = 'zylith_retired_v1';
 const OUTPUTS_DOMAIN: felt252 = 'zylith_outputs_v1';
 const OUTPUT_BLINDING_DOMAIN: felt252 = 'zylith_out_blind_v1';
-const OUTPUT_AUX_BLINDING_DOMAIN: felt252 = 'zylith_out_aux_v1';
 const TRANSITION_DOMAIN: felt252 = 'zylith_transition_v1';
-const PADDING_DOMAIN: felt252 = 'zylith_pad_v1';
-const OUTPUT_LEAF_PADDING_DOMAIN: felt252 = 'output_leaf';
-const OUTPUT_ENC_PADDING_DOMAIN: felt252 = 'output_enc';
-const OUTPUT_REMAINING_PADDING_DOMAIN: felt252 = 'output_remaining';
-const OUTPUT_RESERVED_PADDING_DOMAIN: felt252 = 'output_reserved';
-const OUTPUT_OFFSET_PADDING_DOMAIN: felt252 = 'output_offset';
-const NULLIFIER_PADDING_DOMAIN: felt252 = 'nullifier';
-const OUTPUT_KIND_PROCEEDS: felt252 = 1;
-const OUTPUT_KIND_REFUND: felt252 = 2;
 const OUTPUT_KIND_FEE: felt252 = 3;
-const OUTPUT_KIND_RESIDUAL: felt252 = 4;
 const MAX_ASSETS: u32 = 8;
 const MAX_MARKETS: u32 = 8;
 const MAX_FUNDING_NOTES: u32 = 4;
@@ -125,7 +115,6 @@ struct State {
     outputs: Sponge,
     nullifiers: felt252,
     retired_nullifiers: felt252,
-    leaves: Array<felt252>,
     prior_count: u32,
     new_count: u32,
     output_count: u32,
@@ -163,6 +152,8 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
     let padding_seed = next(ref data);
     let note_root = next(ref data);
     let claimed_prior_book_root = next(ref data);
+    // the root is derived independently from the public output records by the settlement contract.
+    let claimed_output_root = next(ref data);
     let seq_u32 = u128_of(seq, 'EX_SEQ');
     assert(
         chain_context != 0
@@ -292,7 +283,6 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
         outputs: SpongeTrait::new(),
         nullifiers: poseidon2(NULLIFIERS_DOMAIN, chain_context),
         retired_nullifiers: poseidon2(RETIRED_NULLIFIERS_DOMAIN, chain_context),
-        leaves: array![],
         prior_count: 0,
         new_count: 0,
         output_count: 0,
@@ -529,14 +519,9 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
                 asset_id, fee, fee_recipient, fee_recipient, fee_recipient, blinding, seq, asset_id,
             );
             let leaf = output_note_leaf(commitment, asset_id, fee, fee_recipient);
-            state.leaves.append(leaf);
+            let (enc_remaining, enc_reserved, enc_offset) = output_aux_blindings(blinding);
             absorb_output_record(
-                ref state.outputs,
-                leaf,
-                fee + blinding,
-                sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 1),
-                sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 2),
-                sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 3),
+                ref state.outputs, leaf, fee + blinding, enc_remaining, enc_reserved, enc_offset,
             );
             state.output_count += 1;
         }
@@ -547,12 +532,9 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
     // spendable leaf or a user's nullifier while the published list sizes stay hidden.
     let output_total = padded_len(state.output_count, MIN_OUTPUT_BUCKET);
     for index in state.output_count..output_total {
-        let leaf = padding_value(padding_seed, OUTPUT_LEAF_PADDING_DOMAIN, index);
-        let enc = padding_value(padding_seed, OUTPUT_ENC_PADDING_DOMAIN, index);
-        let enc_remaining = padding_value(padding_seed, OUTPUT_REMAINING_PADDING_DOMAIN, index);
-        let enc_reserved = padding_value(padding_seed, OUTPUT_RESERVED_PADDING_DOMAIN, index);
-        let enc_offset = padding_value(padding_seed, OUTPUT_OFFSET_PADDING_DOMAIN, index);
-        state.leaves.append(leaf);
+        let (leaf, enc, enc_remaining, enc_reserved, enc_offset) = output_padding_record(
+            padding_seed, index.into(),
+        );
         absorb_output_record(ref state.outputs, leaf, enc, enc_remaining, enc_reserved, enc_offset);
     }
     state.outputs.absorb(output_total.into());
@@ -560,8 +542,7 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
     let nullifier_total = padded_len(state.nullifier_count, MIN_NULLIFIER_BUCKET);
     let mut nullifiers = state.nullifiers;
     for index in state.nullifier_count..nullifier_total {
-        nullifiers =
-            poseidon2(nullifiers, padding_value(padding_seed, NULLIFIER_PADDING_DOMAIN, index));
+        nullifiers = poseidon2(nullifiers, nullifier_padding_value(padding_seed, index.into()));
     }
     let nullifiers_commitment = poseidon2(nullifiers, nullifier_total.into());
     let retired_nullifiers_commitment = poseidon2(
@@ -579,8 +560,6 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
     state.new_book.absorb(state.new_count.into());
     let new_book_root = state.new_book.finish();
     let capacity_commitment = capacities.finish_odd(capacity_count.into());
-    let output_root = output_tree_root(state.leaves.span());
-
     let mut commitment = SpongeTrait::new();
     commitment.absorb_pair(TRANSITION_DOMAIN, chain_context);
     commitment.absorb_pair(seq, close_time_felt);
@@ -589,15 +568,11 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
     commitment.absorb_pair(outcomes_commitment, capacity_commitment);
     commitment.absorb_pair(nullifiers_commitment, retired_nullifiers_commitment);
     commitment.absorb(outputs_commitment);
-    commitment.absorb_pair(output_root, fee_recipient);
+    commitment.absorb_pair(claimed_output_root, fee_recipient);
     commitment.finish()
 }
 
 #[inline(always)]
-fn padding_value(seed: felt252, domain: felt252, index: u32) -> felt252 {
-    sponge4(PADDING_DOMAIN, seed, domain, index.into())
-}
-
 fn find_market(markets: Span<Market>, pair_id: felt252) -> Option<u32> {
     let mut index: u32 = 0;
     while index != markets.len() {
@@ -1010,9 +985,7 @@ fn existing_order(
             'EX_OWNER',
         );
         if state_changed || removal != REMOVAL_NONE {
-            let old_blinding = sponge4(
-                OUTPUT_BLINDING_DOMAIN, nonce, record.residual_generation, OUTPUT_KIND_RESIDUAL,
-            );
+            let (_, _, old_blinding) = order_output_blindings(nonce, record.residual_generation);
             let old_commitment = residual_note_commitment(
                 ctx.chain_context,
                 slot.input_id,
@@ -1553,13 +1526,14 @@ fn emit_order_outputs(
     withdraw_authority: felt252,
     nonce: felt252,
 ) {
+    let (proceeds_blinding, refund_blinding, _) = order_output_blindings(nonce, ctx.seq);
     if settled.proceeds != 0 {
         emit_note_output(
             ref state,
             ctx.seq,
             slot.output_id,
             settled.proceeds,
-            sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_PROCEEDS),
+            proceeds_blinding,
             order_id,
             owner_public_key,
             spend_authority,
@@ -1572,7 +1546,7 @@ fn emit_order_outputs(
             ctx.seq,
             slot.input_id,
             settled.refund,
-            sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_REFUND),
+            refund_blinding,
             order_id,
             owner_public_key,
             spend_authority,
@@ -1605,14 +1579,9 @@ fn emit_note_output(
     );
     let leaf = output_note_leaf(commitment, asset_id, amount, withdraw_authority);
     // the published amount is padded by the output's secret blinding.
-    state.leaves.append(leaf);
+    let (enc_remaining, enc_reserved, enc_offset) = output_aux_blindings(blinding);
     absorb_output_record(
-        ref state.outputs,
-        leaf,
-        amount + blinding,
-        sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 1),
-        sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 2),
-        sponge3(OUTPUT_AUX_BLINDING_DOMAIN, blinding, 3),
+        ref state.outputs, leaf, amount + blinding, enc_remaining, enc_reserved, enc_offset,
     );
     state.output_count += 1;
 }
@@ -1644,7 +1613,7 @@ fn emit_residual_output(
     owner_digest: felt252,
     nonce: felt252,
 ) -> felt252 {
-    let blinding = sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_RESIDUAL);
+    let (_, _, blinding) = order_output_blindings(nonce, ctx.seq);
     let commitment = residual_note_commitment(
         ctx.chain_context,
         slot.input_id,
@@ -1664,13 +1633,10 @@ fn emit_residual_output(
         blinding,
     );
     let leaf = poseidon2(RESIDUAL_NOTE_LEAF_DOMAIN, commitment);
-    let enc_remaining = settled.remaining
-        + sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_RESIDUAL + 1);
-    let enc_reserved = settled.reserved
-        + sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_RESIDUAL + 2);
-    let enc_offset = settled.reserved_offset
-        + sponge4(OUTPUT_BLINDING_DOMAIN, nonce, ctx.seq, OUTPUT_KIND_RESIDUAL + 3);
-    state.leaves.append(leaf);
+    let (remaining_blinding, reserved_blinding, offset_blinding) = output_aux_blindings(blinding);
+    let enc_remaining = settled.remaining + remaining_blinding;
+    let enc_reserved = settled.reserved + reserved_blinding;
+    let enc_offset = settled.reserved_offset + offset_blinding;
     absorb_output_record(
         ref state.outputs,
         leaf,

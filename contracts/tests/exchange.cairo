@@ -46,12 +46,8 @@ fn address(value: felt252) -> ContractAddress {
     value.try_into().unwrap()
 }
 
-fn bound_proof_message(
-    program: felt252, domain: felt252, exchange: felt252, commitment: felt252,
-) -> felt252 {
-    let (inner, _, _) = hades_permutation(domain, exchange, 2);
-    let (statement, _, _) = hades_permutation(inner, commitment, 2);
-    poseidon_hash_span(array![program, 0, 2, domain, statement].span())
+fn bound_proof_message(program: felt252, domain: felt252, commitment: felt252) -> felt252 {
+    poseidon_hash_span(array![program, 0, 2, domain, commitment].span())
 }
 
 #[test]
@@ -94,25 +90,51 @@ fn each_statement_is_bound_to_its_single_purpose_program() {
         exchange
             .transition_message_hash(
                 0x555,
-            ) == bound_proof_message(0x111, TRANSITION_MESSAGE_DOMAIN, deployed.into(), 0x555),
+            ) == bound_proof_message(0x111, TRANSITION_MESSAGE_DOMAIN, 0x555),
         'transition binding',
     );
     assert(
         exchange
             .withdrawal_message_hash(
                 0x666,
-            ) == bound_proof_message(0x222, WITHDRAWAL_MESSAGE_DOMAIN, deployed.into(), 0x666),
+            ) == bound_proof_message(0x222, WITHDRAWAL_MESSAGE_DOMAIN, 0x666),
         'withdrawal binding',
     );
     assert(
         exchange
             .residual_recovery_message_hash(
                 0x777,
-            ) == bound_proof_message(
-                0x333, RESIDUAL_RECOVERY_MESSAGE_DOMAIN, deployed.into(), 0x777,
-            ),
+            ) == bound_proof_message(0x333, RESIDUAL_RECOVERY_MESSAGE_DOMAIN, 0x777),
         'residual binding',
     );
+}
+
+#[test]
+fn exchange_accepts_a_nonzero_proof_family_before_config_lock() {
+    let exchange_address = address(0x12347);
+    let (deployed, _) = declare("Exchange")
+        .unwrap()
+        .contract_class()
+        .deploy_at(@array![ADMIN], exchange_address)
+        .unwrap();
+    let exchange = IExchangeDispatcher { contract_address: deployed };
+    cheat_caller_address(deployed, address(ADMIN), CheatSpan::TargetCalls(1));
+    exchange.set_proof_validation('PROOF1', OS_CONFIG_HASH, 450);
+    assert(exchange.proof_version() == 'PROOF1', 'proof family pin');
+}
+
+#[test]
+#[should_panic(expected: 'BAD_PROOF_VERSION')]
+fn exchange_rejects_a_zero_proof_family() {
+    let exchange_address = address(0x12348);
+    let (deployed, _) = declare("Exchange")
+        .unwrap()
+        .contract_class()
+        .deploy_at(@array![ADMIN], exchange_address)
+        .unwrap();
+    let exchange = IExchangeDispatcher { contract_address: deployed };
+    cheat_caller_address(deployed, address(ADMIN), CheatSpan::TargetCalls(1));
+    exchange.set_proof_validation(0, OS_CONFIG_HASH, 450);
 }
 
 #[test]
@@ -247,6 +269,12 @@ fn setup_with_window(ref fixture: Fixture, window: u64) -> Setup {
 }
 
 fn setup_with_timing(ref fixture: Fixture, epoch_ms: u64, window: u64) -> Setup {
+    setup_with_timing_and_proof(ref fixture, epoch_ms, window, PROOF_VERSION)
+}
+
+fn setup_with_timing_and_proof(
+    ref fixture: Fixture, epoch_ms: u64, window: u64, proof_version: felt252,
+) -> Setup {
     let chain_context = fixture.next();
     let signer = fixture.next();
     let proof_program = fixture.next();
@@ -289,7 +317,7 @@ fn setup_with_timing(ref fixture: Fixture, epoch_ms: u64, window: u64) -> Setup 
             address(proof_program),
             VIRTUAL_PROGRAM_HASH,
         );
-    exchange.set_proof_validation(PROOF_VERSION, OS_CONFIG_HASH, 450);
+    exchange.set_proof_validation(proof_version, OS_CONFIG_HASH, 450);
     exchange.set_custody(bridge_address, registry_address, address(ROUTER));
     exchange.set_reference_signer(signer);
     exchange.set_objective_numeraire(QUOTE);
@@ -544,6 +572,13 @@ fn submit(setup: @Setup, message: felt252, call: @TransitionCall, timestamp: u64
             *call.retired_nullifiers,
             *call.outputs,
         );
+}
+
+#[test]
+fn a_locked_test_deployment_can_pin_a_nonzero_proof_family() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup_with_timing_and_proof(ref fixture, 1, 1, 'PROOF1');
+    assert(setup.exchange.proof_version() == 'PROOF1', 'proof family pin');
 }
 
 fn request(setup: @Setup, withdrawal: WithdrawalCall, timestamp: u64) {
@@ -1023,7 +1058,7 @@ fn a_transition_cannot_replay() {
 }
 
 #[test]
-#[should_panic(expected: 'BAD_PROOF_MSG')]
+#[should_panic(expected: 'BAD_OUTPUT_ROOT')]
 fn a_changed_output_is_not_the_proven_transition() {
     let mut fixture = FixtureTrait::load("exchange_cross");
     let setup = setup(ref fixture);
@@ -1047,6 +1082,53 @@ fn a_changed_output_is_not_the_proven_transition() {
         changed.append(*outputs.at(index));
     }
     let call = TransitionCall { outputs: changed.span(), ..call };
+    submit(@setup, message, @call, 11);
+}
+
+#[test]
+#[should_panic(expected: 'BAD_PROOF_MSG')]
+fn changed_output_ciphertext_remains_bound_by_the_private_statement() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let _ = read_withdrawal(ref fixture);
+    let (_, message, call) = read_transition(ref fixture);
+    let mut outputs = array![];
+    for output in call.outputs {
+        outputs.append(*output);
+    }
+    let first = *outputs.at(0);
+    let mut changed = array![OutputRecord { enc: first.enc + 1, ..first }];
+    for index in 1..outputs.len() {
+        changed.append(*outputs.at(index));
+    }
+    let call = TransitionCall { outputs: changed.span(), ..call };
+    submit(@setup, message, @call, 11);
+}
+
+#[test]
+#[should_panic(expected: 'BAD_OUTPUT_COUNT')]
+fn output_records_must_keep_the_statements_power_of_two_padding_shape() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let _ = read_withdrawal(ref fixture);
+    let (_, message, call) = read_transition(ref fixture);
+    let mut outputs = array![];
+    for index in 0..call.outputs.len() - 1 {
+        outputs.append(*call.outputs.at(index));
+    }
+    let call = TransitionCall { outputs: outputs.span(), ..call };
+    submit(@setup, message, @call, 11);
+}
+
+#[test]
+#[should_panic(expected: 'BAD_OUTPUT_ROOT')]
+fn a_claimed_output_root_must_match_the_public_output_records() {
+    let mut fixture = FixtureTrait::load("exchange_cross");
+    let setup = setup(ref fixture);
+    let _ = read_withdrawal(ref fixture);
+    let (_, message, call) = read_transition(ref fixture);
+    let header = TransitionHeader { output_root: call.header.output_root + 1, ..call.header };
+    let call = TransitionCall { header, ..call };
     submit(@setup, message, @call, 11);
 }
 
