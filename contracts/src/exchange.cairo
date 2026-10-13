@@ -824,11 +824,22 @@ pub mod Exchange {
             assert(!self.bridge.read().is_zero(), 'CUSTODY_UNSET');
             assert(self.reference_signer.read() != 0, 'SIGNER_UNSET');
             assert(self.objective_numeraire.read() != 0, 'NUMERAIRE_UNSET');
-            assert(self.pair_count.read() > 0, 'NO_PAIRS');
+            let pair_count = self.pair_count.read();
+            assert(pair_count > 0, 'NO_PAIRS');
             let mut pair_index = 0;
-            while pair_index < self.pair_count.read() {
+            while pair_index < pair_count {
                 let pair_id = self.pair_ids.read(pair_index);
                 let pair = pair_config_of(@self, pair_id);
+                let mut earlier_index = 0;
+                while earlier_index < pair_index {
+                    let earlier = pair_config_of(@self, self.pair_ids.read(earlier_index));
+                    assert(
+                        pair.base_asset_id != earlier.base_asset_id
+                            || pair.quote_asset_id != earlier.quote_asset_id,
+                        'DUPLICATE_MARKET',
+                    );
+                    earlier_index += 1;
+                }
                 if pair.reference_methodology == REFERENCE_METHOD_DIRECT_BBO {
                     assert(
                         pair.quote_asset_id == self.objective_numeraire.read(),

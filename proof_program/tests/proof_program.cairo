@@ -3,12 +3,13 @@
 
 use snforge_std::fs::{FileTrait, read_txt};
 use snforge_std::{
-    ContractClassTrait, DeclareResultTrait, MessageToL1, MessageToL1SpyAssertionsTrait, declare,
-    spy_messages_to_l1,
+    CheatSpan, ContractClassTrait, DeclareResultTrait, MessageToL1, MessageToL1SpyAssertionsTrait,
+    cheat_caller_address, declare, spy_messages_to_l1,
 };
 use starknet::account::Call;
 use zylith_exchange_statement::exchange::common::{
-    nullifier_padding_value, order_output_blindings, output_aux_blindings, output_padding_record,
+    nullifier_padding_value, order_output_blindings, order_output_blindings_head,
+    output_aux_blindings, output_padding_record,
 };
 use zylith_proof_program::{
     IProofAccountDispatcher, IProofAccountDispatcherTrait, IResidualRecoveryProofProgramDispatcher,
@@ -110,6 +111,15 @@ fn prg_vectors_are_frozen_across_rust_and_cairo() {
         'order prg drift',
     );
     assert(
+        order_output_blindings_head(
+            seed, 7,
+        ) == (
+            0x38111f0c2200112b0c987deca5a2b2e07810ab2b2e0aa9b79e844796ce4adc,
+            0x1604f6032d9c5697bc35f6e6e259b1c830c3c69a7fa95ce068c9c8d95db700e,
+        ),
+        'order prg head drift',
+    );
+    assert(
         nullifier_padding_value(
             seed, 7,
         ) == 0x2fd5b28dd91b254115daaa068bf0fb2aa8d6e3618aeec770fa495756dec85ba,
@@ -122,8 +132,7 @@ fn a_transition_returns_its_bound_statement() {
     let program = deploy_transition();
     let (commitment, witness) = fixture("transition_cross");
     let mut messages = spy_messages_to_l1();
-    let message = program.compile_transition_proof(witness);
-    assert(message == commitment, 'transition message');
+    program.compile_transition_proof(witness);
     messages
         .assert_sent(
             @array![
@@ -131,7 +140,7 @@ fn a_transition_returns_its_bound_statement() {
                     program.contract_address,
                     MessageToL1 {
                         to_address: 0.try_into().unwrap(),
-                        payload: array![TRANSITION_MESSAGE_DOMAIN, message],
+                        payload: array![TRANSITION_MESSAGE_DOMAIN, commitment],
                     },
                 ),
             ],
@@ -143,8 +152,7 @@ fn a_withdrawal_returns_its_bound_statement() {
     let program = deploy_withdrawal();
     let (commitment, witness) = fixture("withdrawal_output");
     let mut messages = spy_messages_to_l1();
-    let message = program.compile_withdrawal_proof(witness);
-    assert(message == commitment, 'withdrawal message');
+    program.compile_withdrawal_proof(witness);
     messages
         .assert_sent(
             @array![
@@ -152,7 +160,7 @@ fn a_withdrawal_returns_its_bound_statement() {
                     program.contract_address,
                     MessageToL1 {
                         to_address: 0.try_into().unwrap(),
-                        payload: array![WITHDRAWAL_MESSAGE_DOMAIN, message],
+                        payload: array![WITHDRAWAL_MESSAGE_DOMAIN, commitment],
                     },
                 ),
             ],
@@ -164,8 +172,7 @@ fn a_residual_recovery_returns_its_bound_statement() {
     let program = deploy_residual_recovery();
     let (commitment, witness) = fixture("residual_recovery");
     let mut messages = spy_messages_to_l1();
-    let message = program.compile_residual_recovery_proof(witness);
-    assert(message == commitment, 'recovery message');
+    program.compile_residual_recovery_proof(witness);
     messages
         .assert_sent(
             @array![
@@ -173,7 +180,7 @@ fn a_residual_recovery_returns_its_bound_statement() {
                     program.contract_address,
                     MessageToL1 {
                         to_address: 0.try_into().unwrap(),
-                        payload: array![RESIDUAL_RECOVERY_MESSAGE_DOMAIN, message],
+                        payload: array![RESIDUAL_RECOVERY_MESSAGE_DOMAIN, commitment],
                     },
                 ),
             ],
@@ -192,6 +199,36 @@ fn with_felt_changed(witness: Span<felt252>, target: u32) -> Span<felt252> {
         index += 1;
     }
     changed.span()
+}
+
+fn with_legacy_direct_market_zeroes(witness: Span<felt252>) -> Span<felt252> {
+    let mut legacy = array![];
+    let mut index: u32 = 0;
+    for value in witness {
+        // The compact direct market begins at index 19 in this fixture. After methodology (28),
+        // current witnesses contain only base bid/ask (29/30); the five fixed zero fields from
+        // the retired layout must not be accepted as an alternate encoding.
+        if index == 29 {
+            legacy.append(0);
+            legacy.append(0);
+        }
+        legacy.append(*value);
+        if index == 30 {
+            legacy.append(0);
+            legacy.append(0);
+            legacy.append(0);
+        }
+        index += 1;
+    }
+    legacy.span()
+}
+
+#[test]
+#[should_panic(expected: 'EX_DIRECT_REF')]
+fn the_retired_direct_market_witness_shape_is_rejected() {
+    let program = deploy_transition();
+    let (_, witness) = fixture("transition_cross");
+    program.compile_transition_proof(with_legacy_direct_market_zeroes(witness));
 }
 
 #[test]
@@ -289,4 +326,45 @@ fn proof_account_pins_its_key_and_all_three_programs() {
     assert(account.transition_program() == transition, 'wrong transition program');
     assert(account.withdrawal_program() == withdrawal, 'wrong withdrawal program');
     assert(account.residual_recovery_program() == residual_recovery, 'wrong residual program');
+}
+
+#[test]
+fn proof_account_executes_the_pinned_withdrawal_program_without_return_data() {
+    let withdrawal = deploy_withdrawal();
+    let (address, _) = declare("ProofAccount")
+        .unwrap()
+        .contract_class()
+        .deploy(@array![0x123, 0x111, withdrawal.contract_address.into(), 0x222])
+        .unwrap();
+    let account = IProofAccountTestDispatcher { contract_address: address };
+    let (commitment, witness) = fixture("withdrawal_output");
+    let mut calldata = array![witness.len().into()];
+    for value in witness {
+        calldata.append(*value);
+    }
+    let mut messages = spy_messages_to_l1();
+    cheat_caller_address(address, 0.try_into().unwrap(), CheatSpan::TargetCalls(1));
+    let results = account
+        .__execute__(
+            array![
+                Call {
+                    to: withdrawal.contract_address,
+                    selector: selector!("compile_withdrawal_proof"),
+                    calldata: calldata.span(),
+                },
+            ],
+        );
+    assert(results.is_empty(), 'no account retdata');
+    messages
+        .assert_sent(
+            @array![
+                (
+                    withdrawal.contract_address,
+                    MessageToL1 {
+                        to_address: 0.try_into().unwrap(),
+                        payload: array![WITHDRAWAL_MESSAGE_DOMAIN, commitment],
+                    },
+                ),
+            ],
+        );
 }

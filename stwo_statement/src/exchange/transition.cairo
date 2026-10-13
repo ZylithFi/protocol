@@ -13,17 +13,14 @@
 use core::cmp::{max, min};
 use core::dict::{Felt252Dict, Felt252DictTrait};
 use core::ecdsa::check_ecdsa_signature;
-use super::certificate::{
-    Asset, Market, assert_assets_used, assert_canonical_weights, assert_distinct_market_pairs,
-    precision_allowance,
-};
+use super::certificate::{Asset, Market, assert_canonical_weights, precision_allowance};
 use super::common::{
     PairSpongeTrait, RESIDUAL_NOTE_LEAF_DOMAIN, Sponge, SpongeTrait, TWO_POW_120, TWO_POW_128,
     TWO_POW_160, TWO_POW_48, TWO_POW_64, assert_nonnegative, felt_div_rem, felt_lt, next, next_bool,
     next_u128, next_u32, next_u64, note_commitment, note_nullifier, nullifier_padding_value,
-    order_output_blindings, output_aux_blindings, output_note_leaf, output_padding_record,
-    padded_len, poseidon2, read_membership_root, residual_note_commitment, shift_ceil_64, sponge3,
-    sponge4, sponge5, sponge6, sponge7, u128_of,
+    order_output_blindings, order_output_blindings_head, output_aux_blindings, output_note_leaf,
+    output_padding_record, padded_len, poseidon2, read_membership_root, residual_note_commitment,
+    shift_ceil_64, sponge3, sponge4, sponge5, sponge6, sponge7, u128_of,
 };
 
 pub const STATEMENT_TYPE_TRANSITION: felt252 = 14;
@@ -223,13 +220,28 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
         let min_order_quote_amount = next_u128(ref data);
         assert(min_order_quote_amount != 0, 'EX_MIN_ORDER_VALUE');
         let reference_methodology: u8 = next(ref data).try_into().expect('EX_REF_METHOD');
-        let derivation_base_market_id = next(ref data);
-        let derivation_quote_market_id = next(ref data);
-        let derivation_base_bid = next_u128(ref data);
-        let derivation_base_ask = next_u128(ref data);
-        let derivation_quote_bid = next_u128(ref data);
-        let derivation_quote_ask = next_u128(ref data);
-        let max_leg_skew_ms = next_u64(ref data);
+        let (
+            derivation_base_market_id,
+            derivation_quote_market_id,
+            derivation_base_bid,
+            derivation_base_ask,
+            derivation_quote_bid,
+            derivation_quote_ask,
+            max_leg_skew_ms,
+        ) =
+            if reference_methodology == REFERENCE_METHOD_DIRECT_BBO {
+            (0, 0, next_u128(ref data), next_u128(ref data), 0, 0, 0)
+        } else {
+            (
+                next(ref data),
+                next(ref data),
+                next_u128(ref data),
+                next_u128(ref data),
+                next_u128(ref data),
+                next_u128(ref data),
+                next_u64(ref data),
+            )
+        };
         let base_id = (*assets.at(base)).id;
         let quote_id = (*assets.at(quote)).id;
         m0.absorb_pair(pair_id, base_id);
@@ -267,9 +279,7 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
     }
     let markets = markets.span();
     let markets_commitment = m0.finish();
-    assert_distinct_market_pairs(markets);
     assert_reference_derivations(markets);
-    assert_assets_used(asset_count, markets);
     assert_canonical_weights(ref data, assets, markets, objective_numeraire);
 
     // earlier transitions' external outcomes this transition applies.
@@ -1027,6 +1037,15 @@ fn existing_order(
             );
         }
         if removal != REMOVAL_RECOVERED {
+            let writes_residual = !settled.removed && state_changed;
+            let (proceeds_blinding, refund_blinding, residual_blinding) = if writes_residual {
+                order_output_blindings(nonce, ctx.seq)
+            } else {
+                let (proceeds_blinding, refund_blinding) = order_output_blindings_head(
+                    nonce, ctx.seq,
+                );
+                (proceeds_blinding, refund_blinding, 0)
+            };
             emit_order_outputs(
                 ref state,
                 ctx,
@@ -1036,24 +1055,25 @@ fn existing_order(
                 owner_public_key,
                 spend_authority,
                 withdraw_authority,
-                nonce,
+                proceeds_blinding,
+                refund_blinding,
             );
-        }
-        if !settled.removed && state_changed {
-            new_residual_commitment =
-                emit_residual_output(
-                    ref state,
-                    ctx,
-                    slot,
-                    settled,
-                    limit,
-                    expiry,
-                    external,
-                    order_id,
-                    owner_digest,
-                    nonce,
-                );
-            new_residual_generation = ctx.seq;
+            if writes_residual {
+                new_residual_commitment =
+                    emit_residual_output(
+                        ref state,
+                        ctx,
+                        slot,
+                        settled,
+                        limit,
+                        expiry,
+                        external,
+                        order_id,
+                        owner_digest,
+                        residual_blinding,
+                    );
+                new_residual_generation = ctx.seq;
+            }
         }
     }
     if !settled.removed {
@@ -1216,6 +1236,12 @@ fn new_order(
         clearing_capacity,
         external_amount,
     );
+    let (proceeds_blinding, refund_blinding, residual_blinding) = if settled.removed {
+        let (proceeds_blinding, refund_blinding) = order_output_blindings_head(nonce, ctx.seq);
+        (proceeds_blinding, refund_blinding, 0)
+    } else {
+        order_output_blindings(nonce, ctx.seq)
+    };
     emit_order_outputs(
         ref state,
         ctx,
@@ -1225,7 +1251,8 @@ fn new_order(
         owner_public_key,
         spend_authority,
         withdraw_authority,
-        nonce,
+        proceeds_blinding,
+        refund_blinding,
     );
     if !settled.removed {
         let residual_commitment = emit_residual_output(
@@ -1238,7 +1265,7 @@ fn new_order(
             external,
             order_id,
             owner_digest,
-            nonce,
+            residual_blinding,
         );
         absorb_leaf(
             ref state.new_book,
@@ -1422,29 +1449,27 @@ fn ceil_fee(amount: felt252, fee_bps: u128) -> felt252 {
     if amount == 0 || fee_bps == 0 {
         return 0;
     }
-    let (fee, has_remainder) = felt_div_rem(amount * fee_bps.into(), FEE_BPS_DENOMINATOR);
-    fee + has_remainder.into()
+    // A valid transition's per-order proceeds are below the protocol's aggregate 2^120 amount
+    // bound. With fee_bps <= 100, the product is below 2^127 and native u128 division is exact;
+    // avoid the much more expensive generic u256 division in this per-order hot path.
+    let amount: u128 = amount.try_into().expect('EX_FEE_AMOUNT');
+    assert(amount < TWO_POW_120, 'EX_FEE_AMOUNT');
+    let (fee, remainder) = DivRem::div_rem(
+        amount * fee_bps, FEE_BPS_DENOMINATOR.try_into().unwrap(),
+    );
+    let fee: felt252 = fee.into();
+    fee + (remainder != 0).into()
 }
 
 fn assert_reference_derivations(markets: Span<Market>) {
     for market in markets {
         let market = *market;
-        assert(
-            market.derivation_base_bid.into() < TWO_POW_120
-                && market.derivation_base_ask.into() < TWO_POW_120
-                && market.derivation_quote_bid.into() < TWO_POW_120
-                && market.derivation_quote_ask.into() < TWO_POW_120,
-            'EX_REF_BOUND',
-        );
         if market.reference_methodology == REFERENCE_METHOD_DIRECT_BBO {
             assert(
-                market.derivation_base_market_id == 0
-                    && market.derivation_quote_market_id == 0
-                    && market.derivation_base_bid != 0
+                market.derivation_base_bid != 0
                     && market.derivation_base_bid <= market.derivation_base_ask
-                    && market.derivation_quote_bid == 0
-                    && market.derivation_quote_ask == 0
-                    && market.max_leg_skew_ms == 0,
+                    && market.derivation_base_bid.into() < TWO_POW_120
+                    && market.derivation_base_ask.into() < TWO_POW_120,
                 'EX_DIRECT_REF',
             );
             assert(
@@ -1452,6 +1477,13 @@ fn assert_reference_derivations(markets: Span<Market>) {
                 'EX_DIRECT_MID',
             );
         } else {
+            assert(
+                market.derivation_base_bid.into() < TWO_POW_120
+                    && market.derivation_base_ask.into() < TWO_POW_120
+                    && market.derivation_quote_bid.into() < TWO_POW_120
+                    && market.derivation_quote_ask.into() < TWO_POW_120,
+                'EX_REF_BOUND',
+            );
             assert(
                 market.reference_methodology == REFERENCE_METHOD_SYNTHETIC_CROSS_BBO,
                 'EX_REF_METHOD',
@@ -1504,14 +1536,12 @@ fn assert_reference_derivations(markets: Span<Market>) {
 }
 
 fn market_by_pair(markets: Span<Market>, pair_id: felt252) -> Market {
-    let mut found: Option<Market> = Option::None;
     for market in markets {
         if (*market).pair_id == pair_id {
-            assert(found.is_none(), 'EX_SYNTH_DUP');
-            found = Option::Some(*market);
+            return *market;
         }
     }
-    found.expect('EX_SYNTH_LEG')
+    panic!("EX_SYNTH_LEG")
 }
 
 #[inline(always)]
@@ -1524,9 +1554,9 @@ fn emit_order_outputs(
     owner_public_key: felt252,
     spend_authority: felt252,
     withdraw_authority: felt252,
-    nonce: felt252,
+    proceeds_blinding: felt252,
+    refund_blinding: felt252,
 ) {
-    let (proceeds_blinding, refund_blinding, _) = order_output_blindings(nonce, ctx.seq);
     if settled.proceeds != 0 {
         emit_note_output(
             ref state,
@@ -1611,9 +1641,8 @@ fn emit_residual_output(
     external: bool,
     order_id: felt252,
     owner_digest: felt252,
-    nonce: felt252,
+    blinding: felt252,
 ) -> felt252 {
-    let (_, _, blinding) = order_output_blindings(nonce, ctx.seq);
     let commitment = residual_note_commitment(
         ctx.chain_context,
         slot.input_id,

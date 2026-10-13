@@ -3,17 +3,17 @@ use starknet::{ContractAddress, SyscallResultTrait};
 
 #[starknet::interface]
 pub trait ITransitionProofProgram<TContractState> {
-    fn compile_transition_proof(ref self: TContractState, witness: Span<felt252>) -> felt252;
+    fn compile_transition_proof(ref self: TContractState, witness: Span<felt252>);
 }
 
 #[starknet::interface]
 pub trait IWithdrawalProofProgram<TContractState> {
-    fn compile_withdrawal_proof(ref self: TContractState, witness: Span<felt252>) -> felt252;
+    fn compile_withdrawal_proof(ref self: TContractState, witness: Span<felt252>);
 }
 
 #[starknet::interface]
 pub trait IResidualRecoveryProofProgram<TContractState> {
-    fn compile_residual_recovery_proof(ref self: TContractState, witness: Span<felt252>) -> felt252;
+    fn compile_residual_recovery_proof(ref self: TContractState, witness: Span<felt252>);
 }
 
 #[starknet::interface]
@@ -83,17 +83,11 @@ pub mod ProofAccount {
             assert(get_caller_address().is_zero(), 'BAD_CALLER');
             assert_allowed_call(@self, @calls);
             let call = calls.at(0);
-            let mut results = ArrayTrait::new();
-            results
-                .append(
-                    call_contract_syscall(
-                        address: *call.to,
-                        entry_point_selector: *call.selector,
-                        calldata: *call.calldata,
-                    )
-                        .unwrap_syscall(),
-                );
-            results
+            let _ = call_contract_syscall(
+                address: *call.to, entry_point_selector: *call.selector, calldata: *call.calldata,
+            )
+                .unwrap_syscall();
+            ArrayTrait::new()
         }
 
         fn __validate_declare__(self: @ContractState, class_hash: felt252) -> felt252 {
@@ -126,15 +120,16 @@ pub mod ProofAccount {
         let call = calls.at(0);
         let target = *call.to;
         let selector = *call.selector;
-        assert(
-            (target == self.transition_program.read()
-                && selector == selector!("compile_transition_proof"))
-                || (target == self.withdrawal_program.read()
-                    && selector == selector!("compile_withdrawal_proof"))
-                || (target == self.residual_recovery_program.read()
-                    && selector == selector!("compile_residual_recovery_proof")),
-            'PROOF_CALL_ONLY',
-        );
+        let allowed = if selector == selector!("compile_transition_proof") {
+            target == self.transition_program.read()
+        } else if selector == selector!("compile_withdrawal_proof") {
+            target == self.withdrawal_program.read()
+        } else if selector == selector!("compile_residual_recovery_proof") {
+            target == self.residual_recovery_program.read()
+        } else {
+            false
+        };
+        assert(allowed, 'PROOF_CALL_ONLY');
     }
 }
 
@@ -149,9 +144,9 @@ pub mod TransitionProofProgram {
 
     #[abi(embed_v0)]
     impl TransitionProofProgramImpl of super::ITransitionProofProgram<ContractState> {
-        fn compile_transition_proof(ref self: ContractState, witness: Span<felt252>) -> felt252 {
+        fn compile_transition_proof(ref self: ContractState, witness: Span<felt252>) {
             let commitment = verify_transition_statement(witness);
-            super::emit_statement_message(TRANSITION_MESSAGE_DOMAIN, commitment)
+            super::emit_statement_message(TRANSITION_MESSAGE_DOMAIN, commitment);
         }
     }
 }
@@ -167,9 +162,9 @@ pub mod WithdrawalProofProgram {
 
     #[abi(embed_v0)]
     impl WithdrawalProofProgramImpl of super::IWithdrawalProofProgram<ContractState> {
-        fn compile_withdrawal_proof(ref self: ContractState, witness: Span<felt252>) -> felt252 {
+        fn compile_withdrawal_proof(ref self: ContractState, witness: Span<felt252>) {
             let commitment = verify_exchange_withdrawal_statement(witness);
-            super::emit_statement_message(WITHDRAWAL_MESSAGE_DOMAIN, commitment)
+            super::emit_statement_message(WITHDRAWAL_MESSAGE_DOMAIN, commitment);
         }
     }
 }
@@ -185,21 +180,18 @@ pub mod ResidualRecoveryProofProgram {
 
     #[abi(embed_v0)]
     impl ResidualRecoveryProofProgramImpl of super::IResidualRecoveryProofProgram<ContractState> {
-        fn compile_residual_recovery_proof(
-            ref self: ContractState, witness: Span<felt252>,
-        ) -> felt252 {
+        fn compile_residual_recovery_proof(ref self: ContractState, witness: Span<felt252>) {
             let commitment = verify_residual_recovery_statement(witness);
-            super::emit_statement_message(RESIDUAL_RECOVERY_MESSAGE_DOMAIN, commitment)
+            super::emit_statement_message(RESIDUAL_RECOVERY_MESSAGE_DOMAIN, commitment);
         }
     }
 }
 
 // each single-purpose program emits its exchange-bound statement commitment under a distinct
 // outer message domain. every statement commitment already includes the exchange address.
-fn emit_statement_message(domain: felt252, commitment: felt252) -> felt252 {
+fn emit_statement_message(domain: felt252, commitment: felt252) {
     const PROOF_MESSAGE_TO: felt252 = 0;
     let payload = array![domain, commitment];
     send_message_to_l1_syscall(to_address: PROOF_MESSAGE_TO, payload: payload.span())
         .unwrap_syscall();
-    commitment
 }

@@ -1,8 +1,7 @@
 //! the global clearing certificate's market-level checks: canonical weights derived from
 //! m0 and the price-grid precision allowance (see `zylith_core::exact_clearing`).
 
-use core::cmp::max;
-use super::common::{TWO_POW_64, next_u128, next_u32};
+use super::common::{TWO_POW_64, assert_nonnegative, next_u128};
 
 const MAX_WEIGHT_MINUS_ONE: u128 = 0xfffffffffffffff;
 const MAX_REFERENCE_COMPONENT: u128 = 0xffffffffffffffff;
@@ -49,36 +48,6 @@ pub fn precision_allowance(market: Market, capacity: felt252) -> felt252 {
     quotient + (remainder != 0).into()
 }
 
-pub fn assert_distinct_market_pairs(markets: Span<Market>) {
-    let count = markets.len();
-    let mut left: u32 = 0;
-    while left != count {
-        let mut right = left + 1;
-        while right != count {
-            let a = *markets.at(left);
-            let b = *markets.at(right);
-            assert(a.base != b.base || a.quote != b.quote, 'EX_MARKET_DUPLICATE');
-            right += 1;
-        }
-        left += 1;
-    }
-}
-
-/// every asset is traded by some market, so no weight is unconstrained.
-pub fn assert_assets_used(asset_count: u32, markets: Span<Market>) {
-    let mut asset: u32 = 0;
-    while asset != asset_count {
-        let mut used = false;
-        for market in markets {
-            if (*market).base == asset || (*market).quote == asset {
-                used = true;
-            }
-        }
-        assert(used, 'EX_ASSET_UNUSED');
-        asset += 1;
-    }
-}
-
 /// binds every objective weight to a direct asset/usdc observation from the same authenticated
 /// price batch. non-usdc markets retain their independent direct execution midpoints and do not
 /// constrain the objective vector.
@@ -90,31 +59,6 @@ pub fn assert_canonical_weights(
     ref data: Span<felt252>, assets: Span<Asset>, markets: Span<Market>, numeraire_id: felt252,
 ) {
     let count = assets.len();
-    let mut numerators: Array<u128> = array![];
-    let mut denominators: Array<u128> = array![];
-    let mut roots: Array<u32> = array![];
-    let mut depths: Array<u32> = array![];
-    let mut parents: Array<u32> = array![];
-    let mut maxima: Array<u32> = array![];
-    for _ in 0..count {
-        let numerator = next_u128(ref data);
-        let denominator = next_u128(ref data);
-        assert(numerator != 0 && numerator <= MAX_REFERENCE_COMPONENT, 'EX_VALUE');
-        assert(denominator != 0 && denominator <= MAX_REFERENCE_COMPONENT, 'EX_VALUE');
-        numerators.append(numerator);
-        denominators.append(denominator);
-        roots.append(next_u32(ref data));
-        depths.append(next_u32(ref data));
-        parents.append(next_u32(ref data));
-        maxima.append(next_u32(ref data));
-    }
-    let numerators = numerators.span();
-    let denominators = denominators.span();
-    let roots = roots.span();
-    let depths = depths.span();
-    let parents = parents.span();
-    let maxima = maxima.span();
-
     let mut numeraire: Option<u32> = Option::None;
     let mut index: u32 = 0;
     while index != count {
@@ -125,37 +69,57 @@ pub fn assert_canonical_weights(
         index += 1;
     }
     let numeraire = numeraire.expect('EX_USDC_MISSING');
+
+    // The numeraire is exactly one. Every other exact rational is supplied compactly and then
+    // checked against the first direct market connecting that asset to the numeraire.
+    let mut numerators: Array<u128> = array![];
+    let mut denominators: Array<u128> = array![];
+    for asset in 0..count {
+        if asset == numeraire {
+            numerators.append(1);
+            denominators.append(1);
+        } else {
+            let numerator = next_u128(ref data);
+            let denominator = next_u128(ref data);
+            assert(numerator != 0 && numerator <= MAX_REFERENCE_COMPONENT, 'EX_VALUE');
+            assert(denominator != 0 && denominator <= MAX_REFERENCE_COMPONENT, 'EX_VALUE');
+            numerators.append(numerator);
+            denominators.append(denominator);
+        }
+    }
+    let numerators = numerators.span();
+    let denominators = denominators.span();
+
+    // At least one exactly maximal component exists because the canonical scale assigns 2^60-1
+    // to every asset whose exact value equals the maximum. Choosing the first such asset removes
+    // the repeated witness index without changing the mathematical certificate.
+    let mut maximum: Option<u32> = Option::None;
+    for asset in 0..count {
+        if maximum.is_none() && (*assets.at(asset)).weight == MAX_WEIGHT_MINUS_ONE {
+            maximum = Option::Some(asset);
+        }
+    }
+    let maximum = maximum.expect('EX_MAX_COMPONENT');
+    let max_numerator: felt252 = (*numerators.at(maximum)).into();
+    let max_denominator: felt252 = (*denominators.at(maximum)).into();
+
     let mut asset: u32 = 0;
     while asset != count {
-        let value_numerator: u256 = (*numerators.at(asset)).into();
-        let value_denominator: u256 = (*denominators.at(asset)).into();
-        let root = *roots.at(asset);
-        let depth = *depths.at(asset);
-        assert(root == numeraire, 'EX_USDC_ROOT');
-        if asset == numeraire {
-            assert(depth == 0, 'EX_ROOT_DEPTH');
-            assert(*numerators.at(asset) == 1 && *denominators.at(asset) == 1, 'EX_USDC_VALUE');
-        } else {
-            assert(depth == 1, 'EX_PARENT_DEPTH');
-            let parent_market = *parents.at(asset);
-            assert(parent_market < markets.len(), 'EX_PARENT_MARKET');
-            let market = *markets.at(parent_market);
-            let asset_is_base = if market.base == asset && market.quote == numeraire {
-                true
-            } else {
-                assert(market.quote == asset && market.base == numeraire, 'EX_PARENT_MARKET');
-                false
-            };
-            let mut earlier: u32 = 0;
-            while earlier != parent_market {
-                let candidate = *markets.at(earlier);
-                assert(
-                    !(candidate.base == asset && candidate.quote == numeraire)
-                        && !(candidate.quote == asset && candidate.base == numeraire),
-                    'EX_PARENT_ORDER',
-                );
-                earlier += 1;
+        let value_numerator: felt252 = (*numerators.at(asset)).into();
+        let value_denominator: felt252 = (*denominators.at(asset)).into();
+        if asset != numeraire {
+            let mut parent: Option<(Market, bool)> = Option::None;
+            for market in markets {
+                let market = *market;
+                if parent.is_none() {
+                    if market.base == asset && market.quote == numeraire {
+                        parent = Option::Some((market, true));
+                    } else if market.quote == asset && market.base == numeraire {
+                        parent = Option::Some((market, false));
+                    }
+                }
             }
+            let (market, asset_is_base) = parent.expect('EX_PARENT_MARKET');
             if asset_is_base {
                 assert(
                     value_numerator
@@ -172,21 +136,24 @@ pub fn assert_canonical_weights(
                 );
             }
         }
-        let maximum = *maxima.at(asset);
-        assert(maximum < count, 'EX_MAX_COMPONENT');
-        assert(*maxima.at(numeraire) == maximum, 'EX_MAX_SHARED');
-        let max_numerator: u256 = (*numerators.at(maximum)).into();
-        let max_denominator: u256 = (*denominators.at(maximum)).into();
-        // value(max) >= value(asset).
-        assert(
-            max_numerator * value_denominator >= value_numerator * max_denominator, 'EX_MAX_VALUE',
+        // Each product is below 2^128, so this field subtraction has its ordinary integer meaning.
+        assert_nonnegative(
+            max_numerator * value_denominator - value_numerator * max_denominator, 'EX_MAX_VALUE',
         );
-        // weight = max(1, floor((2^60 - 1) * n * max_d / (d * max_n))).
+        // Prove `weight = max(1, floor(scaled / divisor))` using bounded inequalities instead of
+        // generic u256 division. All terms are below 2^189, far below the Stark field modulus.
+        let weight = (*assets.at(asset)).weight;
+        assert(weight != 0 && weight <= MAX_WEIGHT_MINUS_ONE, 'EX_WEIGHT');
         let scaled = value_numerator * max_denominator * MAX_WEIGHT_MINUS_ONE.into();
         let divisor = value_denominator * max_numerator;
-        let (quotient, _) = DivRem::div_rem(scaled, divisor.try_into().unwrap());
-        let quotient: u128 = quotient.try_into().expect('EX_WEIGHT');
-        assert((*assets.at(asset)).weight == max(quotient, 1), 'EX_WEIGHT');
+        if weight == 1 {
+            // floor(scaled / divisor) may be zero or one.
+            assert_nonnegative(divisor * 2 - scaled - 1, 'EX_WEIGHT');
+        } else {
+            let weighted_divisor = divisor * weight.into();
+            assert_nonnegative(scaled - weighted_divisor, 'EX_WEIGHT');
+            assert_nonnegative(weighted_divisor + divisor - scaled - 1, 'EX_WEIGHT');
+        }
         asset += 1;
     }
 }

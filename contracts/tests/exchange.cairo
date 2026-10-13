@@ -151,6 +151,30 @@ fn withdrawal_delay_must_outlast_the_transition_close_window() {
     exchange.set_timing(6000, 60000, 60, 1);
 }
 
+#[test]
+#[should_panic(expected: 'DUPLICATE_MARKET')]
+fn config_lock_rejects_duplicate_oriented_asset_pairs() {
+    let exchange_address = address(0x12349);
+    let (deployed, _) = declare("Exchange")
+        .unwrap()
+        .contract_class()
+        .deploy_at(@array![ADMIN], exchange_address)
+        .unwrap();
+    let exchange = IExchangeDispatcher { contract_address: deployed };
+    cheat_caller_address(deployed, address(ADMIN), CheatSpan::TargetCalls(11));
+    exchange.set_settlement_account(address(0x111));
+    exchange.set_proof_programs(address(0x201), address(0x202), address(0x203), 0x204);
+    exchange.set_proof_validation(PROOF_VERSION, OS_CONFIG_HASH, 450);
+    exchange.set_custody(address(0x301), address(0x302), address(0x303));
+    exchange.set_reference_signer(0x401);
+    exchange.set_objective_numeraire(QUOTE);
+    exchange.set_market_registry_hash(1, 2);
+    exchange.set_protocol_fee_recipient(FEE_RECIPIENT);
+    exchange.register_pair(0x501, BASE, QUOTE, 1, 30, 1, 0, 0, 0, 0);
+    exchange.register_pair(0x502, BASE, QUOTE, 2, 20, 1, 0, 0, 0, 0);
+    exchange.lock_config();
+}
+
 #[derive(Drop)]
 struct Setup {
     exchange: IExchangeDispatcher,

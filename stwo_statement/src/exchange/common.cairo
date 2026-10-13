@@ -49,6 +49,13 @@ fn poseidon_prg3(domain: felt252, key: felt252, index: felt252) -> (felt252, fel
     (first, second, third)
 }
 
+/// the first two lanes of `poseidon_prg3`, avoiding a second permutation when lane three is not
+/// consumed. This is an exact prefix of the same stream, not a separate derivation.
+fn poseidon_prg2_head(domain: felt252, key: felt252, index: felt252) -> (felt252, felt252) {
+    let (first, second, _) = hades_permutation(domain, key, index);
+    (first, second)
+}
+
 /// five domain-separated pseudorandom field elements keyed by `seed` and bound to `index`.
 fn poseidon_prg5(
     domain: felt252, seed: felt252, index: felt252,
@@ -62,6 +69,11 @@ fn poseidon_prg5(
 /// proceeds, refund and residual blindings for one order and transition sequence.
 pub fn order_output_blindings(order_secret: felt252, seq: felt252) -> (felt252, felt252, felt252) {
     poseidon_prg3(ORDER_OUTPUT_BLINDING_DOMAIN, order_secret, seq)
+}
+
+/// the proceeds and refund prefix when no residual output exists.
+pub fn order_output_blindings_head(order_secret: felt252, seq: felt252) -> (felt252, felt252) {
+    poseidon_prg2_head(ORDER_OUTPUT_BLINDING_DOMAIN, order_secret, seq)
 }
 
 /// masks for the remaining, reserved and reserved-offset fields of one output.
@@ -80,7 +92,6 @@ pub fn output_padding_record(
 pub fn nullifier_padding_value(padding_seed: felt252, index: felt252) -> felt252 {
     poseidon_prg1(NULLIFIER_PADDING_DOMAIN, padding_seed, index)
 }
-
 /// a poseidon sponge over a felt sequence; `finish` equals `poseidon_hash_span` of everything
 /// absorbed.
 #[derive(Copy, Drop)]
