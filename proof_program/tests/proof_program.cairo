@@ -76,6 +76,13 @@ fn fixture(name: ByteArray) -> (felt252, Span<felt252>) {
 }
 
 #[test]
+#[should_panic(expected: ('EX_BATCH_ORDER',))]
+fn full_path_transition_witness_is_not_reinterpreted_as_a_frontier() {
+    let (_, witness) = fixture("transition_full_paths");
+    deploy_transition().compile_transition_proof(witness);
+}
+
+#[test]
 fn prg_vectors_are_frozen_across_rust_and_cairo() {
     let seed = 0x5a17;
     assert(
@@ -145,6 +152,25 @@ fn a_transition_returns_its_bound_statement() {
                 ),
             ],
         );
+}
+
+#[test]
+#[should_panic(expected: ('EX_BATCH_ORDER',))]
+fn unpacked_frontier_witness_is_not_reinterpreted_as_a_packed_note() {
+    let program = deploy_transition();
+    let (_, witness) = fixture("transition_frontier_unpacked");
+    program.compile_transition_proof(witness);
+}
+
+#[test]
+#[should_panic(expected: ('EX_TYPE',))]
+fn legacy_transition_witnesses_are_not_reinterpreted() {
+    let program = deploy_transition();
+    let (_, mut witness) = fixture("transition_cross");
+    witness.pop_front().unwrap();
+    let mut legacy = array![14];
+    legacy.append_span(witness);
+    program.compile_transition_proof(legacy.span());
 }
 
 #[test]

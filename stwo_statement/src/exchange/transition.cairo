@@ -11,19 +11,21 @@
 //! it stays far below the field size and a remainder is checked with one u128 range check.
 
 use core::cmp::{max, min};
-use core::dict::{Felt252Dict, Felt252DictTrait};
+use core::dict::{Felt252Dict, Felt252DictEntryTrait, Felt252DictTrait};
 use core::ecdsa::check_ecdsa_signature;
 use super::certificate::{Asset, Market, assert_canonical_weights, precision_allowance};
 use super::common::{
-    PairSpongeTrait, RESIDUAL_NOTE_LEAF_DOMAIN, Sponge, SpongeTrait, TWO_POW_120, TWO_POW_128,
-    TWO_POW_160, TWO_POW_48, TWO_POW_64, assert_nonnegative, felt_div_rem, felt_lt, next, next_bool,
-    next_u128, next_u32, next_u64, note_commitment, note_nullifier, nullifier_padding_value,
-    order_output_blindings, order_output_blindings_head, output_aux_blindings, output_note_leaf,
-    output_padding_record, padded_len, poseidon2, read_membership_root, residual_note_commitment,
-    shift_ceil_64, sponge3, sponge4, sponge5, sponge6, sponge7, u128_of,
+    MAX_OUTPUT_SUBTREE_DEPTH, NOTE_ACCUMULATOR_DEPTH, NOTE_ACCUMULATOR_LEAF_DOMAIN, PairSpongeTrait,
+    RESIDUAL_NOTE_LEAF_DOMAIN, Sponge, SpongeTrait, TWO_POW_120, TWO_POW_128, TWO_POW_160,
+    TWO_POW_48, TWO_POW_64, assert_nonnegative, felt_div_rem, felt_lt, next, next_bool, next_u128,
+    next_u32, next_u64, note_accumulator_node, note_commitment, note_nullifier,
+    nullifier_padding_value, order_output_blindings, order_output_blindings_head,
+    output_aux_blindings, output_note_leaf, output_note_node, output_padding_record, padded_len,
+    poseidon2, residual_note_commitment, shift_ceil_64, sponge3, sponge4, sponge5, sponge6, sponge7,
+    u128_of,
 };
 
-pub const STATEMENT_TYPE_TRANSITION: felt252 = 14;
+pub const STATEMENT_TYPE_TRANSITION: felt252 = 18;
 const OWNER_DOMAIN: felt252 = 'zylith_owner_v1';
 const ORDER_ID_DOMAIN: felt252 = 'zylith_order_v2';
 const FUNDING_SET_DOMAIN: felt252 = 'zylith_funding_v1';
@@ -50,6 +52,7 @@ const MIN_OUTPUT_BUCKET: u32 = 16;
 const MIN_NULLIFIER_BUCKET: u32 = 8;
 const MAX_BOOK_ORDERS: u32 = 1024;
 const MAX_ORDER_AMOUNT: u128 = 0x3fffffffffffffffffffffffffff;
+const TWO_POW_110: u128 = MAX_ORDER_AMOUNT + 1;
 const MAX_ORDER_LIFETIME_MS: u64 = 2592000000;
 const TOLERANCE_UNITS: felt252 = 3;
 const REMOVAL_NONE: u32 = 0;
@@ -138,19 +141,24 @@ struct Settled {
 
 pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
     let mut data = data;
-    assert(next(ref data) == STATEMENT_TYPE_TRANSITION, 'EX_TYPE');
-    let chain_context = next(ref data);
-    let seq = next(ref data);
-    let close_time_felt = next(ref data);
-    let fee_recipient = next(ref data);
-    // private: blinds the fee notes' published amounts.
-    let fee_key = next(ref data);
-    // private: derives every harmless padding value inside the proof.
-    let padding_seed = next(ref data);
-    let note_root = next(ref data);
-    let claimed_prior_book_root = next(ref data);
-    // the root is derived independently from the public output records by the settlement contract.
-    let claimed_output_root = next(ref data);
+    // the fee key and padding seed are private. the public output root is recomputed onchain.
+    let [
+        statement_type,
+        chain_context,
+        seq,
+        close_time_felt,
+        fee_recipient,
+        fee_key,
+        padding_seed,
+        note_root,
+        claimed_prior_book_root,
+        claimed_output_root,
+    ] =
+        data
+        .multi_pop_front::<10>()
+        .expect('EX_SHORT')
+        .unbox();
+    assert(statement_type == STATEMENT_TYPE_TRANSITION, 'EX_TYPE');
     let seq_u32 = u128_of(seq, 'EX_SEQ');
     assert(
         chain_context != 0
@@ -244,15 +252,26 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
         };
         let base_id = (*assets.at(base)).id;
         let quote_id = (*assets.at(quote)).id;
-        m0.absorb_pair(pair_id, base_id);
-        m0.absorb_pair(quote_id, midpoint.into());
-        m0.absorb_pair(scale.into(), observed_at);
-        m0.absorb_pair(valid_until, fee_bps.into());
-        m0.absorb_pair(min_order_quote_amount.into(), reference_methodology.into());
-        m0.absorb(derivation_base_market_id);
-        m0.absorb_pair(derivation_quote_market_id, derivation_base_bid.into());
-        m0.absorb_pair(derivation_base_ask.into(), derivation_quote_bid.into());
-        m0.absorb_pair(derivation_quote_ask.into(), max_leg_skew_ms.into());
+        m0
+            .absorb17(
+                pair_id,
+                base_id,
+                quote_id,
+                midpoint.into(),
+                scale.into(),
+                observed_at,
+                valid_until,
+                fee_bps.into(),
+                min_order_quote_amount.into(),
+                reference_methodology.into(),
+                derivation_base_market_id,
+                derivation_quote_market_id,
+                derivation_base_bid.into(),
+                derivation_base_ask.into(),
+                derivation_quote_bid.into(),
+                derivation_quote_ask.into(),
+                max_leg_skew_ms.into(),
+            );
         markets
             .append(
                 Market {
@@ -351,6 +370,7 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
 
     // the stream: groups strictly increasing by (pair, side).
     let mut slots: Array<SlotTotals> = array![];
+    let funding_batches = read_funding_batches(ref data, ctx.note_root);
     let group_count = next_u32(ref data);
     let mut previous_group: Option<(felt252, bool)> = Option::None;
     for _ in 0..group_count {
@@ -402,7 +422,7 @@ pub fn verify_transition_statement(data: Span<felt252>) -> felt252 {
             existing_order(ref data, ref state, ref totals, ctx, slot, outcomes);
         }
         for _ in 0..new_count {
-            new_order(ref data, ref state, ref totals, ctx, slot);
+            new_order(ref data, ref state, ref totals, ctx, slot, funding_batches);
         }
         if totals.reserved != 0 {
             assert(totals.bound_hit, 'EX_BOUND_UNUSED');
@@ -680,11 +700,18 @@ fn absorb_leaf(
     residual_commitment: felt252,
     residual_generation: felt252,
 ) {
-    sponge.absorb_pair(pair_id, p1);
-    sponge.absorb_pair(p2, p3);
-    sponge.absorb_pair(owner_digest, order_id);
-    sponge.absorb_pair(reserved_offset, residual_commitment);
-    sponge.absorb(residual_generation);
+    sponge
+        .absorb9(
+            pair_id,
+            p1,
+            p2,
+            p3,
+            owner_digest,
+            order_id,
+            reserved_offset,
+            residual_commitment,
+            residual_generation,
+        );
 }
 
 /// an existing order's fixed 21-felt record: its book leaf and this transition's witness. the
@@ -782,14 +809,16 @@ fn read_record(ref data: Span<felt252>) -> Record {
 
 #[inline(always)]
 fn assert_unique_order_id(ref state: State, order_id: felt252) {
-    assert(!state.order_ids.get(order_id), 'EX_DUP_ORDER_ID');
-    state.order_ids.insert(order_id, true);
+    let (entry, previous) = state.order_ids.entry(order_id);
+    assert(!previous, 'EX_DUP_ORDER_ID');
+    state.order_ids = entry.finalize(true);
 }
 
 #[inline(always)]
 fn assert_unique_nullifier(ref state: State, nullifier: felt252) {
-    assert(!state.spent_nullifiers.get(nullifier), 'EX_DUP_NULLIFIER');
-    state.spent_nullifiers.insert(nullifier, true);
+    let (entry, previous) = state.spent_nullifiers.entry(nullifier);
+    assert(!previous, 'EX_DUP_NULLIFIER');
+    state.spent_nullifiers = entry.finalize(true);
 }
 
 #[inline(always)]
@@ -884,11 +913,11 @@ fn existing_order(
         assert(reserved != 0, 'EX_OUTCOME_UNRESERVED');
         assert(outcome.seq == reserved_seq, 'EX_OUTCOME_SEQ');
         assert(outcome.pair_id == slot.pair_id && outcome.sell == slot.sell, 'EX_OUTCOME_SLOT');
-        let left = state.outcome_left.get(index.into());
+        let (entry, left) = state.outcome_left.entry(index.into());
         let reserved_u: u128 = reserved.try_into().unwrap();
         let left_u: u128 = left.try_into().unwrap();
         let consumed = min(reserved_u, left_u);
-        state.outcome_left.insert(index.into(), left - consumed.into());
+        state.outcome_left = entry.finalize(left - consumed.into());
         let (quote, has_remainder) = felt_div_rem(
             consumed.into() * outcome.m1.into(), outcome.m1_scale,
         );
@@ -904,9 +933,8 @@ fn existing_order(
             external_out = consumed.into();
             paid
         };
-        state
-            .outcome_user_quote
-            .insert(index.into(), state.outcome_user_quote.get(index.into()) + user_quote);
+        let (entry, previous) = state.outcome_user_quote.entry(index.into());
+        state.outcome_user_quote = entry.finalize(previous + user_quote);
         reserved = 0;
         reserved_offset = 0;
         reserved_seq = 0;
@@ -1095,12 +1123,16 @@ fn existing_order(
 
 #[inline(always)]
 fn new_order(
-    ref data: Span<felt252>, ref state: State, ref totals: SlotTotals, ctx: Context, slot: Slot,
+    ref data: Span<felt252>,
+    ref state: State,
+    ref totals: SlotTotals,
+    ctx: Context,
+    slot: Slot,
+    funding_batches: Span<felt252>,
 ) {
-    let external = next_bool(ref data);
-    let amount = next_u128(ref data);
-    let limit = next_u128(ref data);
-    let expiry = next_u64(ref data);
+    let (amount, limit, expiry, external, note_count, inherited_spend) = read_admission_terms(
+        ref data,
+    );
     assert(amount != 0 && amount <= MAX_ORDER_AMOUNT, 'EX_AMOUNT');
     assert(limit != 0 && limit < TWO_POW_120, 'EX_LIMIT');
     assert(
@@ -1142,31 +1174,33 @@ fn new_order(
 
     // lock the funding notes: each is a member of the note root, its nullifier becomes public.
     assert(ctx.note_root != 0, 'EX_NOTE_ROOT');
-    let note_count = next_u32(ref data);
     assert(note_count != 0 && note_count <= MAX_FUNDING_NOTES, 'EX_FUNDING_COUNT');
     let mut funding_set = SpongeTrait::new();
     funding_set.absorb(FUNDING_SET_DOMAIN);
     let mut funding: u128 = 0;
-    let mut funding_spend_authority: felt252 = 0;
-    for index in 0..note_count {
-        let note_amount = next_u128(ref data);
-        let note_owner = next(ref data);
-        let note_spend_authority = next(ref data);
-        let note_withdraw_authority = next(ref data);
-        let note_blinding = next(ref data);
-        let note_nonce = next(ref data);
-        let note_metadata = next(ref data);
+    let funding_spend_authority = if inherited_spend {
+        spend_authority
+    } else {
+        next(ref data)
+    };
+    for _ in 0..note_count {
+        let (
+            note_amount,
+            note_owner,
+            note_withdraw_authority,
+            note_blinding,
+            note_nonce,
+            note_metadata,
+        ) =
+            read_funding_note(
+            ref data, owner_public_key, withdraw_authority,
+        );
         assert(note_amount != 0 && note_blinding != 0 && note_nonce != 0, 'EX_FUNDING_NOTE');
-        if index == 0 {
-            funding_spend_authority = note_spend_authority;
-        } else {
-            assert(note_spend_authority == funding_spend_authority, 'EX_FUNDING_AUTHORITY');
-        }
         let commitment = note_commitment(
             slot.input_id,
             note_amount.into(),
             note_owner,
-            note_spend_authority,
+            funding_spend_authority,
             note_withdraw_authority,
             note_blinding,
             note_nonce,
@@ -1175,7 +1209,9 @@ fn new_order(
         let leaf = output_note_leaf(
             commitment, slot.input_id, note_amount.into(), note_withdraw_authority,
         );
-        assert(read_membership_root(ref data, leaf) == ctx.note_root, 'EX_FUNDING_MEMBERSHIP');
+        let (batch_root, reference) = read_funding_subtree(ref data, leaf);
+        assert(reference < funding_batches.len(), 'EX_BATCH_REFERENCE');
+        assert(*funding_batches.at(reference) == batch_root, 'EX_BATCH_ROOT');
         let nullifier = note_nullifier(commitment, note_blinding);
         assert_unique_nullifier(ref state, nullifier);
         state.nullifiers = poseidon2(state.nullifiers, nullifier);
@@ -1184,22 +1220,9 @@ fn new_order(
         funding += note_amount;
     }
     assert(funding <= MAX_ORDER_AMOUNT, 'EX_FUNDING_RANGE');
-    let (quote_floor, quote_remainder) = felt_div_rem(
-        amount.into() * limit.into(), slot.market.scale,
+    assert_admission_value(
+        amount, limit, slot.market.scale, slot.market.min_order_quote_amount, funding, slot.sell,
     );
-    let quote_floor: u128 = quote_floor.try_into().expect('EX_ORDER_VALUE');
-    let quote_value = quote_floor + if quote_remainder {
-        1
-    } else {
-        0
-    };
-    assert(quote_value >= slot.market.min_order_quote_amount, 'EX_ORDER_VALUE');
-    let required_funding = if slot.sell {
-        amount
-    } else {
-        quote_value
-    };
-    assert(funding >= required_funding, 'EX_FUNDING_SHORT');
     funding_set.absorb(note_count.into());
     let r = next(ref data);
     let s = next(ref data);
@@ -1213,10 +1236,7 @@ fn new_order(
         'EX_ORDER_AUTHORIZATION',
     );
 
-    let fill = next(ref data);
-    let quote = next(ref data);
-    let clearing_capacity = next(ref data);
-    let external_amount = next(ref data);
+    let (fill, quote, clearing_capacity, external_amount) = read_admission_allocation(ref data);
     let settled = settle(
         ref totals,
         slot,
@@ -1283,9 +1303,192 @@ fn new_order(
     }
 }
 
+/// two native limbs hold amount/limit; the original amount/limit checks constrain their ranges.
+/// expiry occupies 48 bits of a u64, followed by the external, count and inheritance flags.
+#[inline(always)]
+pub fn read_admission_terms(ref data: Span<felt252>) -> (u128, u128, u64, bool, u32, bool) {
+    let packed: u256 = next(ref data).into();
+    let expiry_flags = next_u64(ref data);
+    assert(expiry_flags < 0x20000000000000, 'EX_ADMISSION_ENCODING');
+    let (flags, expiry) = DivRem::div_rem(expiry_flags, TWO_POW_48.try_into().unwrap());
+    let (inherited, remaining_flags) = DivRem::div_rem(flags, 16_u64.try_into().unwrap());
+    let (count, external) = DivRem::div_rem(remaining_flags, 2_u64.try_into().unwrap());
+    (packed.low, packed.high, expiry, external != 0, count.try_into().unwrap(), inherited != 0)
+}
+
+/// fill/capacity remain 110-bit order amounts; quote is u128 and external amount is 110 bits.
+/// the original settle checks still prove the exact values and their economic relationships.
+#[inline(always)]
+pub fn read_admission_allocation(ref data: Span<felt252>) -> (felt252, felt252, felt252, felt252) {
+    let first: u256 = next(ref data).into();
+    let second: u256 = next(ref data).into();
+    assert(first.high < TWO_POW_110, 'EX_ALLOCATION_ENCODING');
+    assert(second.high < TWO_POW_110, 'EX_ALLOCATION_ENCODING');
+    (first.high.into(), first.low.into(), second.low.into(), second.high.into())
+}
+
+/// four u32 positions per native u128. reject unused bits of the final word, and reject
+/// every non-u128 word before extracting positions; nothing is truncated or discarded.
+pub fn read_batch_positions(ref data: Span<felt252>, count: u32) -> Array<u32> {
+    let mut indices = array![];
+    let mut remaining = count;
+    while remaining != 0 {
+        let mut packed = next_u128(ref data);
+        let length = min(remaining, 4);
+        for _ in 0..length {
+            let (rest, position) = DivRem::div_rem(packed, 0x100000000_u128.try_into().unwrap());
+            indices.append(position.try_into().unwrap());
+            packed = rest;
+        }
+        assert(packed == 0, 'EX_BATCH_ENCODING');
+        remaining -= length;
+    }
+    indices
+}
+
+/// authenticate the transaction-wide union of funding batches. every position is a bounded
+/// u32, strictly increasing; paired frontier nodes are consumed together, otherwise exactly
+/// one sibling is required. the fixed 32 levels retain the existing accumulator domains.
+pub fn read_funding_batches(ref data: Span<felt252>, note_root: felt252) -> Span<felt252> {
+    let count = next_u32(ref data);
+    assert(count <= MAX_BOOK_ORDERS * MAX_FUNDING_NOTES, 'EX_BATCH_COUNT');
+    let mut roots = array![];
+    let mut indices = read_batch_positions(ref data, count);
+    let mut nodes: Array<felt252> = array![];
+    let mut previous: u32 = 0;
+    for i in 0..count {
+        let position = *indices.at(i);
+        if i != 0 {
+            assert(position > previous, 'EX_BATCH_ORDER');
+        }
+        previous = position;
+        let root = next(ref data);
+        roots.append(root);
+        nodes.append(poseidon2(NOTE_ACCUMULATOR_LEAF_DOMAIN, root));
+    }
+    let sibling_count = next_u32(ref data);
+    assert(sibling_count <= count * NOTE_ACCUMULATOR_DEPTH, 'EX_BATCH_SIBLINGS');
+    assert(sibling_count <= data.len(), 'EX_SHORT');
+    let mut siblings = data.slice(0, sibling_count);
+    data = data.slice(sibling_count, data.len() - sibling_count);
+    if count == 0 {
+        assert(note_root == 0 && sibling_count == 0, 'EX_FUNDING_MEMBERSHIP');
+        return roots.span();
+    }
+    assert(note_root != 0, 'EX_NOTE_ROOT');
+    for level in 0..NOTE_ACCUMULATOR_DEPTH {
+        let mut parents = array![];
+        let mut parent_nodes = array![];
+        let mut i: u32 = 0;
+        while i < indices.len() {
+            let index = *indices.at(i);
+            let (parent, odd) = DivRem::div_rem(index, 2);
+            let node = *nodes.at(i);
+            let (left, right) = if odd == 0 {
+                if i + 1 < indices.len() && *indices.at(i + 1) == index + 1 {
+                    i += 1;
+                    (node, *nodes.at(i))
+                } else {
+                    (node, next(ref siblings))
+                }
+            } else {
+                (next(ref siblings), node)
+            };
+            parents.append(parent);
+            parent_nodes.append(note_accumulator_node(left, right, level));
+            i += 1;
+        }
+        indices = parents;
+        nodes = parent_nodes;
+    }
+    assert(siblings.len() == 0, 'EX_BATCH_TRAILING');
+    assert(indices.len() == 1 && *indices.at(0) == 0, 'EX_BATCH_POSITION');
+    assert(*nodes.at(0) == note_root, 'EX_FUNDING_MEMBERSHIP');
+    roots.span()
+}
+
+/// depth occupies five low bits, followed by sixteen position bits and a bounded batch reference.
+/// the final zero check rejects positions outside the declared depth, including depth-zero bits.
+pub fn read_funding_subtree(ref data: Span<felt252>, leaf: felt252) -> (felt252, u32) {
+    let packed = next_u64(ref data);
+    let (reference, descriptor) = DivRem::div_rem(packed, 0x200000_u64.try_into().unwrap());
+    assert(reference < (MAX_BOOK_ORDERS * MAX_FUNDING_NOTES).into(), 'EX_BATCH_REFERENCE');
+    let reference: u32 = reference.try_into().unwrap();
+    let descriptor: u32 = descriptor.try_into().unwrap();
+    if descriptor == 0 {
+        return (leaf, reference);
+    }
+    let (mut position, depth) = DivRem::div_rem(descriptor, 32);
+    assert(depth <= MAX_OUTPUT_SUBTREE_DEPTH, 'EX_SUBTREE_DEPTH');
+    let mut node = leaf;
+    for _ in 0..depth {
+        let sibling = next(ref data);
+        let (parent, right) = DivRem::div_rem(position, 2);
+        node =
+            if right == 0 {
+                output_note_node(node, sibling)
+            } else {
+                output_note_node(sibling, node)
+            };
+        position = parent;
+    }
+    assert(position == 0, 'EX_SUBTREE_POSITION');
+    (node, reference)
+}
+
+/// decode the original note fields without changing their commitment or authorization message.
+#[inline(always)]
+pub fn read_funding_note(
+    ref data: Span<felt252>, owner: felt252, withdraw: felt252,
+) -> (u128, felt252, felt252, felt252, felt252, felt252) {
+    let packed: u256 = next(ref data).into();
+    assert(packed.high < 0x40000000000000000, 'EX_FUNDING_ENCODING');
+    let (flags, nonce) = DivRem::div_rem(packed.high, TWO_POW_64.try_into().unwrap());
+    let (explicit_withdraw, explicit_owner) = DivRem::div_rem(flags, 2_u128.try_into().unwrap());
+    let owner = if explicit_owner != 0 {
+        next(ref data)
+    } else {
+        owner
+    };
+    let withdraw = if explicit_withdraw != 0 {
+        next(ref data)
+    } else {
+        withdraw
+    };
+    let [blinding, metadata] = data.multi_pop_front::<2>().expect('EX_SHORT').unbox();
+    (packed.low, owner, withdraw, blinding, nonce.into(), metadata)
+}
+
 #[inline(always)]
 fn read_owner(ref data: Span<felt252>) -> (felt252, felt252, felt252, felt252, felt252) {
-    (next(ref data), next(ref data), next(ref data), next(ref data), next(ref data))
+    let [owner, spend, withdraw, cancel, nonce] = data
+        .multi_pop_front::<5>()
+        .expect('EX_SHORT')
+        .unbox();
+    (owner, spend, withdraw, cancel, nonce)
+}
+
+/// exact admission checks after the caller bounds amount and funding below 2^110, limit and
+/// scale below 2^120, and proves scale and minimum nonzero. no quotient witness is required.
+#[inline(always)]
+pub fn assert_admission_value(
+    amount: u128, limit: u128, scale: u128, minimum: u128, funding: u128, sell: bool,
+) {
+    // products stay below 2^248. the strict inequality is equivalent to ceil(product/scale)
+    // reaching the minimum, including the exact-multiple boundary.
+    let product: felt252 = amount.into() * limit.into();
+    let scale: felt252 = scale.into();
+    let minimum: felt252 = (minimum - 1).into() * scale;
+    assert(felt_lt(minimum, product), 'EX_ORDER_VALUE');
+    if sell {
+        // retain the original rounded quote's u128 bound even though sellers fund in base.
+        assert(!felt_lt(0xffffffffffffffffffffffffffffffff * scale, product), 'EX_ORDER_VALUE');
+        assert(funding >= amount, 'EX_FUNDING_SHORT');
+    } else {
+        // each term is below 2^230, so the bounded difference cannot hide field wraparound.
+        // a funded buy also implies that its rounded quote fits u128.
+        assert_nonnegative(funding.into() * scale - product, 'EX_FUNDING_SHORT');
+    }
 }
 
 /// crosses a participating order at m0, reserves its external residual and settles proceeds,
@@ -1444,7 +1647,7 @@ fn settle(
     }
 }
 
-#[inline(always)]
+#[inline(never)]
 fn ceil_fee(amount: felt252, fee_bps: u128) -> felt252 {
     if amount == 0 || fee_bps == 0 {
         return 0;
@@ -1616,7 +1819,7 @@ fn emit_note_output(
     state.output_count += 1;
 }
 
-#[inline(always)]
+#[inline(never)]
 fn absorb_output_record(
     ref outputs: Sponge,
     leaf: felt252,
@@ -1625,9 +1828,7 @@ fn absorb_output_record(
     enc_reserved: felt252,
     enc_reserved_offset: felt252,
 ) {
-    outputs.absorb_pair(leaf, enc);
-    outputs.absorb_pair(enc_remaining, enc_reserved);
-    outputs.absorb(enc_reserved_offset);
+    outputs.absorb5(leaf, enc, enc_remaining, enc_reserved, enc_reserved_offset);
 }
 
 #[inline(always)]

@@ -46,6 +46,12 @@ for input in "${out_dir}"/*.json; do
     fi
     steps="${steps} (estimate ${max_steps:-n/a})"
   fi
+  if [[ "${result}" == "reject" ]]; then
+    expected_error="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]].get('error', ''))" "${out_dir}/expectations.json" "${name}")"
+    if [[ -n "${expected_error}" && "${output}" != *"${expected_error}"* ]]; then
+      result=wrong-rejection-reason
+    fi
+  fi
   if [[ "${result}" == "${expect}" ]]; then
     printf 'ok    %-28s %-7s %s %s\n' "${name}" "${result}" "${steps}" "${detail}"
   else

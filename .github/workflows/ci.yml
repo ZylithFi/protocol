@@ -29,5 +29,6 @@ jobs:
           (cd contracts && scarb fmt --check && scarb build && snforge test --skip ekubo_fork)
           (cd stwo_statement && scarb fmt --check && scarb build)
           ./scripts/exchange_vectors.sh
+          node --test scripts/benchmark_production_prover.test.mjs
           (cd proof_program && scarb fmt --check && scarb build && snforge test)
           node ops/check-contract-event-privacy.mjs

@@ -147,6 +147,119 @@ pub impl SpongeImpl of SpongeTrait {
         };
         result
     }
+
+    #[inline(always)]
+    fn absorb5(ref self: Sponge, a: felt252, b: felt252, c: felt252, d: felt252, e: felt252) {
+        // absorb exactly five consecutive fields, preserving the generic sponge's padding and
+        // pending state while branching once per record instead of once per absorption call.
+        if self.has_pending {
+            let (s0, s1, s2) = hades_permutation(self.s0 + self.pending, self.s1 + a, self.s2);
+            let (s0, s1, s2) = hades_permutation(s0 + b, s1 + c, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + d, s1 + e, s2);
+            self.s0 = s0;
+            self.s1 = s1;
+            self.s2 = s2;
+            self.has_pending = false;
+        } else {
+            let (s0, s1, s2) = hades_permutation(self.s0 + a, self.s1 + b, self.s2);
+            let (s0, s1, s2) = hades_permutation(s0 + c, s1 + d, s2);
+            self.s0 = s0;
+            self.s1 = s1;
+            self.s2 = s2;
+            self.pending = e;
+            self.has_pending = true;
+        }
+    }
+
+    #[inline(always)]
+    fn absorb9(
+        ref self: Sponge,
+        a: felt252,
+        b: felt252,
+        c: felt252,
+        d: felt252,
+        e: felt252,
+        f: felt252,
+        g: felt252,
+        h: felt252,
+        i: felt252,
+    ) {
+        // the book's fixed nine-field record follows the same sponge stream as scalar absorption.
+        if self.has_pending {
+            let (s0, s1, s2) = hades_permutation(self.s0 + self.pending, self.s1 + a, self.s2);
+            let (s0, s1, s2) = hades_permutation(s0 + b, s1 + c, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + d, s1 + e, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + f, s1 + g, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + h, s1 + i, s2);
+            self.s0 = s0;
+            self.s1 = s1;
+            self.s2 = s2;
+            self.has_pending = false;
+        } else {
+            let (s0, s1, s2) = hades_permutation(self.s0 + a, self.s1 + b, self.s2);
+            let (s0, s1, s2) = hades_permutation(s0 + c, s1 + d, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + e, s1 + f, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + g, s1 + h, s2);
+            self.s0 = s0;
+            self.s1 = s1;
+            self.s2 = s2;
+            self.pending = i;
+            self.has_pending = true;
+        }
+    }
+
+    #[inline(always)]
+    fn absorb17(
+        ref self: Sponge,
+        a: felt252,
+        b: felt252,
+        c: felt252,
+        d: felt252,
+        e: felt252,
+        f: felt252,
+        g: felt252,
+        h: felt252,
+        i: felt252,
+        j: felt252,
+        k: felt252,
+        l: felt252,
+        m: felt252,
+        n: felt252,
+        o: felt252,
+        p: felt252,
+        q: felt252,
+    ) {
+        // the market record is the same ordered sponge stream, with one pending-state branch.
+        if self.has_pending {
+            let (s0, s1, s2) = hades_permutation(self.s0 + self.pending, self.s1 + a, self.s2);
+            let (s0, s1, s2) = hades_permutation(s0 + b, s1 + c, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + d, s1 + e, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + f, s1 + g, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + h, s1 + i, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + j, s1 + k, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + l, s1 + m, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + n, s1 + o, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + p, s1 + q, s2);
+            self.s0 = s0;
+            self.s1 = s1;
+            self.s2 = s2;
+            self.has_pending = false;
+        } else {
+            let (s0, s1, s2) = hades_permutation(self.s0 + a, self.s1 + b, self.s2);
+            let (s0, s1, s2) = hades_permutation(s0 + c, s1 + d, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + e, s1 + f, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + g, s1 + h, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + i, s1 + j, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + k, s1 + l, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + m, s1 + n, s2);
+            let (s0, s1, s2) = hades_permutation(s0 + o, s1 + p, s2);
+            self.s0 = s0;
+            self.s1 = s1;
+            self.s2 = s2;
+            self.pending = q;
+            self.has_pending = true;
+        }
+    }
 }
 
 /// a sponge over an even-length prefix: the hot loops absorb only pairs, so it carries three
@@ -303,6 +416,14 @@ pub fn shift_ceil_64(value: felt252) -> felt252 {
 /// `floor(value / divisor)` and whether it had a remainder, for a nonnegative felt value.
 pub fn felt_div_rem(value: felt252, divisor: u128) -> (felt252, bool) {
     let wide: u256 = value.into();
+    // use the smaller division only after proving that the numerator's high limb is zero.
+    // the wide fallback preserves the complete field-element input range.
+    if wide.high == 0 {
+        let (quotient, remainder) = DivRem::div_rem(
+            wide.low, divisor.try_into().expect('EX_DIVISOR'),
+        );
+        return (quotient.into(), remainder != 0);
+    }
     let (quotient, remainder) = DivRem::div_rem(
         wide, Into::<u128, u256>::into(divisor).try_into().expect('EX_DIVISOR'),
     );
@@ -315,6 +436,7 @@ pub fn felt_lt(left: felt252, right: felt252) -> bool {
     left < right
 }
 
+#[inline(never)]
 pub fn note_commitment(
     asset_id: felt252,
     amount: felt252,
@@ -375,7 +497,7 @@ pub fn output_tree_root(leaves: Span<felt252>) -> felt252 {
     root
 }
 
-fn note_accumulator_node(left: felt252, right: felt252, level: u32) -> felt252 {
+pub fn note_accumulator_node(left: felt252, right: felt252, level: u32) -> felt252 {
     if left == 0 && right == 0 {
         return 0;
     }
@@ -384,6 +506,12 @@ fn note_accumulator_node(left: felt252, right: felt252, level: u32) -> felt252 {
 
 /// reads a note's subtree and accumulator paths and returns the accumulator root they open to.
 pub fn read_membership_root(ref data: Span<felt252>, leaf: felt252) -> felt252 {
+    let batch_root = read_subtree_root(ref data, leaf);
+    read_accumulator_root(ref data, batch_root)
+}
+
+/// reads the private output-subtree path without the batch's accumulator path.
+pub fn read_subtree_root(ref data: Span<felt252>, leaf: felt252) -> felt252 {
     let subtree_depth = next_u32(ref data);
     assert(subtree_depth <= MAX_OUTPUT_SUBTREE_DEPTH, 'EX_SUBTREE_DEPTH');
     let mut node = leaf;
@@ -396,7 +524,12 @@ pub fn read_membership_root(ref data: Span<felt252>, leaf: felt252) -> felt252 {
                 output_note_node(node, sibling)
             };
     }
-    let mut node = poseidon2(NOTE_ACCUMULATOR_LEAF_DOMAIN, node);
+    node
+}
+
+/// authenticates a batch root against the fixed-depth accumulator.
+pub fn read_accumulator_root(ref data: Span<felt252>, batch_root: felt252) -> felt252 {
+    let mut node = poseidon2(NOTE_ACCUMULATOR_LEAF_DOMAIN, batch_root);
     let mut level: u32 = 0;
     while level != NOTE_ACCUMULATOR_DEPTH {
         let sibling = next(ref data);

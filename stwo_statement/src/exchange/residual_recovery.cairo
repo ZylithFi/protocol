@@ -163,10 +163,11 @@ pub fn verify_residual_recovery_statement(data: Span<felt252>) -> felt252 {
     let fee = if gross_output == 0 || fee_bps == 0 {
         0
     } else {
-        let (floor, remainder) = super::common::felt_div_rem(
-            gross_output.into() * fee_bps.into(), FEE_DENOMINATOR,
+        // the output is below 2^120 and the fee rate is at most 100: the product fits u128.
+        let (floor, remainder) = DivRem::div_rem(
+            gross_output * fee_bps, FEE_DENOMINATOR.try_into().unwrap(),
         );
-        floor + remainder.into()
+        Into::<u128, felt252>::into(floor) + (remainder != 0).into()
     };
     let output_amount = next_amount(gross_output.into() - fee, 'RR_OUTPUT');
     assert_exit(input_amount, input_exit_commitment, input_exit_authority);

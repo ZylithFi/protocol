@@ -1,7 +1,7 @@
 //! the global clearing certificate's market-level checks: canonical weights derived from
 //! m0 and the price-grid precision allowance (see `zylith_core::exact_clearing`).
 
-use super::common::{TWO_POW_64, assert_nonnegative, next_u128};
+use super::common::{TWO_POW_64, TWO_POW_64_FELT, assert_nonnegative, felt_div_rem, next_u128};
 
 const MAX_WEIGHT_MINUS_ONE: u128 = 0xfffffffffffffff;
 const MAX_REFERENCE_COMPONENT: u128 = 0xffffffffffffffff;
@@ -42,10 +42,14 @@ pub fn precision_allowance(market: Market, capacity: felt252) -> felt252 {
     }
     let capacity: u256 = capacity.into();
     let spread: u256 = (market.scale * 2 + market.midpoint).into();
-    let denominator: u256 = market.scale.into() * TWO_POW_64.into();
-    let (quotient, remainder) = DivRem::div_rem(capacity * spread, denominator.try_into().unwrap());
-    let quotient: felt252 = quotient.try_into().expect('EX_ALLOWANCE');
-    quotient + (remainder != 0).into()
+    let numerator = capacity * spread;
+    // write numerator = 2^64 * shifted + lower, then shifted = scale * quotient + remainder.
+    // ceil(numerator / (scale * 2^64)) adds one iff either remainder is nonzero.
+    // shifted is below 2^192, so its field encoding is exact even on the wide fallback.
+    let (upper_low, lower) = DivRem::div_rem(numerator.low, TWO_POW_64.try_into().unwrap());
+    let shifted = numerator.high.into() * TWO_POW_64_FELT + upper_low.into();
+    let (quotient, remainder) = felt_div_rem(shifted, market.scale);
+    quotient + (remainder || lower != 0).into()
 }
 
 /// binds every objective weight to a direct asset/usdc observation from the same authenticated
